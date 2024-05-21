@@ -243,6 +243,7 @@ fp_device_finalize (GObject *object)
   g_clear_pointer (&priv->virtual_env, g_free);
   g_clear_pointer (&priv->udev_data.spidev_path, g_free);
   g_clear_pointer (&priv->udev_data.hidraw_path, g_free);
+  g_clear_pointer (&priv->udev_data.misc_path, g_free);
 
   g_clear_fd (&priv->udev_data.spidev_fd, NULL);
   g_clear_fd (&priv->udev_data.hidraw_fd, NULL);
@@ -2004,14 +2005,6 @@ fp_device_clear_storage (FpDevice           *device,
     {
       g_task_return_error (task,
                            fpi_device_error_new (FP_DEVICE_ERROR_BUSY));
-      return;
-    }
-
-  if (!(priv->features & FP_DEVICE_FEATURE_STORAGE))
-    {
-      g_task_return_error (task,
-                           fpi_device_error_new_msg (FP_DEVICE_ERROR_NOT_SUPPORTED,
-                                                     "Device has no storage."));
       return;
     }
 
