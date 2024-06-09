@@ -23,12 +23,16 @@
 
 #include <fcntl.h>
 
+#include <glib-unix.h>
+
 #include "crfpmoc.h"
 
 struct _FpiDeviceCrfpMoc
 {
   FpDevice parent;
   FpiSsm  *task_ssm;
+
+  int      poll_source;
 };
 
 G_DEFINE_TYPE (FpiDeviceCrfpMoc, fpi_device_crfpmoc, FP_TYPE_DEVICE)
@@ -168,6 +172,55 @@ crfpmoc_ec_command (FpiDeviceCrfpMoc *self,
 }
 
 static gboolean
+crfpmoc_read_bytes (gint fd, GIOCondition condition, gpointer user_data)
+{
+  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (user_data);
+  struct crfpmoc_ec_response_get_next_event_v1 buffer = {0};
+  int rv;
+
+  rv = read (fd, &buffer, sizeof (buffer));
+  self->poll_source = 0;
+
+  if (rv == 0)
+    {
+      fpi_ssm_mark_failed (self->task_ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                                     "Timeout waiting for MKBP event"));
+      return G_SOURCE_REMOVE;
+    }
+  else if (rv < 0)
+    {
+      fpi_ssm_mark_failed (self->task_ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                                     "Error polling for MKBP event"));
+      return G_SOURCE_REMOVE;
+    }
+
+  fp_dbg ("MKBP event %d data", buffer.event_type);
+  fpi_ssm_next_state (self->task_ssm);
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+crfpmoc_ec_pollevent (FpiDeviceCrfpMoc *self, unsigned long mask)
+{
+  int fd;
+  int rv;
+
+  fd = fpi_device_get_udev_fd (FP_DEVICE (self), FPI_DEVICE_UDEV_SUBTYPE_MISC);
+
+  rv = ioctl (fd, CRFPMOC_CROS_EC_DEV_IOCEVENTMASK_V2, mask);
+  if (rv < 0)
+    {
+      fpi_ssm_next_state (self->task_ssm);
+      return;
+    }
+
+  self->poll_source = g_unix_fd_add (fd, G_IO_IN, crfpmoc_read_bytes, self);
+}
+
+static gboolean
 crfpmoc_cmd_fp_mode (FpiDeviceCrfpMoc *self, guint32 inmode,
                      guint32 *outmode, GError **error)
 {
@@ -232,6 +285,14 @@ crfpmoc_cmd_fp_stats (FpiDeviceCrfpMoc *self, gint8 *template, GError **error)
 }
 
 static void
+crfpmoc_cmd_wait_event_fingerprint (FpiDeviceCrfpMoc *self)
+{
+  long event_type = CRFPMOC_EC_MKBP_EVENT_FINGERPRINT;
+
+  crfpmoc_ec_pollevent (self, 1 << event_type);
+}
+
+static void
 crfpmoc_task_ssm_done (FpiSsm *ssm, FpDevice *device, GError *error)
 {
   FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
@@ -263,6 +324,10 @@ crfpmoc_cancel (FpDevice *device)
 
   fp_dbg ("Cancel");
 
+  /* Cancel any poll source */
+  g_clear_handle_id (&self->poll_source, g_source_remove);
+
+  /* Issue reset */
   crfpmoc_cmd_fp_mode (self, 0, NULL, NULL);
 }
 
@@ -301,8 +366,9 @@ crfpmoc_enroll_run_state (FpiSsm *ssm, FpDevice *device)
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case ENROLL_SENSOR_ENROLL:
-      if (!crfpmoc_cmd_fp_mode (self, CRFPMOC_FP_MODE_ENROLL_IMAGE
-                                | CRFPMOC_FP_MODE_ENROLL_SESSION,
+      if (!crfpmoc_cmd_fp_mode (self,
+                                CRFPMOC_FP_MODE_ENROLL_IMAGE |
+                                CRFPMOC_FP_MODE_ENROLL_SESSION,
                                 &mode, &error))
         fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
       else
@@ -311,7 +377,7 @@ crfpmoc_enroll_run_state (FpiSsm *ssm, FpDevice *device)
 
     case ENROLL_WAIT_FINGER:
       fpi_device_report_finger_status (device, FP_FINGER_STATUS_NEEDED);
-      fpi_ssm_next_state_delayed (ssm, CRFPMOC_FINGER_SCAN_DELAY);
+      crfpmoc_cmd_wait_event_fingerprint (self);
       break;
 
     case ENROLL_SENSOR_CHECK:
@@ -438,7 +504,7 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
 
     case VERIFY_WAIT_FINGER:
       fpi_device_report_finger_status (device, FP_FINGER_STATUS_NEEDED);
-      fpi_ssm_next_state_delayed (ssm, CRFPMOC_FINGER_SCAN_DELAY);
+      crfpmoc_cmd_wait_event_fingerprint (self);
       break;
 
     case VERIFY_SENSOR_CHECK:
@@ -450,7 +516,22 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
 
       if (mode & CRFPMOC_FP_MODE_MATCH)
         {
-          fpi_ssm_jump_to_state (ssm, VERIFY_WAIT_FINGER);
+          if (mode & CRFPMOC_FP_MODE_MATCH)
+            {
+              fpi_ssm_jump_to_state (ssm, VERIFY_WAIT_FINGER);
+            }
+          else if (mode == 0)
+            {
+              fpi_device_report_finger_status (device, FP_FINGER_STATUS_PRESENT);
+
+              fpi_ssm_next_state (ssm);
+            }
+          else
+            {
+              fpi_device_report_finger_status (device, FP_FINGER_STATUS_PRESENT);
+
+              fpi_ssm_mark_failed (ssm, fpi_device_retry_new_msg (FP_DEVICE_RETRY_GENERAL, "FP mode: (0x%x)", mode));
+            }
         }
       else if (mode == 0)
         {
