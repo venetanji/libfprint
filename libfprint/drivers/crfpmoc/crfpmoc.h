@@ -45,6 +45,7 @@ G_DECLARE_FINAL_TYPE (FpiDeviceCrfpMoc, fpi_device_crfpmoc, FPI, DEVICE_CRFPMOC,
 #define CRFPMOC_EC_CMD_FP_MODE 0x0402
 #define CRFPMOC_EC_CMD_FP_INFO 0x0403
 #define CRFPMOC_EC_CMD_FP_STATS 0x0407
+#define CRFPMOC_EC_CMD_FP_SEED 0x0408
 
 /* Finger enrollment session on-going */
 #define CRFPMOC_FP_MODE_ENROLL_SESSION (1U << 4)
@@ -61,6 +62,72 @@ G_DECLARE_FINAL_TYPE (FpiDeviceCrfpMoc, fpi_device_crfpmoc, FPI, DEVICE_CRFPMOC,
 
 /* New Fingerprint sensor event, the event data is fp_events bitmap. */
 #define CRFPMOC_EC_MKBP_EVENT_FINGERPRINT 5
+
+/* Version of the format of the encrypted templates. */
+#define CRFPMOC_FP_TEMPLATE_FORMAT_VERSION 4
+
+/* Constants for encryption parameters */
+#define CRFPMOC_FP_CONTEXT_NONCE_BYTES 12
+#define CRFPMOC_FP_CONTEXT_USERID_WORDS (32 / sizeof (guint32))
+#define CRFPMOC_FP_CONTEXT_TAG_BYTES 16
+#define CRFPMOC_FP_CONTEXT_ENCRYPTION_SALT_BYTES 16
+#define CRFPMOC_FP_CONTEXT_TPM_BYTES 32
+
+#define CRFPMOC_EC_CMD_FP_FRAME 0x0404
+
+/* constants defining the 'offset' field which also contains the frame index */
+#define CRFPMOC_FP_FRAME_INDEX_SHIFT 28
+/* Frame buffer where the captured image is stored */
+#define CRFPMOC_FP_FRAME_INDEX_RAW_IMAGE 0
+/* First frame buffer holding a template */
+#define CRFPMOC_FP_FRAME_INDEX_TEMPLATE 1
+#define CRFPMOC_FP_FRAME_GET_BUFFER_INDEX(offset) ((offset) >> FP_FRAME_INDEX_SHIFT)
+#define CRFPMOC_FP_FRAME_OFFSET_MASK 0x0FFFFFFF
+
+#define CRFPMOC_EC_CMD_GET_PROTOCOL_INFO 0x000B
+
+#define CRFPMOC_EC_CMD_FP_ENC_STATUS 0x0409
+
+/* FP TPM seed has been set or not */
+#define CRFPMOC_FP_ENC_STATUS_SEED_SET (1U << 0)
+
+
+struct crfpmoc_ec_params_fp_frame
+{
+  /*
+   * The offset contains the template index or FP_FRAME_INDEX_RAW_IMAGE
+   * in the high nibble, and the real offset within the frame in
+   * FP_FRAME_OFFSET_MASK.
+   */
+  guint32 offset;
+  guint32 size;
+} __attribute__((packed));
+
+struct crfpmoc_ec_response_get_protocol_info
+{
+  /* Fields which exist if at least protocol version 3 supported */
+  guint32 protocol_versions;
+  guint16 max_request_packet_size;
+  guint16 max_response_packet_size;
+  guint32 flags;
+} __attribute__((packed));
+
+struct crfpmoc_ec_host_response
+{
+  guint8  struct_version;
+  guint8  checksum;
+  guint16 result;
+  guint16 data_len;
+  guint16 reserved;
+} __attribute__((packed));
+
+struct crfpmoc_ec_response_fp_encryption_status
+{
+  /* Used bits in encryption engine status */
+  guint32 valid_flags;
+  /* Encryption engine status */
+  guint32 status;
+} __attribute__((packed));
 
 struct crfpmoc_ec_params_fp_mode
 {
@@ -85,6 +152,19 @@ struct crfpmoc_ec_response_fp_stats
   guint8 timestamps_invalid;
   gint8  template_matched;
 } __attribute__((packed));
+
+struct crfpmoc_ec_params_fp_seed
+{
+  /*
+   * Version of the structure format (N=3).
+   */
+  guint16 struct_version;
+  /* Reserved bytes, set to 0. */
+  guint16 reserved;
+  /* Seed from the TPM. */
+  guint8  seed[CRFPMOC_FP_CONTEXT_TPM_BYTES];
+} __attribute__((packed));
+
 
 struct crfpmoc_ec_response_fp_info
 {

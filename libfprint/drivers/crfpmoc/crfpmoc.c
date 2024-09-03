@@ -92,22 +92,58 @@ get_print_data_descriptor (FpPrint *print, gint8 template)
 }
 
 static void
-crfpmoc_set_print_data (FpPrint *print, gint8 template)
+crfpmoc_set_print_data (FpPrint *print,
+                        gint8    template,
+                        guint8  *frame,
+                        size_t   frame_size)
 {
   g_autofree gchar *descr = NULL;
   GVariant *print_id_var = NULL;
   GVariant *fpi_data = NULL;
+  GVariant *frame_var = NULL;
+
+  fp_dbg ("Setting print data");
 
   fpi_print_set_type (print, FPI_PRINT_RAW);
-  fpi_print_set_device_stored (print, TRUE);
 
   descr = get_print_data_descriptor (print, template);
   print_id_var = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
                                             descr, strlen (descr),
                                             sizeof (guint8));
 
-  fpi_data = g_variant_new ("(@ay)", print_id_var);
+  frame_var = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
+                                         frame, frame_size,
+                                         sizeof (guint8));
+
+  fpi_data = g_variant_new ("(@ay@ay)", print_id_var, frame_var);
   g_object_set (print, "fpi-data", fpi_data, NULL);
+}
+
+/* required since the downloaded frame data is encrypted and 2 downloads are
+ * not the same so a compare function, that ignores frame_var is required and
+ * only compares on the print_id_var
+ */
+static gboolean
+crfpmoc_print_equal (FpPrint *self, FpPrint *other)
+{
+  g_autoptr(GVariant) data1 = NULL;
+  g_autoptr(GVariant) data2 = NULL;
+  g_autoptr(GVariant) print_id_var1 = NULL;
+  g_autoptr(GVariant) print_id_var2 = NULL;
+
+  g_return_val_if_fail (self != NULL, FALSE);
+  g_return_val_if_fail (other != NULL, FALSE);
+
+  g_object_get (self, "fpi-data", &data1, NULL);
+  g_object_get (other, "fpi-data", &data2, NULL);
+
+  if (!data1 || !data2)
+    return FALSE;
+
+  print_id_var1 = g_variant_get_child_value (data1, 0);
+  print_id_var2 = g_variant_get_child_value (data2, 0);
+
+  return g_variant_equal (print_id_var1, print_id_var2);
 }
 
 static gboolean
@@ -164,7 +200,16 @@ crfpmoc_ec_command (FpiDeviceCrfpMoc *self,
 
   if (r < 0)
     {
-      g_propagate_error (error, fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL, "%s", crfpmoc_strresult (s_cmd->result)));
+      FpDeviceError error_code = FP_DEVICE_ERROR_GENERAL;
+
+      if (s_cmd->result == EC_RES_BUSY)
+        error_code = FP_DEVICE_ERROR_BUSY;
+      if (s_cmd->result == EC_RES_ACCESS_DENIED)
+        error_code = FP_DEVICE_ERROR_NOT_SUPPORTED;
+
+      g_propagate_error (error,
+                         fpi_device_error_new_msg (error_code, "%s",
+                                                   crfpmoc_strresult (s_cmd->result)));
       return FALSE;
     }
 
@@ -209,7 +254,6 @@ crfpmoc_ec_pollevent (FpiDeviceCrfpMoc *self, unsigned long mask)
   int rv;
 
   fd = fpi_device_get_udev_fd (FP_DEVICE (self), FPI_DEVICE_UDEV_SUBTYPE_MISC);
-
   rv = ioctl (fd, CRFPMOC_CROS_EC_DEV_IOCEVENTMASK_V2, mask);
   if (rv < 0)
     {
@@ -235,6 +279,33 @@ crfpmoc_cmd_fp_mode (FpiDeviceCrfpMoc *self, guint32 inmode,
   fp_dbg ("FP mode: (0x%x)", r.mode);
   if (outmode != NULL)
     *outmode = r.mode;
+
+  return TRUE;
+}
+
+static gboolean
+crfpmoc_cmd_fp_seed (FpiDeviceCrfpMoc *self,
+                     const char       *seed,
+                     GError          **error)
+{
+  struct crfpmoc_ec_params_fp_seed p = {0};
+
+  fp_dbg ("Setting seed '%s'", seed);
+
+  if (!seed || strlen (seed) != CRFPMOC_FP_CONTEXT_TPM_BYTES)
+    {
+      g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
+                   "Seed length should be %d", CRFPMOC_FP_CONTEXT_TPM_BYTES);
+      return FALSE;
+    }
+
+  p.struct_version = CRFPMOC_FP_TEMPLATE_FORMAT_VERSION;
+  memset (p.seed, 0, CRFPMOC_FP_CONTEXT_TPM_BYTES);
+  memcpy (p.seed, seed, CRFPMOC_FP_CONTEXT_TPM_BYTES);
+
+  if (!crfpmoc_ec_command (self, CRFPMOC_EC_CMD_FP_SEED, 0,
+                           &p, sizeof (p), NULL, 0, error))
+    return FALSE;
 
   return TRUE;
 }
@@ -284,6 +355,164 @@ crfpmoc_cmd_fp_stats (FpiDeviceCrfpMoc *self, gint8 *template, GError **error)
   return TRUE;
 }
 
+static gboolean
+crfpmoc_cmd_fp_enc_status (FpiDeviceCrfpMoc *self, guint32 *status, GError **error)
+{
+  struct crfpmoc_ec_response_fp_encryption_status resp = {0};
+
+  g_return_val_if_fail (status != NULL, FALSE);
+
+  if (!crfpmoc_ec_command (self, CRFPMOC_EC_CMD_FP_ENC_STATUS, 0,
+                           NULL, 0, &resp, sizeof (resp), error))
+    return FALSE;
+
+  fp_dbg ("FPMCU encryption status: %d", resp.status);
+  fp_dbg ("Valid flags: %d", resp.valid_flags);
+
+  if (resp.status == CRFPMOC_FP_ENC_STATUS_SEED_SET)
+    fp_dbg ("Seed is already set");
+
+  *status = resp.status;
+
+  return TRUE;
+}
+
+static gboolean
+crfpmoc_cmd_fp_ensure_seed (FpiDeviceCrfpMoc *self, const char * seed, GError **error)
+{
+  guint32 status;
+
+  fp_dbg ("Checking if seed is set");
+  if (!crfpmoc_cmd_fp_enc_status (self, &status, error))
+    return FALSE;
+
+  fp_dbg ("FPMCU encryption status: %d", status);
+
+  /* It's unclear know why the encryption status is 5 after using verify.
+   * Since it should be 1. It also returns to 1 after using enroll
+   * we're going to assume that 5 means that the seed is set,
+   * since setting the seed twice locks the device
+   */
+  if (status == 0)
+    {
+      fp_dbg ("Seed is not set, setting seed");
+      if (!crfpmoc_cmd_fp_seed (self, seed, error))
+        return FALSE;
+    }
+
+  return TRUE;
+}
+
+static gboolean
+crfpmoc_ec_max_insize (FpiDeviceCrfpMoc *self, guint32 *max_insize, GError **error)
+{
+  struct crfpmoc_ec_response_get_protocol_info protocol_info = {0};
+
+  if (!crfpmoc_ec_command (self, CRFPMOC_EC_CMD_GET_PROTOCOL_INFO, 0,
+                           NULL, 0, &protocol_info, sizeof (protocol_info), error))
+    return FALSE;
+
+  *max_insize = protocol_info.max_response_packet_size - sizeof (struct crfpmoc_ec_host_response);
+
+  return TRUE;
+}
+
+static gboolean
+crfpmoc_fp_download_frame (FpiDeviceCrfpMoc                   *self,
+                           struct crfpmoc_ec_response_fp_info *info,
+                           gint                                index,
+                           guint8                            **out_buffer,
+                           GError                            **error)
+{
+  struct crfpmoc_ec_params_fp_frame p = {0};
+  gsize stride, size;
+  g_autofree guint8 *buffer = NULL;
+  guint8 *ptr;
+  gint cmdver = 1;
+  gsize rsize = sizeof (*info);
+  const gint max_attempts = 3;
+  gint num_attempts;
+  guint32 ec_max_insize;
+  gint template_idx = index + CRFPMOC_FP_FRAME_INDEX_TEMPLATE;
+
+  *out_buffer = NULL;
+
+  if (!crfpmoc_ec_max_insize (self, &ec_max_insize, error))
+    return FALSE;
+
+  usleep (10000);
+
+  if (!crfpmoc_ec_command (self, CRFPMOC_EC_CMD_FP_INFO, cmdver,
+                           NULL, 0, info, rsize, error))
+    return FALSE;
+
+  size = info->template_size;
+  g_assert (size != 0);
+
+  buffer = g_malloc0 (size);
+  ptr = buffer;
+  p.offset = template_idx << CRFPMOC_FP_FRAME_INDEX_SHIFT;
+
+  while (size > 0)
+    {
+      stride = MIN (ec_max_insize, size);
+      p.size = stride;
+      num_attempts = 0;
+
+      while (num_attempts < max_attempts)
+        {
+          g_autoptr(GError) local_error = NULL;
+
+          num_attempts++;
+          fp_dbg ("crfpmoc_fp_download_template [%d]: read %zd bytes at %lu, "
+                  "off 0x%04x", num_attempts, stride, ptr - buffer, p.offset);
+
+          if (crfpmoc_ec_command (self, CRFPMOC_EC_CMD_FP_FRAME, 0,
+                                  &p, sizeof (p),
+                                  ptr, stride,
+                                  &local_error))
+            {
+              fp_dbg ("crfpmoc_fp_download_template: frame done");
+              break;
+            }
+
+          if (g_error_matches (local_error, FP_DEVICE_ERROR,
+                               FP_DEVICE_ERROR_BUSY))
+            {
+              fp_dbg ("crfpmoc_fp_download_template: retry frame");
+            }
+          else if (g_error_matches (local_error, FP_DEVICE_ERROR,
+                                    FP_DEVICE_ERROR_NOT_SUPPORTED))
+            {
+              fp_dbg ("Access denied, stopping retrying");
+              g_propagate_error (error, g_steal_pointer (&local_error));
+              return FALSE;
+            }
+
+          fp_dbg ("Failed to download template chunk at offset %u, "
+                  "attempt %d of %d: %s",
+                  p.offset, num_attempts, max_attempts,
+                  local_error->message);
+
+          if (num_attempts >= max_attempts)
+            {
+              g_propagate_error (error, g_steal_pointer (&local_error));
+              return FALSE;
+            }
+
+          usleep (100000);
+        }
+
+      p.offset += stride;
+      size -= stride;
+      ptr += stride;
+    }
+
+  *out_buffer = g_steal_pointer (&buffer);
+  return TRUE;
+}
+
+
 static void
 crfpmoc_cmd_wait_event_fingerprint (FpiDeviceCrfpMoc *self)
 {
@@ -313,6 +542,14 @@ crfpmoc_open (FpDevice *device)
 
   device_path = fpi_device_get_udev_data (device, FPI_DEVICE_UDEV_SUBTYPE_MISC);
   fp_dbg ("Opening device %s", device_path);
+
+  if (!crfpmoc_cmd_fp_ensure_seed (FPI_DEVICE_CRFPMOC (device),
+                                   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &error))
+    {
+      g_set_error (&error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to ensure seed");
+      fpi_device_open_complete (device, g_steal_pointer (&error));
+      return;
+    }
 
   fpi_device_open_complete (device, NULL);
 }
@@ -360,8 +597,10 @@ crfpmoc_enroll_run_state (FpiSsm *ssm, FpDevice *device)
   FpPrint *print = NULL;
   EnrollData *enroll_data = fpi_ssm_get_data (ssm);
   g_autofree gchar *user_id = NULL;
-  guint32 mode;
+  g_autofree guint8 *frame = NULL;
   guint16 enrolled_templates = 0;
+  guint32 mode;
+  struct crfpmoc_ec_response_fp_info info;
 
   switch (fpi_ssm_get_cur_state (ssm))
     {
@@ -373,6 +612,7 @@ crfpmoc_enroll_run_state (FpiSsm *ssm, FpDevice *device)
         fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
       else
         fpi_ssm_next_state (ssm);
+
       break;
 
     case ENROLL_WAIT_FINGER:
@@ -455,7 +695,15 @@ crfpmoc_enroll_run_state (FpiSsm *ssm, FpDevice *device)
 
       g_object_set (print, "description", user_id, NULL);
 
-      crfpmoc_set_print_data (print, enrolled_templates - 1);
+      if (!crfpmoc_fp_download_frame (self, &info,  enrolled_templates - 1, &frame, &error))
+        {
+          g_warning ("Failed to download frame: %s", error->message);
+          crfpmoc_set_print_data (print, enrolled_templates - 1, NULL, 0);
+        }
+      else
+        {
+          crfpmoc_set_print_data (print, enrolled_templates - 1, frame, info.template_size);
+        }
 
       fp_info ("Enrollment was successful!");
       fpi_device_enroll_complete (device, g_object_ref (print), NULL);
@@ -492,6 +740,7 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
   guint index;
   guint32 mode;
   gint8 template = -1;
+
 
   switch (fpi_ssm_get_cur_state (ssm))
     {
@@ -564,8 +813,20 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
                     }
                   else
                     {
+                      g_autofree guint8 *frame = NULL;
+                      struct crfpmoc_ec_response_fp_info info;
+
                       print = fp_print_new (device);
-                      crfpmoc_set_print_data (print, template);
+
+                      if (!crfpmoc_fp_download_frame (self, &info, template, &frame, &error))
+                        {
+                          fp_warn ("Failed to download frame: %s", error->message);
+                          crfpmoc_set_print_data (print, template, NULL, 0);
+                        }
+                      else
+                        {
+                          crfpmoc_set_print_data (print, template, frame, info.template_size);
+                        }
 
                       fp_info ("Identify successful for template %d", template);
 
@@ -574,7 +835,7 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
                           fpi_device_get_identify_data (device, &prints);
                           found = g_ptr_array_find_with_equal_func (prints,
                                                                     print,
-                                                                    (GEqualFunc) fp_print_equal,
+                                                                    (GEqualFunc) crfpmoc_print_equal,
                                                                     &index);
 
                           if (found)
@@ -587,7 +848,7 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
                           fpi_device_get_verify_data (device, &verify_print);
                           fp_info ("Verifying against: %s", fp_print_get_description (verify_print));
 
-                          if (fp_print_equal (verify_print, print))
+                          if (crfpmoc_print_equal (verify_print, print))
                             fpi_device_verify_report (device, FPI_MATCH_SUCCESS, print, NULL);
                           else
                             fpi_device_verify_report (device, FPI_MATCH_FAIL, print, NULL);
@@ -602,17 +863,32 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
             }
           else
             {
+              g_autofree guint8 *frame = NULL;
+              struct crfpmoc_ec_response_fp_info info;
+
               print = fp_print_new (device);
-              crfpmoc_set_print_data (print, template);
+
+              if (!crfpmoc_fp_download_frame (self, &info, template, &frame, &error))
+                {
+                  fp_warn ("Failed to download frame: %s", error->message);
+                  crfpmoc_set_print_data (print, template, NULL, 0);
+                }
+              else
+                {
+                  crfpmoc_set_print_data (print, template, frame, info.template_size);
+                }
 
               fp_info ("Identify successful for template %d", template);
 
               if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_IDENTIFY)
                 {
                   fpi_device_get_identify_data (device, &prints);
+
+
+
                   found = g_ptr_array_find_with_equal_func (prints,
                                                             print,
-                                                            (GEqualFunc) fp_print_equal,
+                                                            (GEqualFunc) crfpmoc_print_equal,
                                                             &index);
 
                   if (found)
@@ -625,7 +901,7 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
                   fpi_device_get_verify_data (device, &verify_print);
                   fp_info ("Verifying against: %s", fp_print_get_description (verify_print));
 
-                  if (fp_print_equal (verify_print, print))
+                  if (crfpmoc_print_equal (verify_print, print))
                     fpi_device_verify_report (device, FPI_MATCH_SUCCESS, print, NULL);
                   else
                     fpi_device_verify_report (device, FPI_MATCH_FAIL, print, NULL);
