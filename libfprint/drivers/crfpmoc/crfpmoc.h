@@ -300,6 +300,9 @@ struct crfpmoc_cros_ec_command_v2
   _IOWR (CRFPMOC_CROS_EC_DEV_IOC_V2, 0, struct crfpmoc_cros_ec_command_v2)
 #define CRFPMOC_CROS_EC_DEV_IOCEVENTMASK_V2 _IO (CRFPMOC_CROS_EC_DEV_IOC_V2, 2)
 
+/* Parameter length was limited by the LPC interface */
+#define CRFPMOC_EC_PROTO2_MAX_PARAM_SIZE 0xfc
+
 /*
  * Host command response codes (16-bit).
  */

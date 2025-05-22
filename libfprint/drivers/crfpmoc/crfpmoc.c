@@ -257,6 +257,7 @@ crfpmoc_ec_pollevent (FpiDeviceCrfpMoc *self, unsigned long mask)
   rv = ioctl (fd, CRFPMOC_CROS_EC_DEV_IOCEVENTMASK_V2, mask);
   if (rv < 0)
     {
+      fp_dbg ("crfpmoc_ec_pollevent: ioctl failed %d", rv);
       fpi_ssm_next_state (self->task_ssm);
       return;
     }
@@ -424,6 +425,17 @@ crfpmoc_cmd_fp_stats (FpiDeviceCrfpMoc *self, gint8 *template_idx, GError **erro
                            NULL, 0, &r, sizeof (r), error))
     return FALSE;
 
+  fp_dbg ("crfpmoc_cmd_fp_stats: ts %llu us, cap %d us, match %d us (finger %d), overall %d us",
+          (long long unsigned int) ((uint64_t) r.overall_t0.hi << 32 | r.overall_t0.lo),
+          r.capture_time_us,
+          r.matching_time_us,
+          r.template_matched,
+          r.overall_time_us);
+
+  fp_dbg ("crfpmoc_cmd_fp_stats: invalid (0x%02x) %s",
+          r.timestamps_invalid,
+          r.timestamps_invalid & CRFPMOC_FPSTATS_MATCHING_INV ? "true" : "false");
+
   if (r.timestamps_invalid & CRFPMOC_FPSTATS_MATCHING_INV)
     {
       fp_dbg ("Last matching time: Invalid");
@@ -450,11 +462,11 @@ crfpmoc_cmd_fp_enc_status (FpiDeviceCrfpMoc *self, guint32 *status, GError **err
                            NULL, 0, &resp, sizeof (resp), error))
     return FALSE;
 
-  fp_dbg ("FPMCU encryption status: %d", resp.status);
-  fp_dbg ("Valid flags: %d", resp.valid_flags);
+  fp_dbg ("crfpmoc_cmd_fp_enc_status: FPMCU encryption status: %d", resp.status);
+  fp_dbg ("crfpmoc_cmd_fp_enc_status: valid flags: %d", resp.valid_flags);
 
   if (resp.status == CRFPMOC_FP_ENC_STATUS_SEED_SET)
-    fp_dbg ("Seed is already set");
+    fp_dbg ("crfpmoc_cmd_fp_enc_status: seed is already set");
 
   *status = resp.status;
 
@@ -466,17 +478,22 @@ crfpmoc_cmd_fp_ensure_seed (FpiDeviceCrfpMoc *self, const char * seed, GError **
 {
   guint32 status;
 
-  fp_dbg ("Checking if seed is set");
+  fp_dbg ("crfpmoc_cmd_fp_ensure_seed: Checking if seed is set");
   if (!crfpmoc_cmd_fp_enc_status (self, &status, error))
     return FALSE;
 
-  fp_dbg ("FPMCU encryption status: %d", status);
+  fp_dbg ("crfpmoc_cmd_fp_ensure_seed: FPMCU encryption status: %d", status);
 
   if (status == 0)
     {
-      fp_dbg ("Seed is not set, setting seed");
+      fp_dbg ("crfpmoc_cmd_fp_ensure_seed: seed is not set, setting seed");
+
       if (!crfpmoc_cmd_fp_seed (self, seed, error))
         return FALSE;
+    }
+  else
+    {
+      fp_dbg ("crfpmoc_cmd_fp_ensure_seed: seed is already set");
     }
 
   return TRUE;
@@ -512,6 +529,29 @@ crfpmoc_ec_max_outsize (FpiDeviceCrfpMoc *self, guint16 *max_outsize, GError **e
   return TRUE;
 }
 
+/* Stolen BSD sum algorithm */
+static uint16_t
+crfpmoc_sum (guint16 sum, guint8 * buffer, gsize len)
+{
+  int checksum = sum;             /* The checksum mod 2^16. */
+  int i;
+
+  for (i = 0; i < len; i++)
+    {
+      checksum = (checksum >> 1) + ((checksum & 1) << 15);
+      checksum += buffer[i];
+      checksum &= 0xffff;       /* Keep it within bounds. */
+    }
+  return (guint16) checksum;
+}
+
+/* Download the last loaded template
+ *
+ * Issue the EC_CMD_FP_FRAME command to read the template. This is
+ * done in ec_max_insize chunks. The command will return EC_RES_BUSY
+ * until the last chunk is read at which point it will return
+ * EC_REC_SUCCESS. Any other response is considered an error.
+ */
 static gboolean
 crfpmoc_fp_download_template (FpiDeviceCrfpMoc                   *self,
                               struct crfpmoc_ec_response_fp_info *info,
@@ -529,6 +569,7 @@ crfpmoc_fp_download_template (FpiDeviceCrfpMoc                   *self,
   gint num_attempts;
   guint32 ec_max_insize;
   gint template_idx = index + CRFPMOC_FP_FRAME_INDEX_TEMPLATE;
+  guint16 sum = 0;
 
   *out_buffer = NULL;
 
@@ -540,6 +581,7 @@ crfpmoc_fp_download_template (FpiDeviceCrfpMoc                   *self,
     return FALSE;
 
   size = info->template_size;
+  fp_dbg ("crfpmoc_fp_download_template: template size %zd", size);
   g_assert (size != 0);
 
   buffer = g_malloc0 (size);
@@ -548,7 +590,7 @@ crfpmoc_fp_download_template (FpiDeviceCrfpMoc                   *self,
 
   while (size > 0)
     {
-      stride = MIN (ec_max_insize, size);
+      stride = MIN (CRFPMOC_EC_PROTO2_MAX_PARAM_SIZE, size);
       p.size = stride;
       num_attempts = 0;
 
@@ -594,10 +636,16 @@ crfpmoc_fp_download_template (FpiDeviceCrfpMoc                   *self,
             }
         }
 
+      if (!g_log_writer_default_would_drop (G_LOG_LEVEL_DEBUG, G_LOG_DOMAIN))
+        sum = crfpmoc_sum (sum, ptr, stride);
+
       p.offset += stride;
       size -= stride;
       ptr += stride;
     }
+
+  fp_dbg ("crfpmoc_fp_download_template: done, %lu bytes read, sum %d",
+          ptr - buffer, sum);
 
   *out_buffer = g_steal_pointer (&buffer);
   return TRUE;
@@ -614,8 +662,10 @@ crfpmoc_fp_upload_template (FpiDeviceCrfpMoc *self,
   guint32 tlen;
   gsize struct_size;
   guint32 max_chunk;
+  guint16 sum = 0;
 
-  max_chunk = ec_max_outsize - offsetof (struct crfpmoc_ec_params_fp_template, data) - 4;
+  max_chunk = CRFPMOC_EC_PROTO2_MAX_PARAM_SIZE -
+              offsetof (struct crfpmoc_ec_params_fp_template, data) - 4;
 
   while (template_size > 0)
     {
@@ -634,6 +684,9 @@ crfpmoc_fp_upload_template (FpiDeviceCrfpMoc *self,
 
       memcpy (p->data, template_data + offset, tlen);
 
+      if (!g_log_writer_default_would_drop (G_LOG_LEVEL_DEBUG, G_LOG_DOMAIN))
+        sum = crfpmoc_sum (sum, p->data, tlen);
+
       if (!crfpmoc_ec_command (self, CRFPMOC_EC_CMD_FP_TEMPLATE, 0,
                                p, struct_size, NULL, 0, error))
         {
@@ -644,6 +697,9 @@ crfpmoc_fp_upload_template (FpiDeviceCrfpMoc *self,
 
       offset += tlen;
     }
+
+  fp_dbg ("crfpmoc_fp_upload_template: uploaded %d bytes, sum %d",
+          offset, sum);
 
   return TRUE;
 }
@@ -983,6 +1039,8 @@ handle_verify_upload_template (FpiSsm *ssm)
               fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
               return;
             }
+
+          fp_dbg ("uploaded template %u, %zd bytes", i, template_size);
         }
     }
   else
@@ -1012,6 +1070,8 @@ handle_verify_upload_template (FpiSsm *ssm)
           fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
           return;
         }
+
+      fp_dbg ("uploaded template, %zd bytes", template_size);
     }
 
   fpi_ssm_next_state (ssm);
@@ -1085,6 +1145,7 @@ handle_verify_check (FpiSsm *ssm)
 
   if (!crfpmoc_cmd_fp_stats (self, &template_idx, &error))
     {
+      fp_dbg ("handle_verify_check: no stats");
       fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
       return;
     }
