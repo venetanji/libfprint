@@ -834,14 +834,10 @@ handle_enroll_sensor_check (FpiSsm *ssm)
         }
       else
         {
-          FpPrint *print;
-
-          fpi_device_get_enroll_data (device, &print);
-
-          enroll_data->stage++;
-          fp_info ("Partial capture successful (%d/%d).",
-                   enroll_data->stage, CRFPMOC_NR_ENROLL_STAGES);
-          fpi_device_enroll_progress (device, enroll_data->stage, print, NULL);
+          fpi_device_enroll_progress (device, enroll_data->stage, NULL,
+                                      fpi_device_retry_new_msg (FP_DEVICE_RETRY_GENERAL,
+                                                                "FP mode:  (0x%x)",
+                                                                mode));
 
           fpi_ssm_jump_to_state (ssm, ENROLL_SENSOR_ENROLL);
         }
@@ -1091,6 +1087,7 @@ handle_verify_sensor_match (FpiSsm *ssm)
     fpi_ssm_next_state (ssm);
 }
 
+#ifndef HACK_FINGER
 static void
 handle_verify_wait_finger (FpiSsm *ssm)
 {
@@ -1132,6 +1129,7 @@ handle_verify_sensor_check (FpiSsm *ssm)
                                                           "FP mode: (0x%x)", mode));
     }
 }
+#endif
 
 static void
 handle_verify_check (FpiSsm *ssm)
@@ -1142,6 +1140,16 @@ handle_verify_check (FpiSsm *ssm)
   gint8 template_idx = -1;
   GPtrArray *prints = NULL;
   FpPrint *print = NULL;
+  guint16 enrolled_templates = 0;
+
+  if (!crfpmoc_cmd_fp_info (self, &enrolled_templates, &error))
+    {
+      fp_dbg ("handle_verify_check: no info");
+      fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+      return;
+    }
+
+  fp_dbg ("handle_verify_check: enrolled templates: %d", enrolled_templates);
 
   if (!crfpmoc_cmd_fp_stats (self, &template_idx, &error))
     {
@@ -1225,8 +1233,30 @@ handle_verify_check (FpiSsm *ssm)
 }
 
 static void
+crfpmoc_cmd_wait_for_it (FpiSsm *ssm, FpDevice *device)
+{
+  g_autoptr(GError) error = NULL;
+  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (fpi_ssm_get_device (ssm));
+  guint mode;
+
+  if (!crfpmoc_cmd_fp_mode (self, CRFPMOC_FP_MODE_DONT_CHANGE, &mode, &error))
+    fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+  else if (mode == 0)
+    fpi_ssm_next_state (ssm);
+  else
+    fpi_ssm_jump_to_state_delayed (ssm, fpi_ssm_get_cur_state (ssm), 100);
+}
+
+static void
 crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
 {
+  g_autoptr(GError) error = NULL;
+  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
+
+#ifdef HACK_FINGER
+  guint32 mode;
+#endif
+
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case VERIFY_ENSURE_KEYS:
@@ -1237,16 +1267,40 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
       handle_verify_upload_template (ssm);
       break;
 
+#ifdef HACK_FINGER
+    case VERIFY_FINGER_DOWN:
+      if (!crfpmoc_cmd_fp_mode (self, CRFPMOC_FP_MODE_FINGER_DOWN, &mode, &error))
+        fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+      fpi_ssm_next_state (ssm);
+      break;
+
+    case VERIFY_FINGER_DOWN_WAIT:
+      crfpmoc_cmd_wait_for_it (ssm, device);
+      break;
+#endif
+
     case VERIFY_SENSOR_MATCH:
       handle_verify_sensor_match (ssm);
       break;
 
+    case VERIFY_SENSOR_MATCH_WAIT:
+      crfpmoc_cmd_wait_for_it (ssm, device);
+      break;
+
     case VERIFY_WAIT_FINGER:
+#ifndef HACK_FINGER
       handle_verify_wait_finger (ssm);
+#else
+      fpi_ssm_next_state (ssm);
+#endif
       break;
 
     case VERIFY_SENSOR_CHECK:
+#ifndef HACK_FINGER
       handle_verify_sensor_check (ssm);
+#else
+      fpi_ssm_next_state (ssm);
+#endif
       break;
 
     case VERIFY_CHECK:
@@ -1259,20 +1313,6 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
 }
 
 static void
-crfpmoc_identify_verify (FpDevice *device)
-{
-  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
-
-  fp_dbg ("%s",
-          fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_IDENTIFY ?
-          "Identify" : "Verify");
-
-  g_assert (self->task_ssm == NULL);
-  self->task_ssm = fpi_ssm_new (device, crfpmoc_verify_run_state, VERIFY_STATES);
-  fpi_ssm_start (self->task_ssm, crfpmoc_task_ssm_done);
-}
-
-static void
 crfpmoc_clear_storage_run_state (FpiSsm *ssm, FpDevice *device)
 {
   g_autoptr(GError) error = NULL;
@@ -1282,16 +1322,61 @@ crfpmoc_clear_storage_run_state (FpiSsm *ssm, FpDevice *device)
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case CLEAR_STORAGE_SENSOR_RESET:
+      if (!crfpmoc_cmd_fp_mode (self, 0, &mode, &error))
+        {
+          fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+          break;
+        }
+
       if (!crfpmoc_cmd_fp_mode (self, CRFPMOC_FP_MODE_RESET_SENSOR, &mode, &error))
         {
           fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
           break;
         }
 
-      fpi_device_clear_storage_complete (device, NULL);
+      fpi_ssm_next_state (ssm);
+      break;
+
+    case CLEAR_STORAGE_SENSOR_WAIT:
+      crfpmoc_cmd_wait_for_it (ssm, device);
+      break;
+
+    case CLEAR_STORAGE_SENSOR_DONE:
+      if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_CLEAR_STORAGE)
+        fpi_device_clear_storage_complete (device, NULL);
       fpi_ssm_mark_completed (ssm);
       break;
     }
+}
+
+static void
+crfpmoc_pre_identify_cleanup_done (FpiSsm *ssm, FpDevice *device, GError *error)
+{
+  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
+
+  crfpmoc_task_ssm_done (ssm, device, error);
+
+  if (error)
+    return;
+
+  g_assert (self->task_ssm == NULL);
+  self->task_ssm = fpi_ssm_new (device, crfpmoc_verify_run_state, VERIFY_STATES);
+  fpi_ssm_start (self->task_ssm, crfpmoc_task_ssm_done);
+}
+
+static void
+crfpmoc_identify_verify (FpDevice *device)
+{
+  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
+
+  fp_dbg ("%s",
+          fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_IDENTIFY ?
+          "Identify" : "Verify");
+
+  g_assert (self->task_ssm == NULL);
+  self->task_ssm = fpi_ssm_new (device, crfpmoc_clear_storage_run_state,
+                                CLEAR_STORAGE_STATES);
+  fpi_ssm_start (self->task_ssm, crfpmoc_pre_identify_cleanup_done);
 }
 
 static void

@@ -32,6 +32,12 @@
 
 G_DECLARE_FINAL_TYPE (FpiDeviceCrfpMoc, fpi_device_crfpmoc, FPI, DEVICE_CRFPMOC, FpDevice)
 
+#define HACK_FINGER
+
+#ifndef BIT
+#define BIT(nr) (1UL << (nr))
+#endif
+
 #define CRFPMOC_DRIVER_FULLNAME "ChromeOS Fingerprint Match-on-Chip"
 
 #define CRFPMOC_NR_ENROLL_STAGES 5
@@ -47,18 +53,27 @@ G_DECLARE_FINAL_TYPE (FpiDeviceCrfpMoc, fpi_device_crfpmoc, FPI, DEVICE_CRFPMOC,
 #define CRFPMOC_EC_CMD_FP_STATS 0x0407
 #define CRFPMOC_EC_CMD_FP_SEED 0x0408
 
+/* Put the sensor in its lowest power mode */
+#define CRFPMOC_FP_MODE_DEEPSLEEP BIT (0)
+/* Wait to see a finger on the sensor */
+#define CRFPMOC_FP_MODE_FINGER_DOWN BIT (1)
+/* Poll until the finger has left the sensor */
+#define CRFPMOC_FP_MODE_FINGER_UP BIT (2)
+/* Capture the current finger image */
+#define CRFPMOC_FP_MODE_CAPTURE BIT (3)
 /* Finger enrollment session on-going */
-#define CRFPMOC_FP_MODE_ENROLL_SESSION (1U << 4)
+#define CRFPMOC_FP_MODE_ENROLL_SESSION BIT (4)
 /* Enroll the current finger image */
-#define CRFPMOC_FP_MODE_ENROLL_IMAGE (1U << 5)
+#define CRFPMOC_FP_MODE_ENROLL_IMAGE BIT (5)
 /* Try to match the current finger image */
-#define CRFPMOC_FP_MODE_MATCH (1U << 6)
+#define CRFPMOC_FP_MODE_MATCH BIT (6)
 /* Reset and re-initialize the sensor. */
-#define CRFPMOC_FP_MODE_RESET_SENSOR (1U << 7)
+#define CRFPMOC_FP_MODE_RESET_SENSOR BIT (7)
 /* special value: don't change anything just read back current mode */
-#define CRFPMOC_FP_MODE_DONT_CHANGE (1U << 31)
+#define CRFPMOC_FP_MODE_DONT_CHANGE BIT (31)
 
-#define CRFPMOC_FPSTATS_MATCHING_INV (1U << 1)
+#define CRFPMOC_FPSTATS_CAPTURE_INV BIT (0)
+#define CRFPMOC_FPSTATS_MATCHING_INV BIT (1)
 
 /* New Fingerprint sensor event, the event data is fp_events bitmap. */
 #define CRFPMOC_EC_MKBP_EVENT_FINGERPRINT 5
@@ -98,7 +113,7 @@ G_DECLARE_FINAL_TYPE (FpiDeviceCrfpMoc, fpi_device_crfpmoc, FPI, DEVICE_CRFPMOC,
 #define CRFPMOC_EC_CMD_FP_ENC_STATUS 0x0409
 
 /* FP TPM seed has been set or not */
-#define CRFPMOC_FP_ENC_STATUS_SEED_SET (1U << 0)
+#define CRFPMOC_FP_ENC_STATUS_SEED_SET BIT (0)
 
 
 struct crfpmoc_ec_params_fp_frame
@@ -348,7 +363,12 @@ typedef enum {
 typedef enum {
   VERIFY_ENSURE_KEYS,
   VERIFY_UPLOAD_TEMPLATE,
+#ifdef HACK_FINGER
+  VERIFY_FINGER_DOWN,
+  VERIFY_FINGER_DOWN_WAIT,
+#endif
   VERIFY_SENSOR_MATCH,
+  VERIFY_SENSOR_MATCH_WAIT,
   VERIFY_WAIT_FINGER,
   VERIFY_SENSOR_CHECK,
   VERIFY_CHECK,
@@ -357,5 +377,7 @@ typedef enum {
 
 typedef enum {
   CLEAR_STORAGE_SENSOR_RESET,
+  CLEAR_STORAGE_SENSOR_WAIT,
+  CLEAR_STORAGE_SENSOR_DONE,
   CLEAR_STORAGE_STATES,
 } ClearStorageStates;
