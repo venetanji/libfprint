@@ -34,6 +34,8 @@ struct _FpiDeviceCrfpMoc
   FpiSsm  *task_ssm;
 
   int      poll_source;
+
+  int      emul_fd;
 };
 
 G_DEFINE_TYPE (FpiDeviceCrfpMoc, fpi_device_crfpmoc, FP_TYPE_DEVICE)
@@ -146,6 +148,44 @@ crfpmoc_get_print_data (FpPrint *print,
   return TRUE;
 }
 
+static void
+crfpmoc_umockdev_record (FpiDeviceCrfpMoc *self, int res,
+                         int cmd, void *arg)
+{
+  g_autoptr(GString) buffer = NULL;
+  struct crfpmoc_cros_ec_command_v2 *s_cmd = arg;
+  guchar *ptr = arg;
+  gsize size;
+
+  g_return_if_fail (fpi_device_emulation_mode_enabled (FP_DEVICE (self)));
+
+  if (G_LIKELY (self->emul_fd == -1))
+    return;
+
+  switch (cmd)
+    {
+    case CRFPMOC_CROS_EC_DEV_IOCXCMD_V2:
+      size = (sizeof (*s_cmd) + s_cmd->insize);
+      buffer = g_string_sized_new (size * 2);
+      g_string_append_printf (buffer, "CROS_EC_DEV_IOCXCMD_V2 %u ",
+                              s_cmd->insize);
+      while (size > 0)
+        {
+          g_string_append_printf (buffer, "%02X", *ptr++);
+          size--;
+        }
+
+      g_string_append_c (buffer, '\n');
+
+      if (write (self->emul_fd, buffer->str, buffer->len) != (gssize) buffer->len)
+        fp_dbg ("emulation trace write failed");
+      break;
+
+    default:
+      g_warn_if_reached ();
+    }
+}
+
 static gboolean
 crfpmoc_ec_command (FpiDeviceCrfpMoc *self,
                     int               command,
@@ -157,6 +197,7 @@ crfpmoc_ec_command (FpiDeviceCrfpMoc *self,
                     GError          **error)
 {
   g_autofree struct crfpmoc_cros_ec_command_v2 *s_cmd = NULL;
+  int errsv;
   int fd;
   int r;
 
@@ -177,10 +218,15 @@ crfpmoc_ec_command (FpiDeviceCrfpMoc *self,
 
   fd = fpi_device_get_udev_fd (FP_DEVICE (self), FPI_DEVICE_UDEV_SUBTYPE_MISC);
   r = ioctl (fd, CRFPMOC_CROS_EC_DEV_IOCXCMD_V2, s_cmd);
+  errsv = errno;
+
+  if (fpi_device_emulation_mode_enabled (FP_DEVICE (self)))
+    crfpmoc_umockdev_record (self, r, CRFPMOC_CROS_EC_DEV_IOCXCMD_V2, s_cmd);
+
   if (r < 0)
     {
       fp_warn ("ioctl %d, errno %d (%s), EC result %d (%s)", r,
-               errno, strerror (errno), s_cmd->result,
+               errsv, strerror (errsv), s_cmd->result,
                crfpmoc_strresult (s_cmd->result));
     }
   else
@@ -730,10 +776,29 @@ static void
 crfpmoc_open (FpDevice *device)
 {
   g_autoptr(GError) error = NULL;
+  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
   const char *device_path;
 
   device_path = fpi_device_get_udev_data (device, FPI_DEVICE_UDEV_SUBTYPE_MISC);
   fp_dbg ("Opening device %s", device_path);
+
+  /* For testing we need to create the umockdev trace file ourselves
+   * since there is no record support, while there is playback support.
+   */
+  if (fpi_device_emulation_mode_enabled (device) &&
+      g_getenv ("FPI_CRFPMOC_IOCTL_RECORD"))
+    {
+      g_autofree char *ioctl_file = NULL;
+
+      self->emul_fd = g_file_open_tmp ("crfpmoc-XXXXXX.ioctl", &ioctl_file, &error);
+      if (self->emul_fd < 0)
+        {
+          fpi_device_open_complete (device, g_steal_pointer (&error));
+          return;
+        }
+
+      fp_dbg ("Created temporary ioctl file for recording: %s", ioctl_file);
+    }
 
   fpi_device_open_complete (device, NULL);
 }
@@ -778,11 +843,15 @@ crfpmoc_suspend (FpDevice *device)
 static void
 crfpmoc_close (FpDevice *device)
 {
+  g_autoptr(GError) error = NULL;
+  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
+
   fp_dbg ("Closing device");
 
   crfpmoc_cancel (device);
+  g_clear_fd (&self->emul_fd, &error);
 
-  fpi_device_close_complete (device, NULL);
+  fpi_device_close_complete (device, g_steal_pointer (&error));
 }
 
 static void
@@ -834,6 +903,8 @@ handle_enroll_sensor_check (FpiSsm *ssm)
         }
       else
         {
+          fpi_device_report_finger_status (device, FP_FINGER_STATUS_PRESENT);
+
           fpi_device_enroll_progress (device, enroll_data->stage, NULL,
                                       fpi_device_retry_new_msg (FP_DEVICE_RETRY_GENERAL,
                                                                 "FP mode:  (0x%x)",
@@ -1394,7 +1465,7 @@ crfpmoc_clear_storage (FpDevice *device)
 static void
 fpi_device_crfpmoc_init (FpiDeviceCrfpMoc *self)
 {
-  G_DEBUG_HERE ();
+  self->emul_fd = -1;
 }
 
 static void

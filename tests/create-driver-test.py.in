@@ -146,7 +146,7 @@ def capture_test(cmd, capture_file, prompt, ioctl_file=None):
         capture_process.wait()
         if capture_process.returncode != 0:
             print('Failed to capture fingerprint')
-            if capture_pid:
+            if capture_pid and not misc_device:
                 os.killpg(capture_pid, signal.SIGKILL)
             sys.exit(1)
 
