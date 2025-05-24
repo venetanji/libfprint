@@ -82,6 +82,30 @@ crfpmoc_strresult (int i)
   return crfpmoc_meanings[i];
 }
 
+static const gchar *const crfpmoc_mkbp_event_names[] = {
+  "KEY_MATRIX",
+  "HOST_EVENT",
+  "SENSOR_FIFO",
+  "BUTTON",
+  "SWITCH",
+  "FINGERPRINT",
+  "SYSRQ",
+  "HOST_EVENT64",
+  "CEC_EVENT",
+  "CEC_MESSAGE",
+  "DP_ALT_MODE_ENTERED",
+  "ONLINE_CALIBRATION",
+  "PCHG",
+};
+
+static const gchar *
+crfpmoc_mkbp_event_strresult (int i)
+{
+  if (i < 0 || i >= G_N_ELEMENTS (crfpmoc_mkbp_event_names))
+    return "<unknown>";
+  return crfpmoc_mkbp_event_names[i];
+}
+
 static void
 crfpmoc_set_print_data (FpPrint *print,
                         guint8  *template,
@@ -270,6 +294,7 @@ crfpmoc_read_bytes (gint fd, GIOCondition condition, gpointer user_data)
   int rv;
 
   rv = read (fd, &buffer, sizeof (buffer));
+  fp_dbg ("crfpmoc_read_bytes: read %d bytes", rv);
   self->poll_source = 0;
 
   if (rv == 0)
@@ -287,9 +312,105 @@ crfpmoc_read_bytes (gint fd, GIOCondition condition, gpointer user_data)
       return G_SOURCE_REMOVE;
     }
 
-  fp_dbg ("MKBP event %d data", buffer.event_type);
-  fpi_ssm_next_state (self->task_ssm);
+  if (g_log_writer_default_would_drop (G_LOG_LEVEL_DEBUG, G_LOG_DOMAIN))
+    {
+      fpi_ssm_next_state (self->task_ssm);
+      return G_SOURCE_REMOVE;
+    }
 
+  fp_dbg ("MKBP event %ld (%s) data, more %ld",
+          buffer.event_type & CRFPMOC_EC_MKBP_EVENT_TYPE_MASK,
+          crfpmoc_mkbp_event_strresult (buffer.event_type & CRFPMOC_EC_MKBP_EVENT_TYPE_MASK),
+          buffer.event_type & CRFPMOC_EC_MKBP_HAS_MORE_EVENTS);
+
+  switch (buffer.event_type)
+    {
+    case CRFPMOC_EC_MKBP_EVENT_FINGERPRINT:
+      fp_dbg ("crfpmoc_read_bytes: fingerprint 0x%08x", buffer.data.fp_events);
+      if (buffer.data.fp_events & CRFPMOC_EC_MKBP_FP_ENROLL)
+        {
+          guint error_code = CRFPMOC_EC_MKBP_FP_ERRCODE (buffer.data.fp_events);
+          const gchar *reason = NULL;
+
+          fp_dbg ("  Enroll progress %d", CRFPMOC_EC_MKBP_FP_ENROLL_PROGRESS (buffer.data.fp_events));
+          switch (error_code)
+            {
+            case CRFPMOC_EC_MKBP_FP_ERR_ENROLL_OK:
+              reason = "OK";
+              break;
+
+            case CRFPMOC_EC_MKBP_FP_ERR_ENROLL_LOW_QUALITY:
+              reason = "LOW QUALITY";
+              break;
+
+            case CRFPMOC_EC_MKBP_FP_ERR_ENROLL_IMMOBILE:
+              break;
+
+            case CRFPMOC_EC_MKBP_FP_ERR_ENROLL_LOW_COVERAGE:
+              break;
+
+            case CRFPMOC_EC_MKBP_FP_ERR_ENROLL_INTERNAL:
+              break;
+            }
+          fp_dbg ("    status: %d (%s)", error_code, reason ? reason : "");
+        }
+      if (buffer.data.fp_events & CRFPMOC_EC_MKBP_FP_MATCH)
+        {
+          guint error_code = CRFPMOC_EC_MKBP_FP_ERRCODE (buffer.data.fp_events);
+          guint index = CRFPMOC_EC_MKBP_FP_MATCH_IDX (buffer.data.fp_events);
+          const gchar *reason = NULL;
+
+          fp_dbg ("  Match index %d, ok %s", index, error_code & 1 ? "yes" : "no");
+          switch (error_code)
+            {
+            case CRFPMOC_EC_MKBP_FP_ERR_MATCH_NO:
+              reason = "NO";
+              break;
+
+            case CRFPMOC_EC_MKBP_FP_ERR_MATCH_NO_INTERNAL:
+              reason = "INTERNAL";
+              break;
+
+            case CRFPMOC_EC_MKBP_FP_ERR_MATCH_NO_TEMPLATES:
+              reason = "TEMPLATES";
+              break;
+
+            case CRFPMOC_EC_MKBP_FP_ERR_MATCH_NO_AUTH_FAIL:
+              reason = "AUTH FAIL";
+              break;
+
+            case CRFPMOC_EC_MKBP_FP_ERR_MATCH_NO_LOW_QUALITY:
+              reason = "LOW QUALITY";
+              break;
+
+            case CRFPMOC_EC_MKBP_FP_ERR_MATCH_NO_LOW_COVERAGE:
+              reason = "LOW COVERAGE";
+              break;
+
+            case CRFPMOC_EC_MKBP_FP_ERR_MATCH_YES:
+              reason = "YES";
+              break;
+
+            case CRFPMOC_EC_MKBP_FP_ERR_MATCH_YES_UPDATED:
+              reason = "UPDATED";
+              break;
+
+            case CRFPMOC_EC_MKBP_FP_ERR_MATCH_YES_UPDATE_FAILED:
+              reason = "UPDATE FAILED";
+              break;
+            }
+          fp_dbg ("    status: %d (%s)", error_code, reason ? reason : "");
+        }
+      if (buffer.data.fp_events & CRFPMOC_EC_MKBP_FP_FINGER_DOWN)
+        fp_dbg ("  Finger down");
+      if (buffer.data.fp_events & CRFPMOC_EC_MKBP_FP_FINGER_UP)
+        fp_dbg ("  Finger up");
+      if (buffer.data.fp_events & CRFPMOC_EC_MKBP_FP_IMAGE_READY)
+        fp_dbg ("  Image ready");
+      break;
+    }
+
+  fpi_ssm_next_state (self->task_ssm);
   return G_SOURCE_REMOVE;
 }
 
@@ -309,6 +430,7 @@ crfpmoc_ec_pollevent (FpiDeviceCrfpMoc *self, unsigned long mask)
     }
 
   self->poll_source = g_unix_fd_add (fd, G_IO_IN, crfpmoc_read_bytes, self);
+  fp_dbg ("crfpmoc_ec_pollevent: created poll source %d", self->poll_source);
 }
 
 static gboolean
@@ -446,13 +568,38 @@ crfpmoc_cmd_fp_info (FpiDeviceCrfpMoc *self,
                      GError          **error)
 {
   struct crfpmoc_ec_response_fp_info r = {0};
+  gchar vendor[5];
+  const gchar *model = NULL;
 
   if (!crfpmoc_ec_command (self, CRFPMOC_EC_CMD_FP_INFO, 1,
                            NULL, 0, &r, sizeof (r), error))
     return FALSE;
 
-  fp_dbg ("Fingerprint sensor: vendor %x product %x model %x version %x",
-          r.vendor_id, r.product_id, r.model_id, r.version);
+  vendor[0] = r.vendor_id;
+  vendor[1] = r.vendor_id >> 8;
+  vendor[2] = r.vendor_id >> 16;
+  vendor[3] = r.vendor_id >> 24;
+  vendor[4] = '\0';
+
+  if (strcmp (vendor, "FPC ") == 0)
+    {
+      switch ((r.model_id >> 4) & 0xfff)
+        {
+        case 0x021:
+          model = "FPC1025";
+          break;
+
+        case 0x011:
+          model = "FPC1035";
+          break;
+
+        case 0x140:
+          model = "FPC1145";
+          break;
+        }
+    }
+  fp_dbg ("Fingerprint sensor: vendor %s product %x model %x (%s) version %x",
+          vendor, r.product_id, r.model_id, model ? model : "", r.version);
   fp_dbg ("Image: size %dx%d %d bpp", r.width, r.height, r.bpp);
   fp_dbg ("Templates: version %d size %d count %d/%d dirty bitmap %x",
           r.template_version, r.template_size, r.template_valid,

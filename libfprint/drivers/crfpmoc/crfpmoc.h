@@ -73,9 +73,6 @@ G_DECLARE_FINAL_TYPE (FpiDeviceCrfpMoc, fpi_device_crfpmoc, FPI, DEVICE_CRFPMOC,
 #define CRFPMOC_FPSTATS_CAPTURE_INV BIT (0)
 #define CRFPMOC_FPSTATS_MATCHING_INV BIT (1)
 
-/* New Fingerprint sensor event, the event data is fp_events bitmap. */
-#define CRFPMOC_EC_MKBP_EVENT_FINGERPRINT 5
-
 /* Version of the format of the encrypted templates. */
 #define CRFPMOC_FP_TEMPLATE_FORMAT_VERSION 4
 
@@ -259,6 +256,101 @@ struct crfpmoc_ec_response_motion_sense_fifo_info
   /* Lost events since the last fifo_info, per sensors */
   guint16 lost[0];
 };
+
+#define CRFPMOC_EC_MKBP_HAS_MORE_EVENTS_SHIFT 7
+
+/*
+ * We use the most significant bit of the event type to indicate to the host
+ * that the EC has more MKBP events available to provide.
+ */
+#define CRFPMOC_EC_MKBP_HAS_MORE_EVENTS BIT (CRFPMOC_EC_MKBP_HAS_MORE_EVENTS_SHIFT)
+
+/* The mask to apply to get the raw event type */
+#define CRFPMOC_EC_MKBP_EVENT_TYPE_MASK (BIT (CRFPMOC_EC_MKBP_HAS_MORE_EVENTS_SHIFT) - 1)
+
+enum ec_mkbp_event {
+  /* Keyboard matrix changed. The event data is the new matrix state. */
+  CRFPMOC_EC_MKBP_EVENT_KEY_MATRIX = 0,
+
+  /* New host event. The event data is 4 bytes of host event flags. */
+  CRFPMOC_EC_MKBP_EVENT_HOST_EVENT = 1,
+
+  /* New Sensor FIFO data. The event data is fifo_info structure. */
+  CRFPMOC_EC_MKBP_EVENT_SENSOR_FIFO = 2,
+
+  /* The state of the non-matrixed buttons have changed. */
+  CRFPMOC_EC_MKBP_EVENT_BUTTON = 3,
+
+  /* The state of the switches have changed. */
+  CRFPMOC_EC_MKBP_EVENT_SWITCH = 4,
+
+  /* New Fingerprint sensor event, the event data is fp_events bitmap. */
+  CRFPMOC_EC_MKBP_EVENT_FINGERPRINT = 5,
+
+  /*
+   * Sysrq event: send emulated sysrq. The event data is sysrq,
+   * corresponding to the key to be pressed.
+   */
+  CRFPMOC_EC_MKBP_EVENT_SYSRQ = 6,
+
+  /*
+   * New 64-bit host event.
+   * The event data is 8 bytes of host event flags.
+   */
+  CRFPMOC_EC_MKBP_EVENT_HOST_EVENT64 = 7,
+
+  /* Notify the AP that something happened on CEC */
+  CRFPMOC_EC_MKBP_EVENT_CEC_EVENT = 8,
+
+  /* Send an incoming CEC message to the AP */
+  CRFPMOC_EC_MKBP_EVENT_CEC_MESSAGE = 9,
+
+  /* We have entered DisplayPort Alternate Mode on a Type-C port. */
+  CRFPMOC_EC_MKBP_EVENT_DP_ALT_MODE_ENTERED = 10,
+
+  /* New online calibration values are available. */
+  CRFPMOC_EC_MKBP_EVENT_ONLINE_CALIBRATION = 11,
+
+  /* Peripheral device charger event */
+  CRFPMOC_EC_MKBP_EVENT_PCHG = 12,
+
+  /* Number of MKBP events */
+  CRFPMOC_EC_MKBP_EVENT_COUNT,
+};
+
+/* Fingerprint events in 'fp_events' for CRFPMOC_EC_MKBP_EVENT_FINGERPRINT */
+#define CRFPMOC_EC_MKBP_FP_RAW_EVENT(fp_events) ((fp_events) & 0x00FFFFFF)
+#define CRFPMOC_EC_MKBP_FP_ERRCODE(fp_events) ((fp_events) & 0x0000000F)
+#define CRFPMOC_EC_MKBP_FP_ENROLL_PROGRESS_OFFSET 4
+#define CRFPMOC_EC_MKBP_FP_ENROLL_PROGRESS(fpe) \
+  (((fpe) & 0x00000FF0) >> CRFPMOC_EC_MKBP_FP_ENROLL_PROGRESS_OFFSET)
+#define CRFPMOC_EC_MKBP_FP_MATCH_IDX_OFFSET 12
+#define CRFPMOC_EC_MKBP_FP_MATCH_IDX_MASK 0x0000F000
+#define CRFPMOC_EC_MKBP_FP_MATCH_IDX(fpe) \
+  (((fpe) & CRFPMOC_EC_MKBP_FP_MATCH_IDX_MASK) >> CRFPMOC_EC_MKBP_FP_MATCH_IDX_OFFSET)
+#define CRFPMOC_EC_MKBP_FP_ENROLL BIT (27)
+#define CRFPMOC_EC_MKBP_FP_MATCH BIT (28)
+#define CRFPMOC_EC_MKBP_FP_FINGER_DOWN BIT (29)
+#define CRFPMOC_EC_MKBP_FP_FINGER_UP BIT (30)
+#define CRFPMOC_EC_MKBP_FP_IMAGE_READY BIT (31)
+/* code given by CRFPMOC_EC_MKBP_FP_ERRCODE() when CRFPMOC_EC_MKBP_FP_ENROLL is set */
+#define CRFPMOC_EC_MKBP_FP_ERR_ENROLL_OK 0
+#define CRFPMOC_EC_MKBP_FP_ERR_ENROLL_LOW_QUALITY 1
+#define CRFPMOC_EC_MKBP_FP_ERR_ENROLL_IMMOBILE 2
+#define CRFPMOC_EC_MKBP_FP_ERR_ENROLL_LOW_COVERAGE 3
+#define CRFPMOC_EC_MKBP_FP_ERR_ENROLL_INTERNAL 5
+/* Can be used to detect if image was usable for enrollment or not. */
+#define CRFPMOC_EC_MKBP_FP_ERR_ENROLL_PROBLEM_MASK 1
+/* code given by CRFPMOC_EC_MKBP_FP_ERRCODE() when CRFPMOC_EC_MKBP_FP_MATCH is set */
+#define CRFPMOC_EC_MKBP_FP_ERR_MATCH_NO 0
+#define CRFPMOC_EC_MKBP_FP_ERR_MATCH_NO_INTERNAL 6
+#define CRFPMOC_EC_MKBP_FP_ERR_MATCH_NO_TEMPLATES 7
+#define CRFPMOC_EC_MKBP_FP_ERR_MATCH_NO_AUTH_FAIL 8
+#define CRFPMOC_EC_MKBP_FP_ERR_MATCH_NO_LOW_QUALITY 2
+#define CRFPMOC_EC_MKBP_FP_ERR_MATCH_NO_LOW_COVERAGE 4
+#define CRFPMOC_EC_MKBP_FP_ERR_MATCH_YES 1
+#define CRFPMOC_EC_MKBP_FP_ERR_MATCH_YES_UPDATED 3
+#define CRFPMOC_EC_MKBP_FP_ERR_MATCH_YES_UPDATE_FAILED 5
 
 union __attribute__((packed)) crfpmoc_ec_response_get_next_data_v1
 {
