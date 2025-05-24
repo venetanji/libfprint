@@ -871,7 +871,7 @@ handle_enroll_sensor_enroll (FpiSsm *ssm)
 }
 
 static void
-handle_enroll_wait_finger (FpiSsm *ssm)
+handle_enroll_wait_enroll_complete (FpiSsm *ssm)
 {
   FpDevice *device = fpi_ssm_get_device (ssm);
   FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
@@ -899,7 +899,7 @@ handle_enroll_sensor_check (FpiSsm *ssm)
     {
       if (mode & CRFPMOC_FP_MODE_ENROLL_IMAGE)
         {
-          fpi_ssm_jump_to_state (ssm, ENROLL_WAIT_FINGER);
+          fpi_ssm_jump_to_state (ssm, ENROLL_WAIT_ENROLL_COMPLETE);
         }
       else
         {
@@ -1016,8 +1016,8 @@ crfpmoc_enroll_run_state (FpiSsm *ssm, FpDevice *device)
       handle_enroll_sensor_enroll (ssm);
       break;
 
-    case ENROLL_WAIT_FINGER:
-      handle_enroll_wait_finger (ssm);
+    case ENROLL_WAIT_ENROLL_COMPLETE:
+      handle_enroll_wait_enroll_complete (ssm);
       break;
 
     case ENROLL_SENSOR_CHECK:
@@ -1158,9 +1158,8 @@ handle_verify_sensor_match (FpiSsm *ssm)
     fpi_ssm_next_state (ssm);
 }
 
-#ifndef HACK_FINGER
 static void
-handle_verify_wait_finger (FpiSsm *ssm)
+handle_verify_wait_match_complete (FpiSsm *ssm)
 {
   FpDevice *device = fpi_ssm_get_device (ssm);
   FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
@@ -1186,7 +1185,7 @@ handle_verify_sensor_check (FpiSsm *ssm)
 
   if (mode & CRFPMOC_FP_MODE_MATCH)
     {
-      fpi_ssm_jump_to_state (ssm, VERIFY_WAIT_FINGER);
+      fpi_ssm_jump_to_state (ssm, VERIFY_WAIT_MATCH_COMPLETE);
     }
   else if (mode == 0)
     {
@@ -1200,7 +1199,6 @@ handle_verify_sensor_check (FpiSsm *ssm)
                                                           "FP mode: (0x%x)", mode));
     }
 }
-#endif
 
 static void
 handle_verify_check (FpiSsm *ssm)
@@ -1321,13 +1319,6 @@ crfpmoc_cmd_wait_for_it (FpiSsm *ssm, FpDevice *device)
 static void
 crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
 {
-  g_autoptr(GError) error = NULL;
-  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
-
-#ifdef HACK_FINGER
-  guint32 mode;
-#endif
-
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case VERIFY_ENSURE_KEYS:
@@ -1338,40 +1329,16 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
       handle_verify_upload_template (ssm);
       break;
 
-#ifdef HACK_FINGER
-    case VERIFY_FINGER_DOWN:
-      if (!crfpmoc_cmd_fp_mode (self, CRFPMOC_FP_MODE_FINGER_DOWN, &mode, &error))
-        fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
-      fpi_ssm_next_state (ssm);
-      break;
-
-    case VERIFY_FINGER_DOWN_WAIT:
-      crfpmoc_cmd_wait_for_it (ssm, device);
-      break;
-#endif
-
     case VERIFY_SENSOR_MATCH:
       handle_verify_sensor_match (ssm);
       break;
 
-    case VERIFY_SENSOR_MATCH_WAIT:
-      crfpmoc_cmd_wait_for_it (ssm, device);
-      break;
-
-    case VERIFY_WAIT_FINGER:
-#ifndef HACK_FINGER
-      handle_verify_wait_finger (ssm);
-#else
-      fpi_ssm_next_state (ssm);
-#endif
+    case VERIFY_WAIT_MATCH_COMPLETE:
+      handle_verify_wait_match_complete (ssm);
       break;
 
     case VERIFY_SENSOR_CHECK:
-#ifndef HACK_FINGER
       handle_verify_sensor_check (ssm);
-#else
-      fpi_ssm_next_state (ssm);
-#endif
       break;
 
     case VERIFY_CHECK:
