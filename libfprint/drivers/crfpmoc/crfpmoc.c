@@ -33,13 +33,28 @@ struct _FpiDeviceCrfpMoc
   FpDevice parent;
   FpiSsm  *task_ssm;
 
-  int      poll_source;
-
   int      emul_fd;
 };
 
 G_DEFINE_TYPE (FpiDeviceCrfpMoc, fpi_device_crfpmoc, FP_TYPE_DEVICE)
 
+static void crfpmoc_finger_up_run_state (FpiSsm   *ssm,
+                                         FpDevice *device);
+static void crfpmoc_clear_storage_run_state (FpiSsm   *ssm,
+                                             FpDevice *device);
+
+/* State machine private data. All state machines get this and it is
+ * cleared/freed at the completion of the state machine.
+ */
+typedef struct
+{
+  FpiSsm  *parent_ssm;
+  GSource *timeout;
+  int      timeout_state;
+  int      poll_source;
+} SubSsmData;
+
+/* Data for the enroll state machine */
 typedef struct
 {
   int stage;
@@ -49,6 +64,54 @@ static const FpIdEntry crfpmoc_id_table[] = {
   {.udev_types = FPI_DEVICE_UDEV_SUBTYPE_MISC, .misc_name = "cros_fp"},
   {.udev_types = 0}
 };
+
+/* Clear and free the state machine private data */
+static void
+subssm_data_free (void *arg)
+{
+  SubSsmData *data = arg;
+
+  /* Cancel any poll source */
+  fp_dbg ("crfpmoc_ssm_data_free: remove poll source %d", data->poll_source);
+  g_clear_handle_id (&data->poll_source, g_source_remove);
+
+  /* Cancel any timeout source */
+  g_clear_pointer (&data->timeout, g_source_destroy);
+
+  g_free (data);
+}
+
+/* Wrapper to start a sub-state machine after adding the private data. The data
+ * can be supplied and is required to be crfpmoc_ssm_data or contain it as its
+ * first member.
+ */
+static void
+crfpmoc_ssm_start_subsm (FpiDeviceCrfpMoc *self, FpiSsm *ssm)
+{
+  SubSsmData *data = NULL;
+
+  g_assert (self->task_ssm != NULL);
+
+  data = g_new0 (SubSsmData, 1);
+  data->parent_ssm = ssm;
+
+  fpi_ssm_set_data (ssm, g_steal_pointer (&data), subssm_data_free);
+  fpi_ssm_start_subsm (self->task_ssm, ssm);
+}
+
+/* Wrapper to start a state machine after adding the private data. The data
+ * can be supplied and is required to be crfpmoc_ssm_data or contain it as its
+ * first member.
+ */
+static void
+crfpmoc_ssm_start (FpiSsm                 *ssm,
+                   FpiSsmCompletedCallback cb)
+{
+  SubSsmData *data = g_new0 (SubSsmData, 1);
+
+  fpi_ssm_set_data (ssm, g_steal_pointer (&data), subssm_data_free);
+  fpi_ssm_start (ssm, cb);
+}
 
 static const gchar *const crfpmoc_meanings[] = {
   "SUCCESS",
@@ -172,6 +235,11 @@ crfpmoc_get_print_data (FpPrint *print,
   return TRUE;
 }
 
+/* Self test uses umockdev for replay of a captured sequence. At this
+ * time umockdev supports cros_ec only for replay. We need to create
+ * the sequence. Record all the ioctls for replay in the format
+ * umockdev requires.
+ */
 static void
 crfpmoc_umockdev_record (FpiDeviceCrfpMoc *self, int res,
                          int cmd, void *arg)
@@ -193,10 +261,28 @@ crfpmoc_umockdev_record (FpiDeviceCrfpMoc *self, int res,
       buffer = g_string_sized_new (size * 2);
       g_string_append_printf (buffer, "CROS_EC_DEV_IOCXCMD_V2 %u ",
                               s_cmd->insize);
-      while (size > 0)
+
+      /* Send the command. */
+      while (size > s_cmd->insize)
         {
           g_string_append_printf (buffer, "%02X", *ptr++);
           size--;
+        }
+
+      /* Send the data. If this is a template suppress the actual data for privacy. */
+      if (s_cmd->command == CRFPMOC_EC_CMD_FP_FRAME)
+        {
+          for (gsize i = 0; i < size; i++)
+            g_string_append_printf (buffer, "%02X", (guint8) (i & 0xff));
+          size = 0;
+        }
+      else
+        {
+          while (size > 0)
+            {
+              g_string_append_printf (buffer, "%02X", *ptr++);
+              size--;
+            }
         }
 
       g_string_append_c (buffer, '\n');
@@ -286,27 +372,39 @@ crfpmoc_ec_command (FpiDeviceCrfpMoc *self,
   return TRUE;
 }
 
+/* Completion callback for event reporting. Get the event and decode
+ * for now. The function may be used with timeout support and if so
+ * the timeout needs to be cancelled here. The state machine that
+ * requested the poll is passed as an argument. Use the private data
+ * to see if a timeout is active.
+ */
 static gboolean
 crfpmoc_read_bytes (gint fd, GIOCondition condition, gpointer user_data)
 {
-  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (user_data);
+  FpiSsm *ssm = user_data;
+  SubSsmData *data = fpi_ssm_get_data (ssm);
   struct crfpmoc_ec_response_get_next_event_v1 buffer = {0};
   int rv;
 
+  fp_dbg ("crfpmoc_read_bytes: called");
+
+  /* If there is an active timeout on this state machine remove it */
+  g_clear_pointer (&data->timeout, g_source_destroy);
+
   rv = read (fd, &buffer, sizeof (buffer));
   fp_dbg ("crfpmoc_read_bytes: read %d bytes", rv);
-  self->poll_source = 0;
+  data->poll_source = 0;
 
   if (rv == 0)
     {
-      fpi_ssm_mark_failed (self->task_ssm,
+      fpi_ssm_mark_failed (ssm,
                            fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
                                                      "Timeout waiting for MKBP event"));
       return G_SOURCE_REMOVE;
     }
   else if (rv < 0)
     {
-      fpi_ssm_mark_failed (self->task_ssm,
+      fpi_ssm_mark_failed (ssm,
                            fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
                                                      "Error polling for MKBP event"));
       return G_SOURCE_REMOVE;
@@ -314,7 +412,9 @@ crfpmoc_read_bytes (gint fd, GIOCondition condition, gpointer user_data)
 
   if (g_log_writer_default_would_drop (G_LOG_LEVEL_DEBUG, G_LOG_DOMAIN))
     {
-      fpi_ssm_next_state (self->task_ssm);
+      /* Make sure we do not run in the callback context */
+      fpi_ssm_next_state_delayed (ssm, 1);
+
       return G_SOURCE_REMOVE;
     }
 
@@ -327,6 +427,8 @@ crfpmoc_read_bytes (gint fd, GIOCondition condition, gpointer user_data)
     {
     case CRFPMOC_EC_MKBP_EVENT_FINGERPRINT:
       fp_dbg ("crfpmoc_read_bytes: fingerprint 0x%08x", buffer.data.fp_events);
+
+      /* Enroll mode */
       if (buffer.data.fp_events & CRFPMOC_EC_MKBP_FP_ENROLL)
         {
           guint error_code = CRFPMOC_EC_MKBP_FP_ERRCODE (buffer.data.fp_events);
@@ -354,6 +456,8 @@ crfpmoc_read_bytes (gint fd, GIOCondition condition, gpointer user_data)
             }
           fp_dbg ("    status: %d (%s)", error_code, reason ? reason : "");
         }
+
+      /* Match mode */
       if (buffer.data.fp_events & CRFPMOC_EC_MKBP_FP_MATCH)
         {
           guint error_code = CRFPMOC_EC_MKBP_FP_ERRCODE (buffer.data.fp_events);
@@ -401,36 +505,46 @@ crfpmoc_read_bytes (gint fd, GIOCondition condition, gpointer user_data)
             }
           fp_dbg ("    status: %d (%s)", error_code, reason ? reason : "");
         }
+
+      /* Finger down mode */
       if (buffer.data.fp_events & CRFPMOC_EC_MKBP_FP_FINGER_DOWN)
         fp_dbg ("  Finger down");
+
+      /* Finger up mode */
       if (buffer.data.fp_events & CRFPMOC_EC_MKBP_FP_FINGER_UP)
         fp_dbg ("  Finger up");
+
+      /* ?? */
       if (buffer.data.fp_events & CRFPMOC_EC_MKBP_FP_IMAGE_READY)
         fp_dbg ("  Image ready");
       break;
     }
 
-  fpi_ssm_next_state (self->task_ssm);
+  /* Make sure we do not run in the callback context */
+  fpi_ssm_next_state_delayed (ssm, 1);
+
   return G_SOURCE_REMOVE;
 }
 
 static void
-crfpmoc_ec_pollevent (FpiDeviceCrfpMoc *self, unsigned long mask)
+crfpmoc_ec_pollevent (FpiSsm *ssm, unsigned long mask)
 {
+  SubSsmData *data = fpi_ssm_get_data (ssm);
+  FpDevice *device = fpi_ssm_get_device (ssm);
   int fd;
   int rv;
 
-  fd = fpi_device_get_udev_fd (FP_DEVICE (self), FPI_DEVICE_UDEV_SUBTYPE_MISC);
+  fd = fpi_device_get_udev_fd (device, FPI_DEVICE_UDEV_SUBTYPE_MISC);
   rv = ioctl (fd, CRFPMOC_CROS_EC_DEV_IOCEVENTMASK_V2, mask);
   if (rv < 0)
     {
       fp_dbg ("crfpmoc_ec_pollevent: ioctl failed %d", rv);
-      fpi_ssm_next_state (self->task_ssm);
+      fpi_ssm_next_state (ssm);
       return;
     }
 
-  self->poll_source = g_unix_fd_add (fd, G_IO_IN, crfpmoc_read_bytes, self);
-  fp_dbg ("crfpmoc_ec_pollevent: created poll source %d", self->poll_source);
+  data->poll_source = g_unix_fd_add (fd, G_IO_IN, crfpmoc_read_bytes, ssm);
+  fp_dbg ("crfpmoc_ec_pollevent: created poll source %d", data->poll_source);
 }
 
 static gboolean
@@ -479,6 +593,9 @@ crfpmoc_cmd_fp_seed (FpiDeviceCrfpMoc *self,
   return TRUE;
 }
 
+/* TODO: should this be converted to a sub state machine instead of
+ * the sync completion ?
+ */
 static gboolean
 crfpmoc_fp_set_context (FpiDeviceCrfpMoc *self,
                         const char       *context,
@@ -692,8 +809,27 @@ crfpmoc_cmd_fp_ensure_seed (FpiDeviceCrfpMoc *self, const char * seed, GError **
   return TRUE;
 }
 
+static void
+crfpmoc_show_proto_info (struct crfpmoc_ec_response_get_protocol_info *protocol_info)
+{
+  gsize len = 0;
+  gsize buflen = 256;
+  g_autofree gchar *buffer = g_malloc (buflen);
+
+  for (int i = 0; i < 32; i++)
+    if (protocol_info->protocol_versions & (1ULL << i))
+      len += snprintf (&buffer[len], buflen - len, "%s%d", len == 0 ? "" : ",", i);
+
+  buffer[buflen - 1] = '\0';
+  fp_dbg ("crfpmoc_ec_max_outsize: vers %s, max_out %d, max_in %d, flags 0x%08x",
+          buffer,
+          protocol_info->max_request_packet_size,
+          protocol_info->max_response_packet_size,
+          protocol_info->flags);
+}
+
 static gboolean
-crfpmoc_ec_max_insize (FpiDeviceCrfpMoc *self, guint32 *max_insize, GError **error)
+crfpmoc_ec_max_insize (FpiDeviceCrfpMoc *self, guint16 *max_insize, GError **error)
 {
   struct crfpmoc_ec_response_get_protocol_info protocol_info = {0};
 
@@ -701,6 +837,7 @@ crfpmoc_ec_max_insize (FpiDeviceCrfpMoc *self, guint32 *max_insize, GError **err
                            NULL, 0, &protocol_info, sizeof (protocol_info), error))
     return FALSE;
 
+  crfpmoc_show_proto_info (&protocol_info);
   *max_insize = protocol_info.max_response_packet_size -
                 sizeof (struct crfpmoc_ec_host_response);
 
@@ -716,6 +853,7 @@ crfpmoc_ec_max_outsize (FpiDeviceCrfpMoc *self, guint16 *max_outsize, GError **e
                            NULL, 0, &protocol_info, sizeof (protocol_info), error))
     return FALSE;
 
+  crfpmoc_show_proto_info (&protocol_info);
   *max_outsize = protocol_info.max_request_packet_size -
                  sizeof (struct crfpmoc_ec_host_request);
 
@@ -760,7 +898,7 @@ crfpmoc_fp_download_template (FpiDeviceCrfpMoc                   *self,
   gsize rsize = sizeof (*info);
   const gint max_attempts = 3;
   gint num_attempts;
-  guint32 ec_max_insize;
+  guint16 ec_max_insize;
   gint template_idx = index + CRFPMOC_FP_FRAME_INDEX_TEMPLATE;
   guint16 sum = 0;
 
@@ -899,13 +1037,14 @@ crfpmoc_fp_upload_template (FpiDeviceCrfpMoc *self,
 
 
 static void
-crfpmoc_cmd_wait_event_fingerprint (FpiDeviceCrfpMoc *self)
+crfpmoc_cmd_wait_event_fingerprint (FpiSsm *ssm)
 {
   long event_type = CRFPMOC_EC_MKBP_EVENT_FINGERPRINT;
 
-  crfpmoc_ec_pollevent (self, 1 << event_type);
+  crfpmoc_ec_pollevent (ssm, 1 << event_type);
 }
 
+/* Generic task completion callback to report any errors */
 static void
 crfpmoc_task_ssm_done (FpiSsm *ssm, FpDevice *device, GError *error)
 {
@@ -947,6 +1086,23 @@ crfpmoc_open (FpDevice *device)
       fp_dbg ("Created temporary ioctl file for recording: %s", ioctl_file);
     }
 
+  /* Just for debug messages */
+  guint16 ec_max_outsize;
+  if (!crfpmoc_ec_max_outsize (self, &ec_max_outsize, &error))
+    {
+      fp_err ("Failed to get max outsize: %s", error->message);
+      g_clear_error (&error);
+    }
+
+  /* Just for debug messages */
+  guint16 ec_max_insize;
+  if (!crfpmoc_ec_max_insize (self, &ec_max_insize, &error))
+    {
+      fp_err ("Failed to get max insize: %s", error->message);
+      g_clear_error (&error);
+    }
+
+  fp_dbg ("crfpmoc_open: open_complete");
   fpi_device_open_complete (device, NULL);
 }
 
@@ -968,9 +1124,6 @@ crfpmoc_cancel (FpDevice *device)
   FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
 
   fp_dbg ("Cancel");
-
-  /* Cancel any poll source */
-  g_clear_handle_id (&self->poll_source, g_source_remove);
 
   /* Issue reset */
   crfpmoc_cmd_fp_mode (self, 0, NULL, NULL);
@@ -1021,10 +1174,63 @@ static void
 handle_enroll_wait_enroll_complete (FpiSsm *ssm)
 {
   FpDevice *device = fpi_ssm_get_device (ssm);
-  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
 
-  fpi_device_report_finger_status (device, FP_FINGER_STATUS_NEEDED);
-  crfpmoc_cmd_wait_event_fingerprint (self);
+  /* Sensor awaits the finger down */
+  fpi_device_report_finger_status_changes (device,
+                                           FP_FINGER_STATUS_NEEDED,
+                                           FP_FINGER_STATUS_NONE);
+  crfpmoc_cmd_wait_event_fingerprint (ssm);
+}
+
+static void
+crfpmoc_ssm_timeout (FpDevice *device, gpointer user_data)
+{
+  SubSsmData *data = user_data;
+
+  fp_dbg ("crfpmoc_ssm_timeout: move to state %d",
+          data->timeout_state);
+
+  /* Timeout should be cancelled, make sure cleanup does not see it */
+  data->timeout = NULL;
+
+  /* If there is an active poller on this state machine remove it */
+  fp_dbg ("crfpmoc_ssm_timeout: remove poll source %d", data->poll_source);
+  g_clear_handle_id (&data->poll_source, g_source_remove);
+
+  /* Is it ok to call the state machine from here ? If not make sure we exit first */
+  fpi_ssm_jump_to_state_delayed (data->parent_ssm, data->timeout_state, 1);
+}
+
+static void
+handle_wait_finger_up (FpiSsm *ssm,
+                       int     state,
+                       int     timeout)
+{
+  g_autoptr(GError) error = NULL;
+  FpDevice *device = fpi_ssm_get_device (ssm);
+  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
+  SubSsmData *data = fpi_ssm_get_data (ssm);
+  guint32 mode;
+
+  data->timeout_state = state;
+  data->timeout = fpi_device_add_timeout (device, timeout,
+                                          crfpmoc_ssm_timeout, data, NULL);
+
+  fp_dbg ("handle_wait_finger_up: start, added timeout %p", data->timeout);
+
+  /* Tell the upper layers the used should remove finger. This does
+   * not currently seem to do much. To actually get the upper layers
+   * to prompt the user it seems a retry error needs to be returned
+   * in a report.
+   */
+  fpi_device_report_finger_status_changes (device,
+                                           FP_FINGER_STATUS_NONE,
+                                           FP_FINGER_STATUS_NEEDED);
+
+  if (!crfpmoc_cmd_fp_mode (self, CRFPMOC_FP_MODE_FINGER_UP, &mode, &error))
+    fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+
+  crfpmoc_cmd_wait_event_fingerprint (ssm);
 }
 
 static void
@@ -1050,7 +1256,9 @@ handle_enroll_sensor_check (FpiSsm *ssm)
         }
       else
         {
-          fpi_device_report_finger_status (device, FP_FINGER_STATUS_PRESENT);
+          fpi_device_report_finger_status_changes (device,
+                                                   FP_FINGER_STATUS_PRESENT,
+                                                   FP_FINGER_STATUS_NONE);
 
           fpi_device_enroll_progress (device, enroll_data->stage, NULL,
                                       fpi_device_retry_new_msg (FP_DEVICE_RETRY_GENERAL,
@@ -1062,13 +1270,17 @@ handle_enroll_sensor_check (FpiSsm *ssm)
     }
   else if (mode == 0)
     {
-      fpi_device_report_finger_status (device, FP_FINGER_STATUS_PRESENT);
+      fpi_device_report_finger_status_changes (device,
+                                               FP_FINGER_STATUS_PRESENT,
+                                               FP_FINGER_STATUS_NONE);
 
       fpi_ssm_next_state (ssm);
     }
   else
     {
-      fpi_device_report_finger_status (device, FP_FINGER_STATUS_PRESENT);
+      fpi_device_report_finger_status_changes (device,
+                                               FP_FINGER_STATUS_PRESENT,
+                                               FP_FINGER_STATUS_NONE);
 
       fpi_device_enroll_progress (device, enroll_data->stage, NULL,
                                   fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
@@ -1128,7 +1340,8 @@ handle_enroll_commit (FpiSsm *ssm)
 
   fpi_print_set_type (print, FPI_PRINT_RAW);
   crfpmoc_set_print_data (print, template, info.template_size);
-  fp_info ("Enrollment was successful!");
+
+  fp_info ("handle_enroll_commit: enroll_complete");
   fpi_device_enroll_complete (device, g_object_ref (print), NULL);
 
   fpi_ssm_mark_completed (ssm);
@@ -1153,6 +1366,8 @@ handle_ensure_keys (FpiSsm *ssm)
 static void
 crfpmoc_enroll_run_state (FpiSsm *ssm, FpDevice *device)
 {
+  g_autoptr(GError) error = NULL;
+
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case ENROLL_ENSURE_KEYS:
@@ -1166,6 +1381,18 @@ crfpmoc_enroll_run_state (FpiSsm *ssm, FpDevice *device)
     case ENROLL_WAIT_ENROLL_COMPLETE:
       handle_enroll_wait_enroll_complete (ssm);
       break;
+
+#ifdef WAIT_ON_ENROLL
+    /* During self test recording following an enroll with a verify
+     * without lifting the finger seems to randomly fail. This
+     * solves the issue but leaves the default enroll screen waiting
+     * for the finger up with no user prompt. It will only complete
+     * when the finger is removed. Seems to be a poor user interaction.
+     */
+    case ENROLL_WAIT_FINGER_UP:
+      handle_wait_finger_up (ssm);
+      break;
+#endif
 
     case ENROLL_SENSOR_CHECK:
       handle_enroll_sensor_check (ssm);
@@ -1309,10 +1536,13 @@ static void
 handle_verify_wait_match_complete (FpiSsm *ssm)
 {
   FpDevice *device = fpi_ssm_get_device (ssm);
-  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
 
-  fpi_device_report_finger_status (device, FP_FINGER_STATUS_NEEDED);
-  crfpmoc_cmd_wait_event_fingerprint (self);
+  /* Sensor awaits the finger down */
+  fpi_device_report_finger_status_changes (device,
+                                           FP_FINGER_STATUS_NEEDED,
+                                           FP_FINGER_STATUS_NONE);
+
+  crfpmoc_cmd_wait_event_fingerprint (ssm);
 }
 
 static void
@@ -1336,12 +1566,17 @@ handle_verify_sensor_check (FpiSsm *ssm)
     }
   else if (mode == 0)
     {
-      fpi_device_report_finger_status (device, FP_FINGER_STATUS_PRESENT);
+      fpi_device_report_finger_status_changes (device,
+                                               FP_FINGER_STATUS_PRESENT,
+                                               FP_FINGER_STATUS_NONE);
       fpi_ssm_next_state (ssm);
     }
   else
     {
-      fpi_device_report_finger_status (device, FP_FINGER_STATUS_PRESENT);
+      fpi_device_report_finger_status_changes (device,
+                                               FP_FINGER_STATUS_PRESENT,
+                                               FP_FINGER_STATUS_NONE);
+
       fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
                                                           "FP mode: (0x%x)", mode));
     }
@@ -1412,6 +1647,9 @@ handle_verify_check (FpiSsm *ssm)
             }
           else
             {
+              /* This should not occur as we can only match prints
+               * from the gallery
+               */
               fp_warn ("Template index %d is out of range", template_idx);
               fpi_device_identify_report (device, NULL, print, NULL);
             }
@@ -1441,9 +1679,15 @@ handle_verify_check (FpiSsm *ssm)
     }
 
   if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_IDENTIFY)
-    fpi_device_identify_complete (device, NULL);
+    {
+      fp_dbg ("handle_verify_check: identify_complete");
+      fpi_device_identify_complete (device, NULL);
+    }
   else
-    fpi_device_verify_complete (device, NULL);
+    {
+      fp_dbg ("handle_verify_check: verify_complete");
+      fpi_device_verify_complete (device, NULL);
+    }
 
   fpi_ssm_mark_completed (ssm);
 }
@@ -1464,36 +1708,95 @@ crfpmoc_cmd_wait_for_it (FpiSsm *ssm, FpDevice *device)
 }
 
 static void
+handle_verify_clear_storage (FpiSsm *ssm)
+{
+  FpDevice *device = fpi_ssm_get_device (ssm);
+
+  FpiSsm *sub = fpi_ssm_new (device, crfpmoc_clear_storage_run_state,
+                             CLEAR_STORAGE_STATES);
+
+  crfpmoc_ssm_start_subsm (FPI_DEVICE_CRFPMOC (device), sub);
+}
+
+static void
+handle_verify_finger_up (FpiSsm *ssm)
+{
+  FpDevice *device = fpi_ssm_get_device (ssm);
+
+  FpiSsm *sub = fpi_ssm_new (device, crfpmoc_finger_up_run_state,
+                             FINGER_UP_STATES);
+
+  crfpmoc_ssm_start_subsm (FPI_DEVICE_CRFPMOC (device), sub);
+}
+
+static void
 crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
 {
   switch (fpi_ssm_get_cur_state (ssm))
     {
+    /* Make sure no residual templates are left in the sensor */
+    case VERIFY_CLEAR_STORAGE:
+      handle_verify_clear_storage (ssm);
+      break;
+
+    /* Make sure the finger is actually up */
+    case VERIFY_FINGER_UP:
+      handle_verify_finger_up (ssm);
+      break;
+
+    /* Set the seed and the context */
     case VERIFY_ENSURE_KEYS:
       handle_ensure_keys (ssm);
       break;
 
+    /* Upload the supplied template(s) for match */
     case VERIFY_UPLOAD_TEMPLATE:
       handle_verify_upload_template (ssm);
       break;
 
+    /* Switch to match mode */
     case VERIFY_SENSOR_MATCH:
       handle_verify_sensor_match (ssm);
       break;
 
+    /* Wait for the match to report completion event */
     case VERIFY_WAIT_MATCH_COMPLETE:
       handle_verify_wait_match_complete (ssm);
       break;
 
+    /* Wait for the match mode to indicate complete */
     case VERIFY_SENSOR_CHECK:
       handle_verify_sensor_check (ssm);
       break;
 
+    /* Get the match status and report it */
     case VERIFY_CHECK:
       handle_verify_check (ssm);
       break;
 
     default:
       g_assert_not_reached ();
+    }
+}
+
+static void
+crfpmoc_finger_up_run_state (FpiSsm *ssm, FpDevice *device)
+{
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case FINGER_UP_START:
+      handle_wait_finger_up (ssm, FINGER_UP_TIMEOUT, 5000);
+      break;
+
+    case FINGER_UP_DONE:
+      fpi_ssm_mark_completed (ssm);
+      break;
+
+    /* User has not lifted finger. Send a retry error to prompt them */
+    case FINGER_UP_TIMEOUT:
+      fpi_ssm_mark_failed (ssm,
+                           fpi_device_retry_new (FP_DEVICE_RETRY_REMOVE_FINGER));
+      break;
     }
 }
 
@@ -1528,25 +1831,50 @@ crfpmoc_clear_storage_run_state (FpiSsm *ssm, FpDevice *device)
 
     case CLEAR_STORAGE_SENSOR_DONE:
       if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_CLEAR_STORAGE)
-        fpi_device_clear_storage_complete (device, NULL);
+        {
+          fp_dbg ("crfpmoc_clear_storage_run_state: clear_storage_complete");
+          fpi_device_clear_storage_complete (device, NULL);
+        }
       fpi_ssm_mark_completed (ssm);
       break;
     }
 }
 
 static void
-crfpmoc_pre_identify_cleanup_done (FpiSsm *ssm, FpDevice *device, GError *error)
+crfpmoc_verify_ssm_done (FpiSsm *ssm, FpDevice *device,
+                         GError *error)
 {
+  fp_dbg ("crfpmoc_verify_ssm_done");
   FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
 
-  crfpmoc_task_ssm_done (ssm, device, error);
+  g_assert (!self->task_ssm || self->task_ssm == ssm);
+  self->task_ssm = NULL;
 
+  /* If the state machine failed the report and completion was not
+   * sent. Send it here.
+   */
   if (error)
-    return;
+    {
+      if (error->domain == FP_DEVICE_RETRY)
+        {
+          if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_VERIFY)
+            fpi_device_verify_report (device, FPI_MATCH_ERROR, NULL, g_steal_pointer (&error));
+          else
+            fpi_device_identify_report (device, NULL, NULL, g_steal_pointer (&error));
+        }
 
-  g_assert (self->task_ssm == NULL);
-  self->task_ssm = fpi_ssm_new (device, crfpmoc_verify_run_state, VERIFY_STATES);
-  fpi_ssm_start (self->task_ssm, crfpmoc_task_ssm_done);
+      if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_VERIFY)
+        {
+          fp_dbg ("crfpmoc_verify_ssm_done: verify_complete");
+          fpi_device_verify_complete (device, error);
+        }
+      else
+        {
+          fp_dbg ("crfpmoc_verify_ssm_done: identify_complete");
+          fpi_device_identify_complete (device, error);
+        }
+    }
+  crfpmoc_cancel (device);
 }
 
 static void
@@ -1559,9 +1887,8 @@ crfpmoc_identify_verify (FpDevice *device)
           "Identify" : "Verify");
 
   g_assert (self->task_ssm == NULL);
-  self->task_ssm = fpi_ssm_new (device, crfpmoc_clear_storage_run_state,
-                                CLEAR_STORAGE_STATES);
-  fpi_ssm_start (self->task_ssm, crfpmoc_pre_identify_cleanup_done);
+  self->task_ssm = fpi_ssm_new (device, crfpmoc_verify_run_state, VERIFY_STATES);
+  crfpmoc_ssm_start (self->task_ssm, crfpmoc_verify_ssm_done);
 }
 
 static void

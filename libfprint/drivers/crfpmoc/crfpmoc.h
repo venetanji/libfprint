@@ -441,28 +441,48 @@ enum crfpmoc_ec_status {
 
 /* SSM task states and various status enums */
 
-typedef enum {
-  ENROLL_ENSURE_KEYS,
-  ENROLL_SENSOR_ENROLL,
-  ENROLL_WAIT_ENROLL_COMPLETE,
-  ENROLL_SENSOR_CHECK,
-  ENROLL_COMMIT,
+/* Enroll state machine states
+ */
+enum {
+  ENROLL_ENSURE_KEYS,          /* Setup the seed and context */
+  ENROLL_SENSOR_ENROLL,        /* Enter enroll mode */
+  ENROLL_WAIT_ENROLL_COMPLETE, /* Wait for command completion event */
+  ENROLL_SENSOR_CHECK,         /* Verify mode has indicated completion */
+#ifdef WAIT_ON_ENROLL
+  ENROLL_WAIT_FINGER_UP,       /* Wait for finger to be removed */
+#endif
+  ENROLL_COMMIT,               /* Download template and return print  */
   ENROLL_STATES,
-} EnrollStates;
+};
 
-typedef enum {
-  VERIFY_ENSURE_KEYS,
-  VERIFY_UPLOAD_TEMPLATE,
-  VERIFY_SENSOR_MATCH,
-  VERIFY_WAIT_MATCH_COMPLETE,
-  VERIFY_SENSOR_CHECK,
-  VERIFY_CHECK,
+/* Verify/Identify state machine states
+ */
+enum {
+  VERIFY_CLEAR_STORAGE,       /* Clear all stored prints */
+  VERIFY_FINGER_UP,           /* Make sure the finger is not on the sensor */
+  VERIFY_ENSURE_KEYS,         /* Setup the seed and context */
+  VERIFY_UPLOAD_TEMPLATE,     /* Upload all gallery templates */
+  VERIFY_SENSOR_MATCH,        /* Enter match mode */
+  VERIFY_WAIT_MATCH_COMPLETE, /* Wait for match complete event */
+  VERIFY_SENSOR_CHECK,        /* Verify mode has indicated completion */
+  VERIFY_CHECK,               /* Get the match completion status */
   VERIFY_STATES,
-} VerifyStates;
+};
 
-typedef enum {
-  CLEAR_STORAGE_SENSOR_RESET,
-  CLEAR_STORAGE_SENSOR_WAIT,
-  CLEAR_STORAGE_SENSOR_DONE,
+/* Clear storage state machine states
+ */
+enum {
+  CLEAR_STORAGE_SENSOR_RESET, /* Enter reset sensor mode */
+  CLEAR_STORAGE_SENSOR_WAIT,  /* Wait for mode to indicate completion */
+  CLEAR_STORAGE_SENSOR_DONE,  /* Return results */
   CLEAR_STORAGE_STATES,
-} ClearStorageStates;
+};
+
+/* Clear storage state machine states
+ */
+enum {
+  FINGER_UP_START,
+  FINGER_UP_DONE,
+  FINGER_UP_TIMEOUT,
+  FINGER_UP_STATES,
+};
