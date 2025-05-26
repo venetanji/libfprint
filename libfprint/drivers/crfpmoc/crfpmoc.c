@@ -3,6 +3,7 @@
  *
  * Copyright (C) 2024 Abhinav Baid <abhinavbaid@gmail.com>
  * Copyright (C) 2024 Felix Niederer <felix@niederer.dev>
+ * Copyright (C) 2025 Michael Evans <mike.67.442@gmail.com>
  * Copyright (C) 2026 Marco Trevisan (Treviño) <mail@3v1n0.net>
  *
  * This library is free software; you can redistribute it and/or
@@ -34,6 +35,11 @@ struct _FpiDeviceCrfpMoc
   FpDevice parent;
   FpiSsm  *task_ssm;
 
+  guint16  max_insize;
+  guint16  max_outsize;
+  guint16  max_templates;
+  guint16  template_size;
+
   int      emul_fd;
 };
 
@@ -43,6 +49,7 @@ static void crfpmoc_finger_up_run_state (FpiSsm   *ssm,
                                          FpDevice *device);
 static void crfpmoc_clear_storage_run_state (FpiSsm   *ssm,
                                              FpDevice *device);
+static void crfpmoc_wait_for_device_idle (FpiSsm *ssm);
 
 /* State machine private data. All state machines get this and it is
  * cleared/freed at the completion of the state machine.
@@ -551,6 +558,12 @@ crfpmoc_read_bytes (gpointer user_data)
 
   return G_SOURCE_REMOVE;
 }
+
+/* Enable device event reporting and queue a callback when there is
+ * data available to read. The device will notify on mode changes
+ * EC_FP_MODE_MATCH, EC_FP_MODE_ENROLL_*, EC_FP_MODE_CAPTURE,
+ * EC_FP_MODE_FINGER_UP, EC_FP_MODE_FINGER_DOWN, maybe others ?
+ */
 static void
 crfpmoc_ec_pollevent (FpiSsm *ssm, unsigned long mask)
 {
@@ -581,6 +594,8 @@ crfpmoc_ec_pollevent (FpiSsm *ssm, unsigned long mask)
   fp_dbg ("crfpmoc_ec_pollevent: created poll source %d", data->poll_source);
 }
 
+/* Set the device to the specified mode, see above for list of modes.
+ */
 static gboolean
 crfpmoc_cmd_fp_mode (FpiDeviceCrfpMoc *self, guint32 inmode,
                      guint32 *outmode, GError **error)
@@ -600,6 +615,11 @@ crfpmoc_cmd_fp_mode (FpiDeviceCrfpMoc *self, guint32 inmode,
   return TRUE;
 }
 
+/* The device needs to have a seed set or it will not match. It is
+ * not clear when the seed is invalidated so we check if it is set
+ * prior to making this call. The call will fail if the seed is
+ * already set.
+ */
 static gboolean
 crfpmoc_cmd_fp_seed (FpiDeviceCrfpMoc *self,
                      const char       *seed,
@@ -627,6 +647,12 @@ crfpmoc_cmd_fp_seed (FpiDeviceCrfpMoc *self,
   return TRUE;
 }
 
+/* Set the device context. This seems to impact the encryption but it
+ * is not clear if we should use a print specific seed (like the
+ * print id) or a global value. We opt for the latter here.
+ *
+ * Note: setting the context will remove all templates.
+ */
 /* TODO: should this be converted to a sub state machine instead of
  * the sync completion ?
  */
@@ -713,9 +739,15 @@ crfpmoc_fp_set_context (FpiDeviceCrfpMoc *self,
   return FALSE;
 }
 
+/* Get the device info, vendor, version, etc. Get the state of the
+ * loaded templates and how many can be loaded as well as the size
+ * of templates. All templates have the same size on a given device.
+ */
 static gboolean
 crfpmoc_cmd_fp_info (FpiDeviceCrfpMoc *self,
                      guint16          *enrolled_templates,
+                     guint16          *max_templates,
+                     guint16          *template_size,
                      GError          **error)
 {
   struct crfpmoc_ec_response_fp_info r = {0};
@@ -756,10 +788,28 @@ crfpmoc_cmd_fp_info (FpiDeviceCrfpMoc *self,
           r.template_version, r.template_size, r.template_valid,
           r.template_max, r.template_dirty);
 
-  *enrolled_templates = r.template_valid;
+  if (r.template_size == 0)
+    {
+      g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
+                   "Template size is zero, device may not be initialized.");
+      return FALSE;
+    }
+
+  if (enrolled_templates)
+    *enrolled_templates = r.template_valid;
+  if (max_templates)
+    *max_templates = r.template_max;
+  if (template_size)
+    *template_size = r.template_size;
+
   return TRUE;
 }
 
+/* Get the current device statistics. This returns the match information
+ * time of last capture, etc. This can be used to determine if the last
+ * match was successful (as done in ectool). The completion MKBP event
+ * also seems to return the match status so perhaps that could be used.
+ */
 static gboolean
 crfpmoc_cmd_fp_stats (FpiDeviceCrfpMoc *self, gint8 *template_idx, GError **error)
 {
@@ -795,6 +845,9 @@ crfpmoc_cmd_fp_stats (FpiDeviceCrfpMoc *self, gint8 *template_idx, GError **erro
   return TRUE;
 }
 
+/* Return the encryption status. This indicates if the seed and
+ * context have been set.
+ */
 static gboolean
 crfpmoc_cmd_fp_enc_status (FpiDeviceCrfpMoc *self, guint32 *status, GError **error)
 {
@@ -809,6 +862,7 @@ crfpmoc_cmd_fp_enc_status (FpiDeviceCrfpMoc *self, guint32 *status, GError **err
   fp_dbg ("crfpmoc_cmd_fp_enc_status: FPMCU encryption status: %d", resp.status);
   fp_dbg ("crfpmoc_cmd_fp_enc_status: valid flags: %d", resp.valid_flags);
 
+  /* TODO: do we need to mask the status with valid_flags ? */
   if (resp.status == CRFPMOC_FP_ENC_STATUS_SEED_SET)
     fp_dbg ("crfpmoc_cmd_fp_enc_status: seed is already set");
 
@@ -817,6 +871,8 @@ crfpmoc_cmd_fp_enc_status (FpiDeviceCrfpMoc *self, guint32 *status, GError **err
   return TRUE;
 }
 
+/* Set the device seed if it has not already been set.
+ */
 static gboolean
 crfpmoc_cmd_fp_ensure_seed (FpiDeviceCrfpMoc *self, const char * seed, GError **error)
 {
@@ -828,6 +884,7 @@ crfpmoc_cmd_fp_ensure_seed (FpiDeviceCrfpMoc *self, const char * seed, GError **
 
   fp_dbg ("crfpmoc_cmd_fp_ensure_seed: FPMCU encryption status: %d", status);
 
+  /* TODO: can there be other flags returned in the status ?? */
   if (status == 0)
     {
       fp_dbg ("crfpmoc_cmd_fp_ensure_seed: seed is not set, setting seed");
@@ -843,6 +900,8 @@ crfpmoc_cmd_fp_ensure_seed (FpiDeviceCrfpMoc *self, const char * seed, GError **
   return TRUE;
 }
 
+/* Debug function to print the protocol infomation.
+ */
 static void
 crfpmoc_show_proto_info (struct crfpmoc_ec_response_get_protocol_info *protocol_info)
 {
@@ -855,15 +914,23 @@ crfpmoc_show_proto_info (struct crfpmoc_ec_response_get_protocol_info *protocol_
       len += snprintf (&buffer[len], buflen - len, "%s%d", len == 0 ? "" : ",", i);
 
   buffer[buflen - 1] = '\0';
-  fp_dbg ("crfpmoc_ec_max_outsize: vers %s, max_out %d, max_in %d, flags 0x%08x",
+  fp_dbg ("crfpmoc_show_proto_info: vers %s, max_out %d, max_in %d, flags 0x%08x",
           buffer,
           protocol_info->max_request_packet_size,
           protocol_info->max_response_packet_size,
           protocol_info->flags);
 }
 
+/* Return the max in and out sizes from the protocol info request. It
+ * is assumed these values determine the size limits for commands.
+ * Note: ectool uses a fixed smaller value either to work with older
+ * devices that do not support this request or some other reason.
+ */
 static gboolean
-crfpmoc_ec_max_insize (FpiDeviceCrfpMoc *self, guint16 *max_insize, GError **error)
+crfpmoc_ec_max_size (FpiDeviceCrfpMoc *self,
+                     guint16          *max_insize,
+                     guint16          *max_outsize,
+                     GError          **error)
 {
   struct crfpmoc_ec_response_get_protocol_info protocol_info = {0};
 
@@ -872,29 +939,19 @@ crfpmoc_ec_max_insize (FpiDeviceCrfpMoc *self, guint16 *max_insize, GError **err
     return FALSE;
 
   crfpmoc_show_proto_info (&protocol_info);
-  *max_insize = protocol_info.max_response_packet_size -
-                sizeof (struct crfpmoc_ec_host_response);
+  if (max_insize)
+    *max_insize = protocol_info.max_response_packet_size -
+                  sizeof (struct crfpmoc_ec_host_response);
+  if (max_outsize)
+    *max_outsize = protocol_info.max_request_packet_size -
+                   sizeof (struct crfpmoc_ec_host_response);
 
   return TRUE;
 }
 
-static gboolean
-crfpmoc_ec_max_outsize (FpiDeviceCrfpMoc *self, guint16 *max_outsize, GError **error)
-{
-  struct crfpmoc_ec_response_get_protocol_info protocol_info;
-
-  if (!crfpmoc_ec_command (self, CRFPMOC_EC_CMD_GET_PROTOCOL_INFO, 0,
-                           NULL, 0, &protocol_info, sizeof (protocol_info), error))
-    return FALSE;
-
-  crfpmoc_show_proto_info (&protocol_info);
-  *max_outsize = protocol_info.max_request_packet_size -
-                 sizeof (struct crfpmoc_ec_host_request);
-
-  return TRUE;
-}
-
-/* Stolen BSD sum algorithm */
+/* Stolen BSD sum algorithm. Used for debug to allow matching the
+ * templates uploaded using ectool with the sum shell command.
+ */
 static uint16_t
 crfpmoc_sum (guint16 sum, guint8 * buffer, gsize len)
 {
@@ -913,39 +970,28 @@ crfpmoc_sum (guint16 sum, guint8 * buffer, gsize len)
 /* Download the last loaded template
  *
  * Issue the EC_CMD_FP_FRAME command to read the template. This is
- * done in ec_max_insize chunks. The command will return EC_RES_BUSY
+ * done in max_insize chunks. The command will return EC_RES_BUSY
  * until the last chunk is read at which point it will return
  * EC_REC_SUCCESS. Any other response is considered an error.
  */
 static gboolean
-crfpmoc_fp_download_template (FpiDeviceCrfpMoc                   *self,
-                              struct crfpmoc_ec_response_fp_info *info,
-                              gint                                index,
-                              guint8                            **out_buffer,
-                              GError                            **error)
+crfpmoc_fp_download_template (FpiDeviceCrfpMoc *self,
+                              gint              index,
+                              guint8          **out_buffer,
+                              GError          **error)
 {
   struct crfpmoc_ec_params_fp_template p = {0};
   gsize stride, size;
   g_autofree guint8 *buffer = NULL;
   guint8 *ptr;
-  gint cmdver = 1;
-  gsize rsize = sizeof (*info);
   const gint max_attempts = 3;
   gint num_attempts;
-  guint16 ec_max_insize;
   gint template_idx = index + CRFPMOC_FP_FRAME_INDEX_TEMPLATE;
   guint16 sum = 0;
 
   *out_buffer = NULL;
 
-  if (!crfpmoc_ec_max_insize (self, &ec_max_insize, error))
-    return FALSE;
-
-  if (!crfpmoc_ec_command (self, CRFPMOC_EC_CMD_FP_INFO, cmdver,
-                           NULL, 0, info, rsize, error))
-    return FALSE;
-
-  size = info->template_size;
+  size = self->template_size;
   fp_dbg ("crfpmoc_fp_download_template: template size %zd", size);
   g_assert (size != 0);
 
@@ -1016,11 +1062,11 @@ crfpmoc_fp_download_template (FpiDeviceCrfpMoc                   *self,
   return TRUE;
 }
 
+/* Write a template to the device. This is done in max_outsize chunks */
 static gboolean
 crfpmoc_fp_upload_template (FpiDeviceCrfpMoc *self,
                             const guint8     *template_data,
                             gsize             template_size,
-                            guint16           ec_max_outsize,
                             GError          **error)
 {
   guint32 offset = 0;
@@ -1069,7 +1115,21 @@ crfpmoc_fp_upload_template (FpiDeviceCrfpMoc *self,
   return TRUE;
 }
 
+/* State machine support functions */
+static void
+crfpmoc_reset_device (FpDevice *device)
+{
+  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
 
+  fp_dbg ("crfpmoc_reset_device");
+
+  /* Issue reset */
+  crfpmoc_cmd_fp_mode (self, 0, NULL, NULL);
+}
+
+/* Enable event reporting for fingerprint events and queue up a
+ * callback to read the next event.
+ */
 static void
 crfpmoc_cmd_wait_event_fingerprint (FpiSsm *ssm)
 {
@@ -1078,7 +1138,10 @@ crfpmoc_cmd_wait_event_fingerprint (FpiSsm *ssm)
   crfpmoc_ec_pollevent (ssm, 1 << event_type);
 }
 
-/* Generic task completion callback to report any errors */
+/* Generic task completion callback to report any errors. Only to be
+ * used for top level tasks since it assumes it is completing
+ * self->task_ssm.
+ */
 static void
 crfpmoc_task_ssm_done (FpiSsm *ssm, FpDevice *device, GError *error)
 {
@@ -1120,26 +1183,21 @@ crfpmoc_open (FpDevice *device)
       fp_dbg ("Created temporary ioctl file for recording: %s", ioctl_file);
     }
 
-  /* Just for debug messages */
-  guint16 ec_max_outsize;
-  if (!crfpmoc_ec_max_outsize (self, &ec_max_outsize, &error))
-    {
-      fp_err ("Failed to get max outsize: %s", error->message);
-      g_clear_error (&error);
-    }
-
-  /* Just for debug messages */
-  guint16 ec_max_insize;
-  if (!crfpmoc_ec_max_insize (self, &ec_max_insize, &error))
-    {
-      fp_err ("Failed to get max insize: %s", error->message);
-      g_clear_error (&error);
-    }
+  if (!crfpmoc_ec_max_size (self, &self->max_insize, &self->max_outsize, &error))
+    g_prefix_error_literal (&error, "Failed to get max insize/outsize: ");
+  else if (!crfpmoc_cmd_fp_info (self,
+                                 NULL,
+                                 &self->max_templates,
+                                 &self->template_size,
+                                 &error))
+    g_prefix_error_literal (&error, "Failed to get max templates and templates size: ");
 
   fp_dbg ("crfpmoc_open: open_complete");
-  fpi_device_open_complete (device, NULL);
+  fpi_device_open_complete (device, g_steal_pointer (&error));
 }
 
+/* Convenience routine to make sure the seed and context are set
+ */
 static gboolean
 crfpmoc_set_keys (FpiDeviceCrfpMoc *self, GError **error)
 {
@@ -1268,6 +1326,7 @@ handle_wait_finger_up (FpiSsm *ssm,
   crfpmoc_cmd_wait_event_fingerprint (ssm);
 }
 
+/* Enroll state machine */
 static void
 handle_enroll_sensor_check (FpiSsm *ssm)
 {
@@ -1332,16 +1391,16 @@ handle_enroll_commit (FpiSsm *ssm)
   FpDevice *device = fpi_ssm_get_device (ssm);
   FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
   guint16 enrolled_templates = 0;
-  guint16 ec_max_outsize = 0;
   g_autofree guint8 *template = NULL;
   g_autofree gchar *user_id = NULL;
-  struct crfpmoc_ec_response_fp_info info;
   FpPrint *print;
-  int template_index;
+  gint template_index;
 
-  if (!crfpmoc_cmd_fp_info (self, &enrolled_templates, &error))
+  if (!crfpmoc_cmd_fp_info (self, &enrolled_templates, NULL, NULL, &error))
     {
-      fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+      fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                                          "Failed to get FP info: %s",
+                                                          error->message));
       return;
     }
 
@@ -1350,16 +1409,7 @@ handle_enroll_commit (FpiSsm *ssm)
   template_index = enrolled_templates - 1;
   fpi_device_get_enroll_data (device, &print);
 
-  if (!crfpmoc_ec_max_outsize (self, &ec_max_outsize, &error))
-    {
-      fp_err ("Failed to get max outsize");
-      fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
-                                                          "Failed to get max outsize: %s",
-                                                          error->message));
-      return;
-    }
-
-  if (!crfpmoc_fp_download_template (self, &info, template_index, &template, &error))
+  if (!crfpmoc_fp_download_template (self, template_index, &template, &error))
     {
       fp_err ("Failed to download template");
       fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
@@ -1374,7 +1424,7 @@ handle_enroll_commit (FpiSsm *ssm)
   g_object_set (print, "description", user_id, NULL);
 
   fpi_print_set_type (print, FPI_PRINT_RAW);
-  crfpmoc_set_print_data (print, template, info.template_size);
+  crfpmoc_set_print_data (print, template, self->template_size);
 
   fp_info ("handle_enroll_commit: enroll_complete");
   fpi_device_enroll_complete (device, g_object_ref (print), NULL);
@@ -1442,6 +1492,7 @@ crfpmoc_enroll_run_state (FpiSsm *ssm, FpDevice *device)
     }
 }
 
+/* Handle device enroll request */
 static void
 crfpmoc_enroll (FpDevice *device)
 {
@@ -1460,22 +1511,17 @@ crfpmoc_enroll (FpDevice *device)
   fpi_ssm_start (self->task_ssm, crfpmoc_task_ssm_done);
 }
 
+/* Verify/Identify state machine */
+
 static void
 handle_verify_upload_template (FpiSsm *ssm)
 {
   g_autoptr(GError) error = NULL;
   FpDevice *device = fpi_ssm_get_device (ssm);
   FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
-  guint16 ec_max_outsize = 0;
   g_autofree guint8 *template = NULL;
   size_t template_size = 0;
   FpPrint *print = NULL;
-
-  if (!crfpmoc_ec_max_outsize (self, &ec_max_outsize, &error))
-    {
-      fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
-      return;
-    }
 
   if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_IDENTIFY)
     {
@@ -1493,22 +1539,8 @@ handle_verify_upload_template (FpiSsm *ssm)
               return;
             }
 
-          if (!ec_max_outsize)
-            {
-              /*  TODO: If this issue can't be fixed, we should only get the max
-               * outsize once and use it for all templates.
-               */
-              fp_warn ("Max outsize is not set, getting it from the device");
-
-              if (!crfpmoc_ec_max_outsize (self, &ec_max_outsize, &error))
-                {
-                  fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
-                  return;
-                }
-            }
-
           if (!crfpmoc_fp_upload_template (self, template, template_size,
-                                           ec_max_outsize, &error))
+                                           &error))
             {
               fp_warn ("Failed to upload template nr %d: %s", i,
                        error->message);
@@ -1529,18 +1561,7 @@ handle_verify_upload_template (FpiSsm *ssm)
           return;
         }
 
-      if (!ec_max_outsize)
-        {
-          fp_warn ("Max outsize is not set, getting it from the device");
-          if (!crfpmoc_ec_max_outsize (self, &ec_max_outsize, &error))
-            {
-              fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
-              return;
-            }
-        }
-
-      if (!crfpmoc_fp_upload_template (self, template, template_size,
-                                       ec_max_outsize, &error))
+      if (!crfpmoc_fp_upload_template (self, template, template_size, &error))
         {
           fp_warn ("Failed to upload template: %s", error->message);
           fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
@@ -1628,7 +1649,7 @@ handle_verify_check (FpiSsm *ssm)
   FpPrint *print = NULL;
   guint16 enrolled_templates = 0;
 
-  if (!crfpmoc_cmd_fp_info (self, &enrolled_templates, &error))
+  if (!crfpmoc_cmd_fp_info (self, &enrolled_templates, NULL, NULL, &error))
     {
       fp_dbg ("handle_verify_check: no info");
       fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
@@ -1728,7 +1749,7 @@ handle_verify_check (FpiSsm *ssm)
 }
 
 static void
-crfpmoc_cmd_wait_for_it (FpiSsm *ssm, FpDevice *device)
+crfpmoc_wait_for_device_idle (FpiSsm *ssm)
 {
   g_autoptr(GError) error = NULL;
   FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (fpi_ssm_get_device (ssm));
@@ -1742,6 +1763,7 @@ crfpmoc_cmd_wait_for_it (FpiSsm *ssm, FpDevice *device)
     fpi_ssm_jump_to_state_delayed (ssm, fpi_ssm_get_cur_state (ssm), 100);
 }
 
+/* Finger up state machine */
 static void
 handle_verify_clear_storage (FpiSsm *ssm)
 {
@@ -1764,6 +1786,7 @@ handle_verify_finger_up (FpiSsm *ssm)
   crfpmoc_ssm_start_subsm (FPI_DEVICE_CRFPMOC (device), sub);
 }
 
+/* Clear storage state machine */
 static void
 crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
 {
@@ -1861,7 +1884,7 @@ crfpmoc_clear_storage_run_state (FpiSsm *ssm, FpDevice *device)
       break;
 
     case CLEAR_STORAGE_SENSOR_WAIT:
-      crfpmoc_cmd_wait_for_it (ssm, device);
+      crfpmoc_wait_for_device_idle (ssm);
       break;
 
     case CLEAR_STORAGE_SENSOR_DONE:
@@ -1909,9 +1932,14 @@ crfpmoc_verify_ssm_done (FpiSsm *ssm, FpDevice *device,
           fpi_device_identify_complete (device, error);
         }
     }
-  crfpmoc_cancel (device);
+
+  crfpmoc_reset_device (device);
 }
 
+/* Handle device verify or identify requests. These are very similar
+ * only differing in request prints and report formats. The procedure
+ * for each is identical.
+ */
 static void
 crfpmoc_identify_verify (FpDevice *device)
 {
@@ -1926,6 +1954,7 @@ crfpmoc_identify_verify (FpDevice *device)
   crfpmoc_ssm_start (self->task_ssm, crfpmoc_verify_ssm_done);
 }
 
+/* Handle device clear storage request. */
 static void
 crfpmoc_clear_storage (FpDevice *device)
 {
@@ -1938,12 +1967,17 @@ crfpmoc_clear_storage (FpDevice *device)
   fpi_ssm_start (self->task_ssm, crfpmoc_task_ssm_done);
 }
 
+/* Handle device initialization. Called before any other device op.
+ */
 static void
 fpi_device_crfpmoc_init (FpiDeviceCrfpMoc *self)
 {
   self->emul_fd = -1;
 }
 
+/* Register the device. Note, this function is declared in the
+ * G_DEFINE_TYPE macro and registered there.
+ */
 static void
 fpi_device_crfpmoc_class_init (FpiDeviceCrfpMocClass *klass)
 {
@@ -1961,6 +1995,7 @@ fpi_device_crfpmoc_class_init (FpiDeviceCrfpMocClass *klass)
   dev_class->open = crfpmoc_open;
   dev_class->cancel = crfpmoc_cancel;
   dev_class->suspend = crfpmoc_suspend;
+  /* TODO: suspend but no resume ?? do we need either */
   dev_class->close = crfpmoc_close;
   dev_class->enroll = crfpmoc_enroll;
   dev_class->identify = crfpmoc_identify_verify;
