@@ -57,7 +57,7 @@ struct _FpiDeviceGoodixMoc
   GPtrArray         *list_result;
   guint8             template_id[TEMPLATE_ID_SIZE];
   gboolean           is_power_button_shield_on;
-
+  gboolean           list_already_checked;
 };
 
 G_DEFINE_TYPE (FpiDeviceGoodixMoc, fpi_device_goodixmoc, FP_TYPE_DEVICE)
@@ -1062,6 +1062,8 @@ fp_init_cb_reset_or_complete (FpiDeviceGoodixMoc  *self,
                               gxfp_cmd_response_t *resp,
                               GError              *error)
 {
+  self->list_already_checked = TRUE;
+
   if (error)
     {
       fp_warn ("Template storage appears to have been corrupted! Error was: %s", error->message);
@@ -1081,8 +1083,8 @@ fp_init_reset_device_cb (FpiDeviceGoodixMoc  *self,
 {
   if (error)
     {
-      fp_warn ("Reset failed: %s", error->message);
-      fpi_ssm_mark_failed (self->task_ssm, error);
+      fp_warn ("Reset failed: %s, device may not work properly", error->message);
+      fpi_ssm_jump_to_state (self->task_ssm, FP_INIT_VERSION);
       return;
     }
   if ((resp->result >= GX_FAILED) && (resp->result != GX_ERROR_FINGER_ID_NOEXIST))
@@ -1124,6 +1126,13 @@ fp_init_sm_run_state (FpiSsm *ssm, FpDevice *device)
       break;
 
     case FP_INIT_TEMPLATE_LIST:
+      if (self->list_already_checked)
+        {
+          g_debug ("Ignoring already performed list check");
+          fpi_ssm_mark_completed (ssm);
+          return;
+        }
+
       /* List prints to check whether the template DB was corrupted.
        * As of 2022-06-13 there is a known firmware issue that can cause the
        * stored templates for Linux to be corrupted when the Windows storage
