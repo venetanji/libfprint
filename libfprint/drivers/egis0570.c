@@ -454,16 +454,16 @@ static void
 set_ctx_pkts_type (FpDeviceEgis0570 *self, guint8 * element_ptr)
 {
   self->pkt_type = -1;
-  fp_dbg ("Error in indexing should not happen");
   for (guint8 i = 0; i < EGIS0570_CAL_STATIC_LIST_SIZEOF; i++)
     {
       if (EGIS0570_CAL_STATIC_LIST[i] == element_ptr)
         {
           self->pkt_type = i;
-          fp_dbg ("said index %d", i);
-          break;
+          fp_dbg ("ptr said index %d", i);
+          return;
         }
     }
+  fp_dbg ("messed up list for static packets");
 }
 
 static void
@@ -527,7 +527,7 @@ apply_next_step_setting (FpiSsm *ssm, FpDeviceEgis0570 *self)
 
   if (cal_ctx->cal_step == EGIS0570_CAL_PROC_SIZEOF)
     {
-      fp_dbg ("something went wrong.");
+      fp_dbg ("calibration step is higher thatn expected.");
       return;
     }
   fp_dbg ("Procedure Index %d", cal_ctx->cal_step);
@@ -741,6 +741,7 @@ apply_next_step_setting (FpiSsm *ssm, FpDeviceEgis0570 *self)
     case CAL_BS_CHK_SET:
       if (cal_ctx->bs_condition && cal_ctx->bs_steps < 8)
         {
+          cal_ctx->cal_img_idx = 0;
           cal_ctx->bs_steps++;
           fp_dbg ("CALIBERATION: BINARY SEARCH: CONDITION: %b, STEPS: %d", cal_ctx->bs_condition, cal_ctx->bs_steps);
           for (guint8 i = 0; i < EGIS0570_CAL_BS_ELM; i++)
@@ -806,6 +807,8 @@ apply_next_step_setting (FpiSsm *ssm, FpDeviceEgis0570 *self)
 
 
     case CAL_PKT_15_0:
+      cal_ctx->cal_img_idx = 0;
+
       cal_ctx->rng_pkt_low = 0x15;
       cal_ctx->rng_pkt_high = 0x15;
       cal_ctx->req_packet[4] = 0x01;
@@ -829,6 +832,8 @@ apply_next_step_setting (FpiSsm *ssm, FpDeviceEgis0570 *self)
       break;
 
     case CAL_NO_IMG_CAP_AREA:
+      cal_ctx->cal_img_idx = 0;
+
       set_ctx_pkts_type (self, *EGIS0570_CAL_NO_IMAGE_CAPTURING_AREA);
       fpi_ssm_jump_to_state (ssm, SM_CAL_STATIC_PKT);
       break;
@@ -880,8 +885,8 @@ apply_next_step_setting (FpiSsm *ssm, FpDeviceEgis0570 *self)
           cal_ctx->bs_zeros = 0;
           cal_ctx->bs_steps++;
 
-          fp_dbg ("CALIBERATION: NO IMAGE 14/16: CONDITION: %b, STEPS: %d", cal_ctx->bs_condition, cal_ctx->bs_steps);
-          fp_dbg ("CALIBERATION: NO IMAGE 14/16: LOW: %x, HIGH: %x", cal_ctx->bs_lows[0], cal_ctx->bs_highs[0]);
+          fp_dbg ("CALIBERATION: NO IMAGE 14: CONDITION: %b, STEPS: %d", cal_ctx->bs_condition, cal_ctx->bs_steps);
+          fp_dbg ("CALIBERATION: NO IMAGE 14: LOW: %x, HIGH: %x", cal_ctx->bs_lows[0], cal_ctx->bs_highs[0]);
 
           self->save_resp = FALSE;
           cal_ctx->rng_pkt_low = 0x14;
@@ -905,8 +910,8 @@ apply_next_step_setting (FpiSsm *ssm, FpDeviceEgis0570 *self)
           cal_ctx->bs_zeros = 0;
           cal_ctx->bs_steps++;
 
-          fp_dbg ("CALIBERATION: NO IMAGE 14/16: CONDITION: %b, STEPS: %d", cal_ctx->bs_condition, cal_ctx->bs_steps);
-          fp_dbg ("CALIBERATION: NO IMAGE 14/16: LOW: %x, HIGH: %x", cal_ctx->bs_lows[0], cal_ctx->bs_highs[0]);
+          fp_dbg ("CALIBERATION: NO IMAGE 16: CONDITION: %b, STEPS: %d", cal_ctx->bs_condition, cal_ctx->bs_steps);
+          fp_dbg ("CALIBERATION: NO IMAGE 16: LOW: %x, HIGH: %x", cal_ctx->bs_lows[0], cal_ctx->bs_highs[0]);
 
           self->save_resp = FALSE;
           cal_ctx->rng_pkt_low = 0x15;
@@ -982,7 +987,7 @@ apply_next_step_setting (FpiSsm *ssm, FpDeviceEgis0570 *self)
       else
         cal_ctx->bs_condition = 0x00;
 
-      fp_dbg ("no image bs 14/16: twos: %d, zeros: %d.", cal_ctx->bs_twos, cal_ctx->bs_zeros);
+      fp_dbg ("no image bs 14: twos: %d, zeros: %d.", cal_ctx->bs_twos, cal_ctx->bs_zeros);
 
       cal_ctx->cal_step = cal_ctx->cal_step - 4;// Based on calibration_procedure.
       fpi_ssm_jump_to_state (ssm, SM_CAL_STEP_LOGIC);
@@ -997,7 +1002,7 @@ apply_next_step_setting (FpiSsm *ssm, FpDeviceEgis0570 *self)
       else
         cal_ctx->bs_condition = 0x00;
 
-      fp_dbg ("no image bs 14/16: twos: %d, zeros: %d.", cal_ctx->bs_twos, cal_ctx->bs_zeros);
+      fp_dbg ("no image bs 16: twos: %d, zeros: %d.", cal_ctx->bs_twos, cal_ctx->bs_zeros);
 
       cal_ctx->cal_step = cal_ctx->cal_step - 5;// Based on calibration_procedure.
       fpi_ssm_jump_to_state (ssm, SM_CAL_STEP_LOGIC);
@@ -1374,10 +1379,10 @@ dev_deactivate (FpImageDevice *dev)
  */
 
 static const FpIdEntry id_table[] = {
-  { .vid = 0x1c7a, .pid = 0x0570, .driver_data = PACKET_VERSION_1},
   { .vid = 0x1c7a, .pid = 0x0570, .driver_data = PACKET_CALIBRATION},
-  { .vid = 0x1c7a, .pid = 0x0571, .driver_data = PACKET_VERSION_1},
+  // { .vid = 0x1c7a, .pid = 0x0570, .driver_data = PACKET_VERSION_1},
   { .vid = 0x1c7a, .pid = 0x0571, .driver_data = PACKET_CALIBRATION},
+  // { .vid = 0x1c7a, .pid = 0x0571, .driver_data = PACKET_VERSION_1},
   { .vid = 0,      .pid = 0, .driver_data = 0},
 };
 

@@ -212,13 +212,13 @@ static unsigned char repeat_pkts[][EGIS0570_PKTSIZE] =
 // Calibration
 
 enum driver_version {
-  NONE,
-  PACKET_VERSION_1,
   PACKET_CALIBRATION,
+  PACKET_VERSION_1,
+  NONE,
 };
 
 #define PRESISTENT_DATA_LENGTH 9
-#define EGIS0570_CAL_IMG_TOT 124
+#define EGIS0570_CAL_IMG_TOT 22 //124
 #define EGIS0570_CAL_INPSIZE 6528
 #define EGIS0570_CAL_BS_ELM 7
 
