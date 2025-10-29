@@ -1314,6 +1314,7 @@ dev_init (FpImageDevice *dev)
   memcpy (self->query_pkts, init_pkts, EGIS0570_INIT_TOTAL * EGIS0570_PKTSIZE);
   fp_dbg ("initialization");
 
+
   switch (fpi_device_get_driver_data (FP_DEVICE (dev)))
     {
     case PACKET_VERSION_1:
@@ -1326,7 +1327,13 @@ dev_init (FpImageDevice *dev)
 
       gsize length;
       // check if caliberation happend
-      if (fp_device_get_persistent_data (FP_DEVICE (dev), &self->persistent_data, &length, &error))
+
+      // TODO comment next line
+      length = 0;
+
+      // TODO change the if part.
+      // if (fp_device_get_persistent_data (FP_DEVICE (dev), &self->persistent_data, &length, &error))
+      if (TRUE)
         {
           if (length == PRESISTENT_DATA_LENGTH)
             {
