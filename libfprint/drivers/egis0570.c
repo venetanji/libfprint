@@ -1268,11 +1268,14 @@ cal_loop_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
 
   set_query_pkts (self, self->persistent_data);
 
-  GError *save_error = NULL;
-  fp_device_set_persistent_data (dev, self->persistent_data, PRESISTENT_DATA_LENGTH, &save_error);
-
-  if (save_error)
-    fpi_image_device_session_error (img_dev, save_error);
+  // TODO to save uncomment
+  /*
+   *  GError *save_error = NULL;
+   *  fp_device_set_persistent_data (dev, self->persistent_data, PRESISTENT_DATA_LENGTH, &save_error);
+   *
+   * if (save_error)
+   *   fpi_image_device_session_error (img_dev, save_error);
+   */
 
   g_clear_pointer (&self->persistent_data, g_free);
 
