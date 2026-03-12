@@ -149,6 +149,8 @@ driver_sources = {
         [ 'drivers/goodixmoc/goodix.c', 'drivers/goodixmoc/goodix_proto.c' ],
     'fpcmoc' :
         [ 'drivers/fpcmoc/fpc.c' ],
+    'fpcmoh' :
+        [ 'drivers/fpcmoh/fpcmoh.c' ],
     'realtek' :
         [ 'drivers/realtek/realtek.c' ],
     'focaltech_moc' :
@@ -236,6 +238,13 @@ deps = [
     mathlib_dep,
 ] + optional_deps
 
+subdir('sigfm')
+
+sigfm_link = []
+if have_sigfm
+  sigfm_link = [libsigfm]
+endif
+
 # These are empty and only exist so that the include directories are created
 # in the build tree. This silences a build time warning.
 subdir('nbis/include')
@@ -265,7 +274,7 @@ libfprint_private = static_library('fprint-private',
         libfprint_private_sources,
     ],
     dependencies: deps,
-    link_with: libnbis,
+    link_with: [libnbis] + sigfm_link,
     install: false)
 
 libfprint_drivers = static_library('fprint-drivers',
@@ -309,6 +318,11 @@ libfprint_dep = declare_dependency(link_with: libfprint,
 install_headers(['fprint.h'] + libfprint_public_headers,
     subdir: versioned_libname
 )
+if have_sigfm
+  install_headers(['sigfm/sigfm.h'],
+    subdir: versioned_libname + '/sigfm'
+  )
+endif
 
 libfprint_private_dep = declare_dependency(
     include_directories: include_directories('.'),

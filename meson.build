@@ -154,6 +154,17 @@ if have_spi
     default_drivers += spi_drivers
 endif
 
+# SIGFM-based drivers require OpenCV4 for SIFT keypoint matching
+sigfm_drivers = [
+    'fpcmoh',
+]
+
+have_opencv = dependency('opencv4', required: false).found()
+if have_opencv
+    default_drivers += sigfm_drivers
+    libfprint_conf.set10('HAVE_SIGFM', true)
+endif
+
 # FIXME: All the drivers should be fixed by adjusting the byte order.
 # See https://gitlab.freedesktop.org/libfprint/libfprint/-/issues/236
 endian_independent_drivers = virtual_drivers + [
@@ -201,6 +212,17 @@ if enabled_spi_drivers.length() > 0 and not have_spi
     error('SPI drivers @0@ are not supported'.format(enabled_spi_drivers))
 endif
 
+enabled_sigfm_drivers = []
+foreach driver : sigfm_drivers
+    if driver in drivers
+        enabled_sigfm_drivers += driver
+    endif
+endforeach
+
+if enabled_sigfm_drivers.length() > 0 and not have_opencv
+    error('SIGFM drivers @0@ require opencv4'.format(enabled_sigfm_drivers))
+endif
+
 driver_helper_mapping = {
     'aes1610' : [ 'aeslib' ],
     'aes1660' : [ 'aeslib', 'aesx660' ],
@@ -210,6 +232,7 @@ driver_helper_mapping = {
     'aes3500' : [ 'aeslib', 'aes3k' ],
     'aes4000' : [ 'aeslib', 'aes3k' ],
     'uru4000' : [ 'openssl' ],
+    'fpcmoh'  : [ 'openssl' ],
     'elanspi' : [ 'udev' ],
     'virtual_image'          : [ 'virtual' ],
     'virtual_device'         : [ 'virtual' ],
