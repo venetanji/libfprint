@@ -145,6 +145,7 @@ drivers_info = {
     'fpcmoc': {},
     'realtek': {},
     'focaltech_moc': {},
+    'focaltech_moh': {},
     'mafpmoc': {},
     'secugen': {},
 
