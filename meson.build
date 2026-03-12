@@ -144,6 +144,7 @@ default_drivers = [
     'fpcmoc',
     'realtek',
     'focaltech_moc',
+    'focaltech_moh',
 ]
 
 spi_drivers = [
@@ -168,6 +169,7 @@ endian_independent_drivers = virtual_drivers + [
     'elanmoc',
     'etes603',
     'focaltech_moc',
+    'focaltech_moh',
     'nb1010',
     'realtek',
     'synaptics',
