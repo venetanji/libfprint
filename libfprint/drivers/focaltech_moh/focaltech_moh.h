@@ -67,6 +67,9 @@ enum capture_states {
   CAPTURE_WARMUP_CMD,         /* OUT 0x6F(32, 0x9180) */
   CAPTURE_WARMUP_READ,        /* BULK IN 32B (discard) */
 
+  /* Finger detection: poll INT_STATUS until finger present */
+  CAPTURE_POLL_FINGER,        /* IN 0x43 — byte0: 0=no finger, 1=finger */
+
   /* Sync: poke 0xFF00 */
   CAPTURE_SYNC_PREP1,         /* OUT 0x34(0xFF) */
   CAPTURE_SYNC_PREP2,         /* OUT 0x34(3) */

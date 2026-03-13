@@ -95,6 +95,39 @@ capture_read_cb (FpiUsbTransfer *transfer,
 }
 
 static void
+finger_poll_cb (FpiUsbTransfer *transfer,
+               FpDevice       *dev,
+               gpointer        user_data,
+               GError         *error)
+{
+  FpImageDevice *img_dev = FP_IMAGE_DEVICE (dev);
+
+  if (error)
+    {
+      fpi_ssm_mark_failed (transfer->ssm, error);
+      return;
+    }
+
+  /* INT_STATUS byte 0: 0x00 = no finger, 0x01 = finger present */
+  fp_dbg ("INT_STATUS: 0x%02x 0x%02x 0x%02x 0x%02x (len=%zu)",
+          transfer->buffer[0], transfer->buffer[1],
+          transfer->buffer[2], transfer->buffer[3],
+          transfer->actual_length);
+  if (transfer->buffer[0] == 0x01)
+    {
+      fp_dbg ("Finger detected!");
+      fpi_image_device_report_finger_status (img_dev, TRUE);
+      fpi_ssm_next_state (transfer->ssm);
+    }
+  else
+    {
+      /* No finger — retry same state after delay */
+      fpi_ssm_jump_to_state_delayed (transfer->ssm, CAPTURE_POLL_FINGER,
+                                     FT9201_POLL_INTERVAL);
+    }
+}
+
+static void
 capture_ssm_handler (FpiSsm *ssm, FpDevice *dev)
 {
   FpiDeviceFocaltechMoh *self = FPI_DEVICE_FOCALTECH_MOH (dev);
@@ -133,6 +166,22 @@ capture_ssm_handler (FpiSsm *ssm, FpDevice *dev)
         fpi_usb_transfer_submit (transfer, FT9201_CMD_TIMEOUT, NULL,
                                  capture_read_cb, NULL);
         self->warmup_done = TRUE;
+      }
+      break;
+
+    /* Finger detection: poll INT_STATUS (0x43) */
+    case CAPTURE_POLL_FINGER:
+      {
+        FpiUsbTransfer *transfer = fpi_usb_transfer_new (dev);
+
+        fpi_usb_transfer_fill_control (transfer,
+                                       G_USB_DEVICE_DIRECTION_DEVICE_TO_HOST,
+                                       G_USB_DEVICE_REQUEST_TYPE_VENDOR,
+                                       G_USB_DEVICE_RECIPIENT_DEVICE,
+                                       FT9201_REQ_INT_STATUS, 0, 0, 4);
+        transfer->ssm = ssm;
+        fpi_usb_transfer_submit (transfer, FT9201_CMD_TIMEOUT, NULL,
+                                 finger_poll_cb, NULL);
       }
       break;
 
@@ -261,7 +310,7 @@ capture_ssm_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
   fp_dbg ("Image captured (%d unique values), submitting",
           FT9201_IMG_SIZE);
 
-  fpi_image_device_report_finger_status (img_dev, TRUE);
+  /* finger_on already reported in finger_poll_cb */
   fpi_image_device_image_captured (img_dev, image);
   fpi_image_device_report_finger_status (img_dev, FALSE);
 
