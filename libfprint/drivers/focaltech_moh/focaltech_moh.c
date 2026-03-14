@@ -140,9 +140,13 @@ capture_ssm_handler (FpiSsm *ssm, FpDevice *dev)
      * Skip if already done.
      */
     case CAPTURE_WARMUP_PREP1:
+      /* Only do warmup on first cycle (after USB reset).
+       * On subsequent cycles, skip directly to finger polling.
+       * The warmup bulk read on second+ cycle can consume stale
+       * data and corrupt the pipe state. */
       if (self->warmup_done)
         {
-          fpi_ssm_jump_to_state (ssm, CAPTURE_SYNC_PREP1);
+          fpi_ssm_jump_to_state (ssm, CAPTURE_POLL_FINGER);
           return;
         }
       ft9201_ctrl_out (dev, ssm, FT9201_REQ_PREPARE, FT9201_PREPARE_INIT, 0);
@@ -166,6 +170,7 @@ capture_ssm_handler (FpiSsm *ssm, FpDevice *dev)
         fpi_usb_transfer_submit (transfer, FT9201_CMD_TIMEOUT, NULL,
                                  capture_read_cb, NULL);
         self->warmup_done = TRUE;
+        fp_dbg ("Warmup bulk read submitted");
       }
       break;
 
@@ -234,7 +239,7 @@ capture_ssm_handler (FpiSsm *ssm, FpDevice *dev)
 
     case CAPTURE_IMG_CMD:
       ft9201_ctrl_out (dev, ssm, FT9201_REQ_NEW_SIU_RW,
-                       FT9201_IMG_SIZE, FT9201_REG_CAPTURE);
+                       FT9201_RAW_SIZE, FT9201_REG_CAPTURE);
       break;
 
     case CAPTURE_IMG_READ:
@@ -242,7 +247,7 @@ capture_ssm_handler (FpiSsm *ssm, FpDevice *dev)
         FpiUsbTransfer *transfer = fpi_usb_transfer_new (dev);
 
         fpi_usb_transfer_fill_bulk_full (transfer, FT9201_EP_IN,
-                                         self->image_buf, FT9201_IMG_SIZE,
+                                         self->image_buf, FT9201_RAW_SIZE,
                                          NULL);
         transfer->short_is_error = FALSE;
         transfer->ssm = ssm;
@@ -278,15 +283,13 @@ capture_ssm_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
       return;
     }
 
-  /* Check if image has meaningful data.
-   * Warmup/blank images have very few unique pixel values.
-   * A real fingerprint has 100+ unique values. */
+  /* Check if image has meaningful data */
   {
     gboolean seen[256] = { FALSE, };
     int unique = 0;
     int i;
 
-    for (i = 0; i < FT9201_IMG_SIZE; i++)
+    for (i = 0; i < FT9201_RAW_SIZE; i++)
       {
         if (!seen[self->image_buf[i]])
           {
@@ -295,6 +298,8 @@ capture_ssm_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
           }
       }
 
+    fp_dbg ("Image quality: %d unique values", unique);
+
     if (unique < 50)
       {
         fp_dbg ("Skipping low-quality image (%d unique values)", unique);
@@ -302,20 +307,37 @@ capture_ssm_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
       }
   }
 
-  /* Report finger on, submit image, report finger off */
-  image = fp_image_new (FT9201_IMG_WIDTH, FT9201_IMG_HEIGHT);
-  memcpy (image->data, self->image_buf, FT9201_IMG_SIZE);
-  image->flags = FPI_IMAGE_V_FLIPPED;
+  /* No contrast normalization — pass raw sensor data as-is.
+   * The FPI_IMAGE_COLORS_INVERTED flag tells libfprint to invert pixels
+   * before NBIS processing (matching what the Windows driver does with ~pixel).
+   * NBIS handles binarization internally. */
 
-  fp_dbg ("Image captured (%d unique values), submitting",
-          FT9201_IMG_SIZE);
+  /* Upscale 2x with nearest-neighbor for better minutiae detection */
+  image = fp_image_new (FT9201_IMG_WIDTH, FT9201_IMG_HEIGHT);
+  {
+    int x, y;
+
+    for (y = 0; y < FT9201_IMG_HEIGHT; y++)
+      for (x = 0; x < FT9201_IMG_WIDTH; x++)
+        image->data[y * FT9201_IMG_WIDTH + x] =
+          self->image_buf[(y / FT9201_UPSCALE) * FT9201_RAW_WIDTH +
+                          (x / FT9201_UPSCALE)];
+  }
+  image->flags = FPI_IMAGE_V_FLIPPED | FPI_IMAGE_COLORS_INVERTED;
+
+  fp_dbg ("Image captured and upscaled to %dx%d",
+          FT9201_IMG_WIDTH, FT9201_IMG_HEIGHT);
 
   /* finger_on already reported in finger_poll_cb */
   fpi_image_device_image_captured (img_dev, image);
   fpi_image_device_report_finger_status (img_dev, FALSE);
 
+  return;
+
 restart_capture:
-  /* Restart capture loop with a short delay to avoid busy-polling */
+  /* Image was blank/warmup — restart capture to try again.
+   * Don't restart after a successful image_captured() — the
+   * framework will call dev_activate() when it needs another image. */
   if (!self->deactivating)
     {
       self->capture_ssm = fpi_ssm_new (FP_DEVICE (dev), capture_ssm_handler,
@@ -350,7 +372,7 @@ dev_open (FpImageDevice *dev)
       return;
     }
 
-  self->image_buf = g_malloc0 (FT9201_IMG_SIZE);
+  self->image_buf = g_malloc0 (FT9201_RAW_SIZE);
   self->warmup_done = FALSE;
 
   fpi_image_device_open_complete (dev, NULL);
@@ -380,11 +402,22 @@ dev_activate (FpImageDevice *dev)
 
   self->deactivating = FALSE;
 
-  self->capture_ssm = fpi_ssm_new (FP_DEVICE (dev), capture_ssm_handler,
-                                   CAPTURE_NUM_STATES);
-  fpi_ssm_start (self->capture_ssm, capture_ssm_complete);
-
+  /* Don't start SSM here — it will be started by dev_change_state()
+   * when the framework transitions to AWAIT_FINGER_ON. */
   fpi_image_device_activate_complete (dev, NULL);
+}
+
+static void
+dev_change_state (FpImageDevice *dev, FpiImageDeviceState state)
+{
+  FpiDeviceFocaltechMoh *self = FPI_DEVICE_FOCALTECH_MOH (dev);
+
+  if (state == FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON)
+    {
+      self->capture_ssm = fpi_ssm_new (FP_DEVICE (dev), capture_ssm_handler,
+                                       CAPTURE_NUM_STATES);
+      fpi_ssm_start (self->capture_ssm, capture_ssm_complete);
+    }
 }
 
 static void
@@ -422,9 +455,10 @@ fpi_device_focaltech_moh_class_init (FpiDeviceFocaltechMohClass *klass)
   img_class->img_open = dev_open;
   img_class->img_close = dev_close;
   img_class->activate = dev_activate;
+  img_class->change_state = dev_change_state;
   img_class->deactivate = dev_deactivate;
 
   img_class->img_width = FT9201_IMG_WIDTH;
   img_class->img_height = FT9201_IMG_HEIGHT;
-  img_class->bz3_threshold = 24;
+  img_class->bz3_threshold = 12;
 }
