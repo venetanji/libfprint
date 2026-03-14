@@ -32,10 +32,16 @@ G_DECLARE_FINAL_TYPE (FpiDeviceFocaltechMoh, fpi_device_focaltech_moh, FPI,
 
 #define FT9201_EP_IN 0x83   /* Bulk IN  (EP3, 32B max packet) */
 
-/* Image: 64 wide x 80 high, 8-bit grayscale */
-#define FT9201_IMG_WIDTH    64
-#define FT9201_IMG_HEIGHT   80
-#define FT9201_IMG_SIZE     (FT9201_IMG_WIDTH * FT9201_IMG_HEIGHT)  /* 5120 */
+/* Raw sensor image: 64 wide x 80 high, 8-bit grayscale */
+#define FT9201_RAW_WIDTH    64
+#define FT9201_RAW_HEIGHT   80
+#define FT9201_RAW_SIZE     (FT9201_RAW_WIDTH * FT9201_RAW_HEIGHT)  /* 5120 */
+
+/* Upscaled image for NBIS minutiae detection (2x) */
+#define FT9201_UPSCALE      2
+#define FT9201_IMG_WIDTH    (FT9201_RAW_WIDTH * FT9201_UPSCALE)   /* 128 */
+#define FT9201_IMG_HEIGHT   (FT9201_RAW_HEIGHT * FT9201_UPSCALE)  /* 160 */
+#define FT9201_IMG_SIZE     (FT9201_IMG_WIDTH * FT9201_IMG_HEIGHT) /* 20480 */
 
 #define FT9201_CMD_TIMEOUT   5000
 #define FT9201_POLL_INTERVAL 30   /* ms between finger detection polls */
