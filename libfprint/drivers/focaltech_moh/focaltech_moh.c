@@ -1,7 +1,7 @@
 /*
  * FocalTech FT9201 Match-on-Host driver for libfprint
  *
- * Copyright (C) 2025 libfprint contributors
+ * Copyright (C) 2025-2026 0xCoDSnet <effectorplay@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -22,25 +22,14 @@
  * FocalTech FT9201 (chip FT9338, VID:2808 PID:9338)
  *
  * Area fingerprint sensor with USB SIU (Serial Interface Unit) bridge.
- * 64×80 pixels, 8-bit grayscale, match-on-host.
+ * 64x80 pixels, 8-bit grayscale, match-on-host.
  *
- * MCU has ROM firmware — no firmware upload needed. The SIU uses a
- * "New SIU" protocol with compound register addresses.
+ * The sensor resolution (~250 DPI) is too low for NBIS/bozorth3 minutiae
+ * matching, so this driver implements custom pixel-correlation matching
+ * using Normalized Cross-Correlation (NCC) with translation search.
  *
- * Read sequence (3 control OUTs + 1 bulk IN):
- *   1. OUT req=0x34 wValue=0x00FF  (prepare init)
- *   2. OUT req=0x34 wValue=0x0003  (prepare read mode)
- *   3. OUT req=0x6F wValue=size wIndex=compound_addr  (configure)
- *   4. Bulk IN on EP3 (read data)
- *
- * Compound addresses:
- *   0x9180 — chip status / OTP info
- *   0x9080 — image capture (5120 bytes)
- *   0xFF00 — sync / reset (size=0, no bulk IN)
- *
- * Important: after USB reset or first enumeration, the first bulk IN
- * read returns garbage (all 0x02). A warmup read must be performed
- * and its result discarded.
+ * The Windows driver uses a similar approach: proprietary "mayflower"
+ * matching engine with Gabor filter preprocessing.
  */
 
 #define FP_COMPONENT "focaltech_moh"
@@ -48,15 +37,142 @@
 #include "drivers_api.h"
 #include "focaltech_moh.h"
 
+#include <math.h>
+
 G_DEFINE_TYPE (FpiDeviceFocaltechMoh, fpi_device_focaltech_moh,
-               FP_TYPE_IMAGE_DEVICE)
+               FP_TYPE_DEVICE)
 
 static const FpIdEntry id_table[] = {
   { .vid = FT9201_VID, .pid = FT9201_PID },
   { .vid = 0, .pid = 0 },
 };
 
-/* ─── Helper: send vendor control OUT ──────────────────────────── */
+/* ------------------------------------------------------------------ */
+/* Image preprocessing                                                 */
+/* ------------------------------------------------------------------ */
+
+static void
+ft9201_preprocess (const guint8 *src, guint8 *dst)
+{
+  int w = FT9201_RAW_WIDTH;
+  int h = FT9201_RAW_HEIGHT;
+  int half = FT9201_LOCAL_MEAN_WINDOW / 2;
+  int x, y, kx, ky;
+
+  for (y = 0; y < h; y++)
+    {
+      for (x = 0; x < w; x++)
+        {
+          /* Bitwise NOT — matches Windows driver ~pixel inversion */
+          int val = ~src[y * w + x] & 0xFF;
+
+          /* Local mean subtraction (high-pass filter) */
+          int sum = 0;
+          int count = 0;
+
+          for (ky = MAX (0, y - half); ky <= MIN (h - 1, y + half); ky++)
+            for (kx = MAX (0, x - half); kx <= MIN (w - 1, x + half); kx++)
+              {
+                sum += ~src[ky * w + kx] & 0xFF;
+                count++;
+              }
+
+          int diff = val - sum / count + 128;
+
+          dst[y * w + x] = (guint8) CLAMP (diff, 0, 255);
+        }
+    }
+}
+
+static int
+count_unique_values (const guint8 *data, int size)
+{
+  gboolean seen[256] = { FALSE, };
+  int unique = 0;
+  int i;
+
+  for (i = 0; i < size; i++)
+    {
+      if (!seen[data[i]])
+        {
+          seen[data[i]] = TRUE;
+          unique++;
+        }
+    }
+
+  return unique;
+}
+
+/* ------------------------------------------------------------------ */
+/* NCC matching                                                        */
+/* ------------------------------------------------------------------ */
+
+static double
+ft9201_ncc (const guint8 *a, const guint8 *b, int dx, int dy)
+{
+  int w = FT9201_RAW_WIDTH;
+  int h = FT9201_RAW_HEIGHT;
+  int x0 = MAX (0, -dx), x1 = MIN (w, w - dx);
+  int y0 = MAX (0, -dy), y1 = MIN (h, h - dy);
+  int n = (x1 - x0) * (y1 - y0);
+  double sum_a = 0, sum_b = 0;
+  double mean_a, mean_b;
+  double num = 0, denom_a = 0, denom_b = 0, denom;
+  int x, y;
+
+  if (n < w * h / 2)
+    return -1.0;
+
+  for (y = y0; y < y1; y++)
+    for (x = x0; x < x1; x++)
+      {
+        sum_a += a[y * w + x];
+        sum_b += b[(y + dy) * w + (x + dx)];
+      }
+
+  mean_a = sum_a / n;
+  mean_b = sum_b / n;
+
+  for (y = y0; y < y1; y++)
+    for (x = x0; x < x1; x++)
+      {
+        double da = a[y * w + x] - mean_a;
+        double db = b[(y + dy) * w + (x + dx)] - mean_b;
+
+        num += da * db;
+        denom_a += da * da;
+        denom_b += db * db;
+      }
+
+  denom = sqrt (denom_a * denom_b);
+  if (denom < 1e-6)
+    return 0.0;
+
+  return num / denom;
+}
+
+static double
+ft9201_match_score (const guint8 *tmpl, const guint8 *probe)
+{
+  int r = FT9201_SEARCH_RADIUS;
+  double best = -1.0;
+  int dx, dy;
+
+  for (dy = -r; dy <= r; dy++)
+    for (dx = -r; dx <= r; dx++)
+      {
+        double score = ft9201_ncc (tmpl, probe, dx, dy);
+
+        if (score > best)
+          best = score;
+      }
+
+  return best;
+}
+
+/* ------------------------------------------------------------------ */
+/* USB helper: send vendor control OUT                                 */
+/* ------------------------------------------------------------------ */
 
 static void
 ft9201_ctrl_out (FpDevice  *dev,
@@ -77,7 +193,9 @@ ft9201_ctrl_out (FpDevice  *dev,
                            fpi_ssm_usb_transfer_cb, NULL);
 }
 
-/* ─── Capture state machine ────────────────────────────────────── */
+/* ------------------------------------------------------------------ */
+/* Capture state machine (used as sub-SSM)                             */
+/* ------------------------------------------------------------------ */
 
 static void
 capture_read_cb (FpiUsbTransfer *transfer,
@@ -96,32 +214,31 @@ capture_read_cb (FpiUsbTransfer *transfer,
 
 static void
 finger_poll_cb (FpiUsbTransfer *transfer,
-               FpDevice       *dev,
-               gpointer        user_data,
-               GError         *error)
+                FpDevice       *dev,
+                gpointer        user_data,
+                GError         *error)
 {
-  FpImageDevice *img_dev = FP_IMAGE_DEVICE (dev);
-
   if (error)
     {
       fpi_ssm_mark_failed (transfer->ssm, error);
       return;
     }
 
-  /* INT_STATUS byte 0: 0x00 = no finger, 0x01 = finger present */
   fp_dbg ("INT_STATUS: 0x%02x 0x%02x 0x%02x 0x%02x (len=%zu)",
           transfer->buffer[0], transfer->buffer[1],
           transfer->buffer[2], transfer->buffer[3],
           transfer->actual_length);
+
   if (transfer->buffer[0] == 0x01)
     {
       fp_dbg ("Finger detected!");
-      fpi_image_device_report_finger_status (img_dev, TRUE);
+      fpi_device_report_finger_status_changes (dev,
+                                               FP_FINGER_STATUS_PRESENT,
+                                               FP_FINGER_STATUS_NONE);
       fpi_ssm_next_state (transfer->ssm);
     }
   else
     {
-      /* No finger — retry same state after delay */
       fpi_ssm_jump_to_state_delayed (transfer->ssm, CAPTURE_POLL_FINGER,
                                      FT9201_POLL_INTERVAL);
     }
@@ -135,15 +252,7 @@ capture_ssm_handler (FpiSsm *ssm, FpDevice *dev)
 
   switch (state)
     {
-    /*
-     * Warmup: first bulk read after reset returns garbage.
-     * Skip if already done.
-     */
     case CAPTURE_WARMUP_PREP1:
-      /* Only do warmup on first cycle (after USB reset).
-       * On subsequent cycles, skip directly to finger polling.
-       * The warmup bulk read on second+ cycle can consume stale
-       * data and corrupt the pipe state. */
       if (self->warmup_done)
         {
           fpi_ssm_jump_to_state (ssm, CAPTURE_POLL_FINGER);
@@ -174,7 +283,6 @@ capture_ssm_handler (FpiSsm *ssm, FpDevice *dev)
       }
       break;
 
-    /* Finger detection: poll INT_STATUS (0x43) */
     case CAPTURE_POLL_FINGER:
       {
         FpiUsbTransfer *transfer = fpi_usb_transfer_new (dev);
@@ -190,7 +298,6 @@ capture_ssm_handler (FpiSsm *ssm, FpDevice *dev)
       }
       break;
 
-    /* Sync: poke 0xFF00 (no bulk read) */
     case CAPTURE_SYNC_PREP1:
       ft9201_ctrl_out (dev, ssm, FT9201_REQ_PREPARE, FT9201_PREPARE_INIT, 0);
       break;
@@ -203,7 +310,6 @@ capture_ssm_handler (FpiSsm *ssm, FpDevice *dev)
       ft9201_ctrl_out (dev, ssm, FT9201_REQ_NEW_SIU_RW, 0, FT9201_REG_SYNC);
       break;
 
-    /* Status: read 4 bytes from 0x9180 */
     case CAPTURE_STATUS_PREP1:
       ft9201_ctrl_out (dev, ssm, FT9201_REQ_PREPARE, FT9201_PREPARE_INIT, 0);
       break;
@@ -228,7 +334,6 @@ capture_ssm_handler (FpiSsm *ssm, FpDevice *dev)
       }
       break;
 
-    /* Image capture: 5120 bytes from 0x9080 */
     case CAPTURE_IMG_PREP1:
       ft9201_ctrl_out (dev, ssm, FT9201_REQ_PREPARE, FT9201_PREPARE_INIT, 0);
       break;
@@ -261,125 +366,274 @@ capture_ssm_handler (FpiSsm *ssm, FpDevice *dev)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Enroll state machine                                                */
+/* ------------------------------------------------------------------ */
+
 static void
-capture_ssm_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
+enroll_ssm_handler (FpiSsm *ssm, FpDevice *dev)
 {
-  FpImageDevice *img_dev = FP_IMAGE_DEVICE (dev);
   FpiDeviceFocaltechMoh *self = FPI_DEVICE_FOCALTECH_MOH (dev);
-  FpImage *image;
+  int state = fpi_ssm_get_cur_state (ssm);
 
-  self->capture_ssm = NULL;
-
-  if (self->deactivating)
+  switch (state)
     {
-      g_clear_error (&error);
-      fpi_image_device_deactivate_complete (img_dev, NULL);
-      return;
-    }
-
-  if (error)
-    {
-      fpi_image_device_session_error (img_dev, error);
-      return;
-    }
-
-  /* Check if image has meaningful data */
-  {
-    gboolean seen[256] = { FALSE, };
-    int unique = 0;
-    int i;
-
-    for (i = 0; i < FT9201_RAW_SIZE; i++)
+    case ENROLL_CAPTURE:
       {
-        if (!seen[self->image_buf[i]])
+        FpiSsm *capture = fpi_ssm_new (dev, capture_ssm_handler,
+                                        CAPTURE_NUM_STATES);
+
+        fpi_device_report_finger_status_changes (dev,
+                                                 FP_FINGER_STATUS_NEEDED,
+                                                 FP_FINGER_STATUS_NONE);
+        fpi_ssm_start_subsm (ssm, capture);
+      }
+      break;
+
+    case ENROLL_STORE_IMAGE:
+      {
+        int unique;
+        guint8 preprocessed[FT9201_RAW_SIZE];
+
+        fpi_device_report_finger_status_changes (dev,
+                                                 FP_FINGER_STATUS_NONE,
+                                                 FP_FINGER_STATUS_PRESENT);
+
+        unique = count_unique_values (self->image_buf, FT9201_RAW_SIZE);
+        fp_dbg ("Enroll stage %d: %d unique values", self->enroll_stage, unique);
+
+        if (unique < FT9201_MIN_UNIQUE_VALUES)
           {
-            seen[self->image_buf[i]] = TRUE;
-            unique++;
+            fp_dbg ("Low quality image, retrying");
+            fpi_device_enroll_progress (dev, self->enroll_stage, NULL,
+                                        fpi_device_retry_new (FP_DEVICE_RETRY_CENTER_FINGER));
+            fpi_ssm_jump_to_state (ssm, ENROLL_CAPTURE);
+            return;
           }
+
+        ft9201_preprocess (self->image_buf, preprocessed);
+        memcpy (self->enroll_images[self->enroll_stage], preprocessed,
+                FT9201_RAW_SIZE);
+
+        self->enroll_stage++;
+        fp_dbg ("Enroll stage %d/%d completed",
+                self->enroll_stage, FT9201_NUM_ENROLL_STAGES);
+
+        fpi_device_enroll_progress (dev, self->enroll_stage, NULL, NULL);
+
+        if (self->enroll_stage < FT9201_NUM_ENROLL_STAGES)
+          fpi_ssm_jump_to_state (ssm, ENROLL_CAPTURE);
+        else
+          fpi_ssm_next_state (ssm);
       }
+      break;
 
-    fp_dbg ("Image quality: %d unique values", unique);
-
-    if (unique < 50)
+    case ENROLL_COMMIT:
       {
-        fp_dbg ("Skipping low-quality image (%d unique values)", unique);
-        goto restart_capture;
+        FpPrint *print = NULL;
+        GVariantBuilder builder;
+        GVariant *data;
+        int i;
+
+        fpi_device_get_enroll_data (dev, &print);
+
+        g_variant_builder_init (&builder, G_VARIANT_TYPE ("a(ay)"));
+        for (i = 0; i < FT9201_NUM_ENROLL_STAGES; i++)
+          {
+            GVariant *img = g_variant_new_fixed_array (
+              G_VARIANT_TYPE_BYTE,
+              self->enroll_images[i], FT9201_RAW_SIZE, 1);
+
+            g_variant_builder_add (&builder, "(@ay)", img);
+          }
+        data = g_variant_new ("(ya(ay))", (guint8) 1, &builder);
+
+        fpi_print_set_type (print, FPI_PRINT_RAW);
+        g_object_set (print, "fpi-data", data, NULL);
+
+        fp_info ("Enrollment complete, %d templates stored",
+                 FT9201_NUM_ENROLL_STAGES);
+
+        fpi_device_enroll_complete (dev, g_object_ref (print), NULL);
+        fpi_ssm_mark_completed (ssm);
       }
-  }
+      break;
 
-  /* No contrast normalization — pass raw sensor data as-is.
-   * The FPI_IMAGE_COLORS_INVERTED flag tells libfprint to invert pixels
-   * before NBIS processing (matching what the Windows driver does with ~pixel).
-   * NBIS handles binarization internally. */
-
-  /* Upscale 2x with nearest-neighbor for better minutiae detection */
-  image = fp_image_new (FT9201_IMG_WIDTH, FT9201_IMG_HEIGHT);
-  {
-    int x, y;
-
-    for (y = 0; y < FT9201_IMG_HEIGHT; y++)
-      for (x = 0; x < FT9201_IMG_WIDTH; x++)
-        image->data[y * FT9201_IMG_WIDTH + x] =
-          self->image_buf[(y / FT9201_UPSCALE) * FT9201_RAW_WIDTH +
-                          (x / FT9201_UPSCALE)];
-  }
-  image->flags = FPI_IMAGE_V_FLIPPED | FPI_IMAGE_COLORS_INVERTED;
-
-  fp_dbg ("Image captured and upscaled to %dx%d",
-          FT9201_IMG_WIDTH, FT9201_IMG_HEIGHT);
-
-  /* finger_on already reported in finger_poll_cb */
-  fpi_image_device_image_captured (img_dev, image);
-  fpi_image_device_report_finger_status (img_dev, FALSE);
-
-  return;
-
-restart_capture:
-  /* Image was blank/warmup — restart capture to try again.
-   * Don't restart after a successful image_captured() — the
-   * framework will call dev_activate() when it needs another image. */
-  if (!self->deactivating)
-    {
-      self->capture_ssm = fpi_ssm_new (FP_DEVICE (dev), capture_ssm_handler,
-                                       CAPTURE_NUM_STATES);
-      fpi_ssm_start (self->capture_ssm, capture_ssm_complete);
+    default:
+      g_assert_not_reached ();
     }
 }
 
-/* ─── Device lifecycle ─────────────────────────────────────────── */
+static void
+enroll_ssm_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
+{
+  FpiDeviceFocaltechMoh *self = FPI_DEVICE_FOCALTECH_MOH (dev);
+
+  self->task_ssm = NULL;
+
+  if (error)
+    fpi_device_enroll_complete (dev, NULL, error);
+}
+
+/* ------------------------------------------------------------------ */
+/* Verify state machine                                                */
+/* ------------------------------------------------------------------ */
 
 static void
-dev_open (FpImageDevice *dev)
+verify_ssm_handler (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceFocaltechMoh *self = FPI_DEVICE_FOCALTECH_MOH (dev);
+  int state = fpi_ssm_get_cur_state (ssm);
+
+  switch (state)
+    {
+    case VERIFY_CAPTURE:
+      {
+        FpiSsm *capture = fpi_ssm_new (dev, capture_ssm_handler,
+                                        CAPTURE_NUM_STATES);
+
+        fpi_device_report_finger_status_changes (dev,
+                                                 FP_FINGER_STATUS_NEEDED,
+                                                 FP_FINGER_STATUS_NONE);
+        fpi_ssm_start_subsm (ssm, capture);
+      }
+      break;
+
+    case VERIFY_MATCH:
+      {
+        FpPrint *print = NULL;
+        g_autoptr(GVariant) var_data = NULL;
+        g_autoptr(GVariant) var_images = NULL;
+        guint8 preprocessed[FT9201_RAW_SIZE];
+        guint8 version;
+        double best_score = -1.0;
+        GVariantIter iter;
+        GVariant *img_var;
+        int unique;
+        int tmpl_idx = 0;
+
+        fpi_device_report_finger_status_changes (dev,
+                                                 FP_FINGER_STATUS_NONE,
+                                                 FP_FINGER_STATUS_PRESENT);
+
+        unique = count_unique_values (self->image_buf, FT9201_RAW_SIZE);
+        fp_dbg ("Verify: %d unique values", unique);
+
+        if (unique < FT9201_MIN_UNIQUE_VALUES)
+          {
+            fp_dbg ("Low quality verify image, retrying");
+            fpi_device_verify_report (dev, FPI_MATCH_ERROR, NULL,
+                                      fpi_device_retry_new (FP_DEVICE_RETRY_CENTER_FINGER));
+            fpi_device_verify_complete (dev, NULL);
+            fpi_ssm_mark_completed (ssm);
+            return;
+          }
+
+        ft9201_preprocess (self->image_buf, preprocessed);
+
+        fpi_device_get_verify_data (dev, &print);
+        g_object_get (print, "fpi-data", &var_data, NULL);
+
+        if (!g_variant_check_format_string (var_data, "(ya(ay))", FALSE))
+          {
+            fpi_device_verify_report (dev, FPI_MATCH_ERROR, NULL,
+                                      fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
+            fpi_device_verify_complete (dev, NULL);
+            fpi_ssm_mark_completed (ssm);
+            return;
+          }
+
+        g_variant_get (var_data, "(y@a(ay))", &version, &var_images);
+        fp_dbg ("Template version: %d", version);
+
+        g_variant_iter_init (&iter, var_images);
+        while ((img_var = g_variant_iter_next_value (&iter)) != NULL)
+          {
+            g_autoptr(GVariant) inner = NULL;
+            const guint8 *tmpl_data;
+            gsize tmpl_len;
+
+            g_variant_get (img_var, "(@ay)", &inner);
+            tmpl_data = g_variant_get_fixed_array (inner, &tmpl_len, 1);
+
+            if (tmpl_len == FT9201_RAW_SIZE)
+              {
+                double score = ft9201_match_score (tmpl_data, preprocessed);
+
+                fp_dbg ("NCC template %d: %.4f", tmpl_idx, score);
+                if (score > best_score)
+                  best_score = score;
+              }
+
+            g_variant_unref (img_var);
+            tmpl_idx++;
+          }
+
+        fp_info ("Best NCC score: %.4f (threshold: %.2f)",
+                 best_score, FT9201_NCC_THRESHOLD);
+
+        if (best_score >= FT9201_NCC_THRESHOLD)
+          fpi_device_verify_report (dev, FPI_MATCH_SUCCESS, print, NULL);
+        else
+          fpi_device_verify_report (dev, FPI_MATCH_FAIL, NULL, NULL);
+
+        fpi_device_verify_complete (dev, NULL);
+        fpi_ssm_mark_completed (ssm);
+      }
+      break;
+
+    default:
+      g_assert_not_reached ();
+    }
+}
+
+static void
+verify_ssm_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
+{
+  FpiDeviceFocaltechMoh *self = FPI_DEVICE_FOCALTECH_MOH (dev);
+
+  self->task_ssm = NULL;
+
+  if (error)
+    {
+      fpi_device_verify_report (dev, FPI_MATCH_ERROR, NULL, error);
+      fpi_device_verify_complete (dev, NULL);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Device lifecycle                                                    */
+/* ------------------------------------------------------------------ */
+
+static void
+dev_open (FpDevice *dev)
 {
   FpiDeviceFocaltechMoh *self = FPI_DEVICE_FOCALTECH_MOH (dev);
   GError *error = NULL;
 
   G_DEBUG_HERE ();
 
-  /* Reset USB device to clear any stuck bulk IN pipe state.
-   * Without this, the first bulk read may timeout if the pipe
-   * was left in a bad state from a previous session. */
-  if (!g_usb_device_reset (fpi_device_get_usb_device (FP_DEVICE (dev)), &error))
+  if (!g_usb_device_reset (fpi_device_get_usb_device (dev), &error))
     {
       fp_dbg ("USB reset failed (non-fatal): %s", error->message);
       g_clear_error (&error);
     }
 
-  if (!g_usb_device_claim_interface (fpi_device_get_usb_device (FP_DEVICE (dev)),
+  if (!g_usb_device_claim_interface (fpi_device_get_usb_device (dev),
                                      0, 0, &error))
     {
-      fpi_image_device_open_complete (dev, error);
+      fpi_device_open_complete (dev, error);
       return;
     }
 
   self->image_buf = g_malloc0 (FT9201_RAW_SIZE);
   self->warmup_done = FALSE;
 
-  fpi_image_device_open_complete (dev, NULL);
+  fpi_device_open_complete (dev, NULL);
 }
 
 static void
-dev_close (FpImageDevice *dev)
+dev_close (FpDevice *dev)
 {
   FpiDeviceFocaltechMoh *self = FPI_DEVICE_FOCALTECH_MOH (dev);
   GError *error = NULL;
@@ -388,52 +642,37 @@ dev_close (FpImageDevice *dev)
 
   g_clear_pointer (&self->image_buf, g_free);
 
-  g_usb_device_release_interface (fpi_device_get_usb_device (FP_DEVICE (dev)),
+  g_usb_device_release_interface (fpi_device_get_usb_device (dev),
                                   0, 0, &error);
-  fpi_image_device_close_complete (dev, error);
+  fpi_device_close_complete (dev, error);
 }
 
+/* ------------------------------------------------------------------ */
+/* Enroll / Verify entry points                                        */
+/* ------------------------------------------------------------------ */
+
 static void
-dev_activate (FpImageDevice *dev)
+focaltech_moh_enroll (FpDevice *dev)
 {
   FpiDeviceFocaltechMoh *self = FPI_DEVICE_FOCALTECH_MOH (dev);
 
-  G_DEBUG_HERE ();
-
-  self->deactivating = FALSE;
-
-  /* Don't start SSM here — it will be started by dev_change_state()
-   * when the framework transitions to AWAIT_FINGER_ON. */
-  fpi_image_device_activate_complete (dev, NULL);
+  self->enroll_stage = 0;
+  self->task_ssm = fpi_ssm_new (dev, enroll_ssm_handler, ENROLL_NUM_STATES);
+  fpi_ssm_start (self->task_ssm, enroll_ssm_complete);
 }
 
 static void
-dev_change_state (FpImageDevice *dev, FpiImageDeviceState state)
+focaltech_moh_verify (FpDevice *dev)
 {
   FpiDeviceFocaltechMoh *self = FPI_DEVICE_FOCALTECH_MOH (dev);
 
-  if (state == FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON)
-    {
-      self->capture_ssm = fpi_ssm_new (FP_DEVICE (dev), capture_ssm_handler,
-                                       CAPTURE_NUM_STATES);
-      fpi_ssm_start (self->capture_ssm, capture_ssm_complete);
-    }
+  self->task_ssm = fpi_ssm_new (dev, verify_ssm_handler, VERIFY_NUM_STATES);
+  fpi_ssm_start (self->task_ssm, verify_ssm_complete);
 }
 
-static void
-dev_deactivate (FpImageDevice *dev)
-{
-  FpiDeviceFocaltechMoh *self = FPI_DEVICE_FOCALTECH_MOH (dev);
-
-  G_DEBUG_HERE ();
-
-  if (!self->capture_ssm)
-    fpi_image_device_deactivate_complete (dev, NULL);
-  else
-    self->deactivating = TRUE;
-}
-
-/* ─── GType boilerplate ────────────────────────────────────────── */
+/* ------------------------------------------------------------------ */
+/* GType boilerplate                                                   */
+/* ------------------------------------------------------------------ */
 
 static void
 fpi_device_focaltech_moh_init (FpiDeviceFocaltechMoh *self)
@@ -444,21 +683,18 @@ static void
 fpi_device_focaltech_moh_class_init (FpiDeviceFocaltechMohClass *klass)
 {
   FpDeviceClass *dev_class = FP_DEVICE_CLASS (klass);
-  FpImageDeviceClass *img_class = FP_IMAGE_DEVICE_CLASS (klass);
 
   dev_class->id = "focaltech_moh";
   dev_class->full_name = "FocalTech FT9201 Fingerprint Sensor";
   dev_class->type = FP_DEVICE_TYPE_USB;
   dev_class->scan_type = FP_SCAN_TYPE_PRESS;
   dev_class->id_table = id_table;
+  dev_class->nr_enroll_stages = FT9201_NUM_ENROLL_STAGES;
 
-  img_class->img_open = dev_open;
-  img_class->img_close = dev_close;
-  img_class->activate = dev_activate;
-  img_class->change_state = dev_change_state;
-  img_class->deactivate = dev_deactivate;
+  dev_class->open = dev_open;
+  dev_class->close = dev_close;
+  dev_class->enroll = focaltech_moh_enroll;
+  dev_class->verify = focaltech_moh_verify;
 
-  img_class->img_width = FT9201_IMG_WIDTH;
-  img_class->img_height = FT9201_IMG_HEIGHT;
-  img_class->bz3_threshold = 12;
+  fpi_device_class_auto_initialize_features (dev_class);
 }

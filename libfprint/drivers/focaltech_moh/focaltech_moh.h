@@ -1,7 +1,7 @@
 /*
  * FocalTech FT9201 Match-on-Host driver for libfprint
  *
- * Copyright (C) 2025 libfprint contributors
+ * Copyright (C) 2025-2026 0xCoDSnet <effectorplay@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -22,10 +22,9 @@
 
 #include "fpi-device.h"
 #include "fpi-ssm.h"
-#include "fpi-image-device.h"
 
 G_DECLARE_FINAL_TYPE (FpiDeviceFocaltechMoh, fpi_device_focaltech_moh, FPI,
-                      DEVICE_FOCALTECH_MOH, FpImageDevice)
+                      DEVICE_FOCALTECH_MOH, FpDevice)
 
 #define FT9201_VID 0x2808
 #define FT9201_PID 0x9338
@@ -37,14 +36,15 @@ G_DECLARE_FINAL_TYPE (FpiDeviceFocaltechMoh, fpi_device_focaltech_moh, FPI,
 #define FT9201_RAW_HEIGHT   80
 #define FT9201_RAW_SIZE     (FT9201_RAW_WIDTH * FT9201_RAW_HEIGHT)  /* 5120 */
 
-/* Upscaled image for NBIS minutiae detection (2x) */
-#define FT9201_UPSCALE      2
-#define FT9201_IMG_WIDTH    (FT9201_RAW_WIDTH * FT9201_UPSCALE)   /* 128 */
-#define FT9201_IMG_HEIGHT   (FT9201_RAW_HEIGHT * FT9201_UPSCALE)  /* 160 */
-#define FT9201_IMG_SIZE     (FT9201_IMG_WIDTH * FT9201_IMG_HEIGHT) /* 20480 */
-
 #define FT9201_CMD_TIMEOUT   5000
 #define FT9201_POLL_INTERVAL 30   /* ms between finger detection polls */
+
+/* Enrollment and matching */
+#define FT9201_NUM_ENROLL_STAGES  5
+#define FT9201_NCC_THRESHOLD      0.30
+#define FT9201_SEARCH_RADIUS      3     /* pixels, each direction */
+#define FT9201_LOCAL_MEAN_WINDOW  7     /* 7x7 window for high-pass */
+#define FT9201_MIN_UNIQUE_VALUES  50    /* minimum unique pixel values for quality */
 
 /* USB vendor request codes */
 #define FT9201_REQ_PREPARE      0x34
@@ -63,8 +63,10 @@ G_DECLARE_FINAL_TYPE (FpiDeviceFocaltechMoh, fpi_device_focaltech_moh, FPI,
 /*
  * Capture state machine — one state per async USB transfer.
  *
- * The read sequence is: PREPARE_INIT → PREPARE_READ → NEW_SIU_RW → BULK_IN.
+ * The read sequence is: PREPARE_INIT -> PREPARE_READ -> NEW_SIU_RW -> BULK_IN.
  * Each is a separate async transfer, so each gets its own SSM state.
+ *
+ * This SSM is used as a sub-SSM within enroll and verify SSMs.
  */
 enum capture_states {
   /* Warmup: discard first bulk read after USB reset */
@@ -74,12 +76,12 @@ enum capture_states {
   CAPTURE_WARMUP_READ,        /* BULK IN 32B (discard) */
 
   /* Finger detection: poll INT_STATUS until finger present */
-  CAPTURE_POLL_FINGER,        /* IN 0x43 — byte0: 0=no finger, 1=finger */
+  CAPTURE_POLL_FINGER,        /* IN 0x43 -- byte0: 0=no finger, 1=finger */
 
   /* Sync: poke 0xFF00 */
   CAPTURE_SYNC_PREP1,         /* OUT 0x34(0xFF) */
   CAPTURE_SYNC_PREP2,         /* OUT 0x34(3) */
-  CAPTURE_SYNC_CMD,           /* OUT 0x6F(0, 0xFF00) — no bulk */
+  CAPTURE_SYNC_CMD,           /* OUT 0x6F(0, 0xFF00) -- no bulk */
 
   /* Status: read 4 bytes from 0x9180 */
   CAPTURE_STATUS_PREP1,       /* OUT 0x34(0xFF) */
@@ -96,12 +98,32 @@ enum capture_states {
   CAPTURE_NUM_STATES,
 };
 
+/* Enroll SSM: captures 5 images, stores as template */
+enum enroll_states {
+  ENROLL_CAPTURE,             /* Sub-SSM: full capture cycle */
+  ENROLL_STORE_IMAGE,         /* Preprocess + store in template array */
+  ENROLL_COMMIT,              /* Serialize to GVariant, complete enrollment */
+  ENROLL_NUM_STATES,
+};
+
+/* Verify SSM: captures 1 image, matches against stored template */
+enum verify_states {
+  VERIFY_CAPTURE,             /* Sub-SSM: full capture cycle */
+  VERIFY_MATCH,               /* NCC matching against stored templates */
+  VERIFY_NUM_STATES,
+};
+
 struct _FpiDeviceFocaltechMoh
 {
-  FpImageDevice parent;
+  FpDevice parent;
 
-  gboolean      deactivating;
   gboolean      warmup_done;
-  FpiSsm       *capture_ssm;
   guint8       *image_buf;
+
+  /* Enroll state */
+  int           enroll_stage;
+  guint8        enroll_images[FT9201_NUM_ENROLL_STAGES][FT9201_RAW_SIZE];
+
+  /* Top-level SSM */
+  FpiSsm       *task_ssm;
 };
