@@ -268,6 +268,11 @@ usb:v298Dp2020*
  ID_AUTOSUSPEND=1
  ID_PERSIST=0
 
+# Supported by libfprint driver nb2033
+usb:v298Dp2033*
+ ID_AUTOSUSPEND=1
+ ID_PERSIST=0
+
 # Supported by libfprint driver realtek
 usb:v0BDAp5813*
 usb:v0BDAp5816*
@@ -547,7 +552,6 @@ usb:v2808pA553*
 usb:v2808pA573*
 usb:v2808pA658*
 usb:v2808pC652*
-usb:v298Dp2033*
 usb:v2DF0p0003*
 usb:v3274p9008*
 usb:v3274pB012*
