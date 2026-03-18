@@ -50,6 +50,7 @@ drivers_tests = {
     'vfs7552': {},
     'goodixmoc': {},
     'nb1010': {},
+    'nb2033': {},
     'egis0570': {},
     'egismoc': {},
     'egis_etu905': {},
