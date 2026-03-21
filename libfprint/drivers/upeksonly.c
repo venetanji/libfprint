@@ -1549,7 +1549,7 @@ dev_init (FpImageDevice *dev)
       self->assembling_ctx.line_width = IMG_WIDTH_2016;
 
       /* The sensor resolution is too low for the normal threshold.
-         Note that this case is only called for rev1 one
+         Note that this case is only called for rev1
          of the sensor and upektc_img for rev2! */
       fpi_image_device_set_bz3_threshold (dev, 20);
       break;
