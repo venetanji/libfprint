@@ -587,7 +587,7 @@ fpi_device_egis0576_class_init (FpDeviceEgis0576Class *klass)
   dev_class->type = FP_DEVICE_TYPE_USB;
   dev_class->id_table = id_table;
   dev_class->scan_type = FP_SCAN_TYPE_PRESS;
-  dev_class->nr_enroll_stages = 20;
+  dev_class->nr_enroll_stages = 40;
   dev_class->temp_hot_seconds = 0;
 
   img_class->img_open = dev_init;
@@ -598,5 +598,5 @@ fpi_device_egis0576_class_init (FpDeviceEgis0576Class *klass)
   img_class->img_width = EGIS0576_CANVAS_WIDTH;
   img_class->img_height = EGIS0576_CANVAS_HEIGHT;
 
-  img_class->bz3_threshold = 10; /* security issue, can score more but not reliably */
+  img_class->bz3_threshold = 15; /* security issue, can score more but not reliably */
 }
