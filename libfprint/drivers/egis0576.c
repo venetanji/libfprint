@@ -96,15 +96,15 @@ normalize_img (guchar *bg, guchar *img, double *dark_portion)
       int normalized = ((diff[i] - min) * 255) / range;
 
       if (normalized < EGIS0576_RIDGE)
-      {
-        if (normalized < EGIS0576_CLAMP0)
-          normalized = 0;
-        count_ridges++;
-      }
+        {
+          if (normalized < EGIS0576_CLAMP0)
+            normalized = 0;
+          count_ridges++;
+        }
       else if (normalized > EGIS0576_CLAMP255)
-      {
-        normalized = 255;
-      }
+        {
+          normalized = 255;
+        }
 
       img[i] = (unsigned char) normalized;
     }
@@ -124,14 +124,16 @@ upscale_img (guchar *src_img, guchar *dst_img)
 
   for (int y = 0; y < dst_h; y++)
     {
-      int src_y = y / scale; 
-      if (src_y >= src_h) src_y = src_h - 1; 
+      int src_y = y / scale;
+      if (src_y >= src_h)
+        src_y = src_h - 1;
 
       for (int x = 0; x < dst_w; x++)
         {
           int src_x = x / scale;
-          
-          if (src_x >= src_w) src_x = src_w - 1;
+
+          if (src_x >= src_w)
+            src_x = src_w - 1;
 
           dst_img[y * dst_w + x] = src_img[src_y * src_w + src_x];
         }
@@ -153,7 +155,7 @@ upscale_and_pad_img (guchar *img, guchar *canvas)
   // Upscale sensor image
   guchar upscaled_img[EGIS0576_IMG_SIZE_UPSCALE];
 
-  upscale_img(img, upscaled_img);
+  upscale_img (img, upscaled_img);
 
   // Prepare canvas
   memset (canvas, 255, EGIS0576_CANVAS_SIZE);
