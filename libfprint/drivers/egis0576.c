@@ -95,13 +95,13 @@ normalize_img (guchar *bg, guchar *img, double *dark_portion)
     {
       int normalized = ((diff[i] - min) * 255) / range;
 
-      if (normalized < 150)
+      if (normalized < EGIS0576_RIDGE)
       {
-        if (normalized < 110)
+        if (normalized < EGIS0576_CLAMP0)
           normalized = 0;
         count_ridges++;
       }
-      else if (normalized > 190)
+      else if (normalized > EGIS0576_CLAMP255)
       {
         normalized = 255;
       }
