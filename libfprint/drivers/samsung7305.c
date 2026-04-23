@@ -60,32 +60,32 @@ static struct fpi_frame_asmbl_ctx assembling_ctx = {
 
 /* ── Image geometry ─────────────────────────────────────────────────────── */
 
-#define FRAME_WIDTH  56
+#define FRAME_WIDTH 56
 #define FRAME_HEIGHT 192
-#define FRAME_SIZE   (FRAME_WIDTH * FRAME_HEIGHT)    /* 10752 bytes */
+#define FRAME_SIZE (FRAME_WIDTH * FRAME_HEIGHT)      /* 10752 bytes */
 
-#define STRIP_WIDTH  56
+#define STRIP_WIDTH 56
 #define STRIP_HEIGHT 24
-#define STRIP_SIZE   (STRIP_WIDTH * STRIP_HEIGHT)    /* 1344 bytes */
+#define STRIP_SIZE (STRIP_WIDTH * STRIP_HEIGHT)      /* 1344 bytes */
 
 /* ── USB endpoints ──────────────────────────────────────────────────────── */
 
 #define SAMSUNG_EP_OUT (0x01 | FPI_USB_ENDPOINT_OUT)
-#define SAMSUNG_EP_IN  (0x02 | FPI_USB_ENDPOINT_IN)
+#define SAMSUNG_EP_IN (0x02 | FPI_USB_ENDPOINT_IN)
 
 /* ── Timeouts ───────────────────────────────────────────────────────────── */
 
-#define CMD_TIMEOUT    2000
-#define IMG_TIMEOUT    5000
-#define POLL_DELAY       30
-#define DRAIN_TIMEOUT    50
+#define CMD_TIMEOUT 2000
+#define IMG_TIMEOUT 5000
+#define POLL_DELAY 30
+#define DRAIN_TIMEOUT 50
 #define DRAIN_BUF_SIZE 16384
 
 /* ── Status register (0x1c 0x00) response byte[1] values ───────────────── */
 
 #define STATUS_FINGER 0x81
-#define STATUS_IDLE   0x80
-#define STATUS_READY  0x20
+#define STATUS_IDLE 0x80
+#define STATUS_READY 0x20
 
 /* ── Protocol: init sequence ────────────────────────────────────────────── */
 
@@ -139,7 +139,8 @@ static const guint8 heartbeat_payload[16] = {
   0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
-typedef struct {
+typedef struct
+{
   const guint8 *data;
   gsize         len;
 } SamsungCmd;
@@ -219,18 +220,18 @@ enum {
 
 struct _FpiDeviceSamsung7305
 {
-  FpImageDevice  parent;
-  FpiSsm        *ssm;
-  guint8        *img_buf;
-  guint8        *img_cmd_buf;
-  guint8        *img_strip[3];
-  guint          cur_strip;
-  gboolean       deactivating;
-  guint          seq_idx;
-  guint          strip_bytes_received;
-  guint          frame_bytes_received;
-  GSList        *frames;         /* GSList of struct fpi_frame*, prepended */
-  guint          frames_captured;
+  FpImageDevice parent;
+  FpiSsm       *ssm;
+  guint8       *img_buf;
+  guint8       *img_cmd_buf;
+  guint8       *img_strip[3];
+  guint         cur_strip;
+  gboolean      deactivating;
+  guint         seq_idx;
+  guint         strip_bytes_received;
+  guint         frame_bytes_received;
+  GSList       *frames;          /* GSList of struct fpi_frame*, prepended */
+  guint         frames_captured;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceSamsung7305, fpi_device_samsung7305,
@@ -239,25 +240,38 @@ G_DEFINE_TYPE (FpiDeviceSamsung7305, fpi_device_samsung7305, FP_TYPE_IMAGE_DEVIC
 
 /* ── Forward declarations ───────────────────────────────────────────────── */
 
-typedef void (*ExchangeDone) (FpDevice *dev, FpiSsm *ssm,
-                              const guint8 *resp, gsize resp_len,
-                              GError *error);
+typedef void (*ExchangeDone) (FpDevice     *dev,
+                              FpiSsm       *ssm,
+                              const guint8 *resp,
+                              gsize         resp_len,
+                              GError       *error);
 
-static void run_init_seq   (FpiDeviceSamsung7305 *self);
-static void run_cap_seq    (FpiDeviceSamsung7305 *self);
-static void strip_image_read_cb (FpiUsbTransfer *transfer, FpDevice *dev,
-                                 gpointer unused, GError *error);
-static void image_read_cb       (FpiUsbTransfer *transfer, FpDevice *dev,
-                                 gpointer unused, GError *error);
-static void img_cmd_write_cb    (FpiUsbTransfer *transfer, FpDevice *dev,
-                                 gpointer unused, GError *error);
+static void run_init_seq (FpiDeviceSamsung7305 *self);
+static void run_cap_seq (FpiDeviceSamsung7305 *self);
+static void strip_image_read_cb (FpiUsbTransfer *transfer,
+                                 FpDevice       *dev,
+                                 gpointer        unused,
+                                 GError         *error);
+static void image_read_cb (FpiUsbTransfer *transfer,
+                           FpDevice       *dev,
+                           gpointer        unused,
+                           GError         *error);
+static void img_cmd_write_cb (FpiUsbTransfer *transfer,
+                              FpDevice       *dev,
+                              gpointer        unused,
+                              GError         *error);
 
-static void bracketed_submit (FpDevice *dev, FpiSsm *ssm,
-                              const guint8 *cmd, gsize cmd_len,
-                              guint16 prime_len, gboolean doorbell,
-                              ExchangeDone done_cb);
-static void bracketed_c4_submit (FpDevice *dev, FpiSsm *ssm,
-                                 guint8 *cmd_buf, gsize len,
+static void bracketed_submit (FpDevice     *dev,
+                              FpiSsm       *ssm,
+                              const guint8 *cmd,
+                              gsize         cmd_len,
+                              guint16       prime_len,
+                              gboolean      doorbell,
+                              ExchangeDone  done_cb);
+static void bracketed_c4_submit (FpDevice              *dev,
+                                 FpiSsm                *ssm,
+                                 guint8                *cmd_buf,
+                                 gsize                  len,
                                  FpiUsbTransferCallback read_cb);
 
 /* ── Deactivation guard ─────────────────────────────────────────────────── */
@@ -302,7 +316,8 @@ check_deactivating (FpiUsbTransfer *transfer, GError *error)
  * or g_error_free.
  */
 
-typedef struct {
+typedef struct
+{
   const guint8 *cmd;
   gsize         cmd_len;
   guint16       prime_len;
@@ -312,18 +327,33 @@ typedef struct {
   gsize         resp_actual;
 } ExchangeCtx;
 
-static void ex_after_heartbeat (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err);
-static void ex_after_prime     (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err);
-static void ex_after_write     (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err);
-static void ex_after_read      (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err);
-static void ex_after_doorbell  (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err);
+static void ex_after_heartbeat (FpiUsbTransfer *t,
+                                FpDevice       *dev,
+                                gpointer        ud,
+                                GError         *err);
+static void ex_after_prime (FpiUsbTransfer *t,
+                            FpDevice       *dev,
+                            gpointer        ud,
+                            GError         *err);
+static void ex_after_write (FpiUsbTransfer *t,
+                            FpDevice       *dev,
+                            gpointer        ud,
+                            GError         *err);
+static void ex_after_read (FpiUsbTransfer *t,
+                           FpDevice       *dev,
+                           gpointer        ud,
+                           GError         *err);
+static void ex_after_doorbell (FpiUsbTransfer *t,
+                               FpDevice       *dev,
+                               gpointer        ud,
+                               GError         *err);
 
 static void
 ex_complete (FpDevice *dev, FpiSsm *ssm, ExchangeCtx *ctx, GError *err)
 {
   ExchangeDone cb = ctx->done_cb;
-  guint8      *buf = ctx->resp_buf;
-  gsize        n   = ctx->resp_actual;
+  guint8 *buf = ctx->resp_buf;
+  gsize n   = ctx->resp_actual;
 
   ctx->resp_buf = NULL;
   g_free (ctx);
@@ -339,7 +369,8 @@ ex_check_bail (FpiUsbTransfer *t, ExchangeCtx *ctx, GError *err)
 
   if (self->deactivating)
     {
-      if (err) g_error_free (err);
+      if (err)
+        g_error_free (err);
       fpi_ssm_mark_completed (t->ssm);
       g_free (ctx->resp_buf);
       g_free (ctx);
@@ -359,7 +390,7 @@ bracketed_submit (FpDevice *dev, FpiSsm *ssm,
                   guint16 prime_len, gboolean doorbell,
                   ExchangeDone done_cb)
 {
-  ExchangeCtx    *ctx = g_new0 (ExchangeCtx, 1);
+  ExchangeCtx *ctx = g_new0 (ExchangeCtx, 1);
   FpiUsbTransfer *t;
 
   ctx->cmd       = cmd;
@@ -385,10 +416,11 @@ bracketed_submit (FpDevice *dev, FpiSsm *ssm,
 static void
 ex_after_heartbeat (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err)
 {
-  ExchangeCtx    *ctx = ud;
+  ExchangeCtx *ctx = ud;
   FpiUsbTransfer *n;
 
-  if (ex_check_bail (t, ctx, err)) return;
+  if (ex_check_bail (t, ctx, err))
+    return;
 
   n = fpi_usb_transfer_new (dev);
   n->ssm = t->ssm;
@@ -406,10 +438,11 @@ ex_after_heartbeat (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err)
 static void
 ex_after_prime (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err)
 {
-  ExchangeCtx    *ctx = ud;
+  ExchangeCtx *ctx = ud;
   FpiUsbTransfer *n;
 
-  if (ex_check_bail (t, ctx, err)) return;
+  if (ex_check_bail (t, ctx, err))
+    return;
 
   n = fpi_usb_transfer_new (dev);
   n->ssm = t->ssm;
@@ -424,10 +457,11 @@ ex_after_prime (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err)
 static void
 ex_after_write (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err)
 {
-  ExchangeCtx    *ctx = ud;
+  ExchangeCtx *ctx = ud;
   FpiUsbTransfer *n;
 
-  if (ex_check_bail (t, ctx, err)) return;
+  if (ex_check_bail (t, ctx, err))
+    return;
 
   n = fpi_usb_transfer_new (dev);
   n->ssm = t->ssm;
@@ -441,10 +475,11 @@ ex_after_write (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err)
 static void
 ex_after_read (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err)
 {
-  ExchangeCtx    *ctx = ud;
+  ExchangeCtx *ctx = ud;
   FpiUsbTransfer *n;
 
-  if (ex_check_bail (t, ctx, err)) return;
+  if (ex_check_bail (t, ctx, err))
+    return;
 
   ctx->resp_actual = t->actual_length;
   ctx->resp_buf = g_memdup2 (t->buffer, t->actual_length);
@@ -476,7 +511,8 @@ ex_after_doorbell (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err)
 
   if (self->deactivating)
     {
-      if (err) g_error_free (err);
+      if (err)
+        g_error_free (err);
       fpi_ssm_mark_completed (t->ssm);
       g_free (ctx->resp_buf);
       g_free (ctx);
@@ -496,21 +532,28 @@ ex_after_doorbell (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err)
  * the padded command on EP1 (see STATE.md § "0xc4 image read command").
  */
 
-typedef struct {
+typedef struct
+{
   guint8                *cmd_buf;
   gsize                  len;
   FpiUsbTransferCallback read_cb;
 } C4Ctx;
 
-static void c4_after_heartbeat (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err);
-static void c4_after_prime     (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err);
+static void c4_after_heartbeat (FpiUsbTransfer *t,
+                                FpDevice       *dev,
+                                gpointer        ud,
+                                GError         *err);
+static void c4_after_prime (FpiUsbTransfer *t,
+                            FpDevice       *dev,
+                            gpointer        ud,
+                            GError         *err);
 
 static void
 bracketed_c4_submit (FpDevice *dev, FpiSsm *ssm,
                      guint8 *cmd_buf, gsize len,
                      FpiUsbTransferCallback read_cb)
 {
-  C4Ctx          *c = g_new0 (C4Ctx, 1);
+  C4Ctx *c = g_new0 (C4Ctx, 1);
   FpiUsbTransfer *t;
 
   c->cmd_buf = cmd_buf;
@@ -534,14 +577,24 @@ bracketed_c4_submit (FpDevice *dev, FpiSsm *ssm,
 static void
 c4_after_heartbeat (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err)
 {
-  C4Ctx                *c    = ud;
+  C4Ctx *c    = ud;
   FpiDeviceSamsung7305 *self = FPI_DEVICE_SAMSUNG7305 (dev);
-  FpiUsbTransfer       *n;
+  FpiUsbTransfer *n;
 
   if (self->deactivating)
-    { if (err) g_error_free (err); fpi_ssm_mark_completed (t->ssm); g_free (c); return; }
+    {
+      if (err)
+        g_error_free (err);
+      fpi_ssm_mark_completed (t->ssm);
+      g_free (c);
+      return;
+    }
   if (err)
-    { fpi_ssm_mark_failed (t->ssm, err); g_free (c); return; }
+    {
+      fpi_ssm_mark_failed (t->ssm, err);
+      g_free (c);
+      return;
+    }
 
   n = fpi_usb_transfer_new (dev);
   n->ssm = t->ssm;
@@ -559,14 +612,24 @@ c4_after_heartbeat (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err)
 static void
 c4_after_prime (FpiUsbTransfer *t, FpDevice *dev, gpointer ud, GError *err)
 {
-  C4Ctx                *c    = ud;
+  C4Ctx *c    = ud;
   FpiDeviceSamsung7305 *self = FPI_DEVICE_SAMSUNG7305 (dev);
-  FpiUsbTransfer       *rd, *wr;
+  FpiUsbTransfer *rd, *wr;
 
   if (self->deactivating)
-    { if (err) g_error_free (err); fpi_ssm_mark_completed (t->ssm); g_free (c); return; }
+    {
+      if (err)
+        g_error_free (err);
+      fpi_ssm_mark_completed (t->ssm);
+      g_free (c);
+      return;
+    }
   if (err)
-    { fpi_ssm_mark_failed (t->ssm, err); g_free (c); return; }
+    {
+      fpi_ssm_mark_failed (t->ssm, err);
+      g_free (c);
+      return;
+    }
 
   rd = fpi_usb_transfer_new (dev);
   rd->ssm = t->ssm;
@@ -597,7 +660,8 @@ drain_read_cb (FpiUsbTransfer *transfer, FpDevice *dev,
 
   if (self->deactivating)
     {
-      if (error) g_error_free (error);
+      if (error)
+        g_error_free (error);
       fpi_ssm_mark_completed (transfer->ssm);
       return;
     }
@@ -627,7 +691,11 @@ init_done_cb (FpDevice *dev, FpiSsm *ssm,
 {
   FpiDeviceSamsung7305 *self = FPI_DEVICE_SAMSUNG7305 (dev);
 
-  if (err) { fpi_ssm_mark_failed (ssm, err); return; }
+  if (err)
+    {
+      fpi_ssm_mark_failed (ssm, err);
+      return;
+    }
 
   fp_dbg ("samsung7305: init[%u] read %zu bytes: %02x %02x",
           self->seq_idx, n,
@@ -658,7 +726,11 @@ static void
 arm_done_cb (FpDevice *dev, FpiSsm *ssm,
              const guint8 *resp, gsize n, GError *err)
 {
-  if (err) { fpi_ssm_mark_failed (ssm, err); return; }
+  if (err)
+    {
+      fpi_ssm_mark_failed (ssm, err);
+      return;
+    }
   fp_dbg ("samsung7305: arm %zu bytes", n);
   fpi_ssm_next_state (ssm);
 }
@@ -668,7 +740,11 @@ static void
 status_done_cb (FpDevice *dev, FpiSsm *ssm,
                 const guint8 *resp, gsize n, GError *err)
 {
-  if (err) { fpi_ssm_mark_failed (ssm, err); return; }
+  if (err)
+    {
+      fpi_ssm_mark_failed (ssm, err);
+      return;
+    }
   fp_dbg ("samsung7305: status %zu bytes: %02x %02x",
           n, n > 0 ? resp[0] : 0, n > 1 ? resp[1] : 0);
   if (n >= 2 && resp[1] == STATUS_FINGER)
@@ -686,7 +762,11 @@ cap_check_done_cb (FpDevice *dev, FpiSsm *ssm,
 {
   FpiDeviceSamsung7305 *self = FPI_DEVICE_SAMSUNG7305 (dev);
 
-  if (err) { fpi_ssm_mark_failed (ssm, err); return; }
+  if (err)
+    {
+      fpi_ssm_mark_failed (ssm, err);
+      return;
+    }
   fp_dbg ("samsung7305: cap_check %zu bytes: %02x %02x %02x %02x %02x (frames=%u)",
           n,
           n > 0 ? resp[0] : 0, n > 1 ? resp[1] : 0,
@@ -700,9 +780,13 @@ cap_check_done_cb (FpDevice *dev, FpiSsm *ssm,
         fpi_ssm_next_state (ssm);
     }
   else if (self->frames_captured > 0)
-    fpi_ssm_jump_to_state (ssm, M_ASSEMBLE);
+    {
+      fpi_ssm_jump_to_state (ssm, M_ASSEMBLE);
+    }
   else
-    fpi_ssm_jump_to_state_delayed (ssm, M_POLL_ARM, POLL_DELAY);
+    {
+      fpi_ssm_jump_to_state_delayed (ssm, M_POLL_ARM, POLL_DELAY);
+    }
 }
 
 /* Capture-setup-sequence loop (cap_setup_seq or ff_setup_seq). */
@@ -723,9 +807,13 @@ cap_seq_done_cb (FpDevice *dev, FpiSsm *ssm,
                  const guint8 *resp, gsize n, GError *err)
 {
   FpiDeviceSamsung7305 *self = FPI_DEVICE_SAMSUNG7305 (dev);
-  gsize                 seq_len;
+  gsize seq_len;
 
-  if (err) { fpi_ssm_mark_failed (ssm, err); return; }
+  if (err)
+    {
+      fpi_ssm_mark_failed (ssm, err);
+      return;
+    }
 
   fp_dbg ("samsung7305: cap_seq[%u] %zu bytes", self->seq_idx, n);
   self->seq_idx++;
@@ -739,7 +827,7 @@ cap_seq_done_cb (FpDevice *dev, FpiSsm *ssm,
 static void
 run_cap_seq (FpiDeviceSamsung7305 *self)
 {
-  gsize             seq_len;
+  gsize seq_len;
   const SamsungCmd *seq = active_cap_seq (self, &seq_len);
   const SamsungCmd *c   = &seq[self->seq_idx];
 
@@ -755,7 +843,11 @@ static void
 oneshot_done_cb (FpDevice *dev, FpiSsm *ssm,
                  const guint8 *resp, gsize n, GError *err)
 {
-  if (err) { fpi_ssm_mark_failed (ssm, err); return; }
+  if (err)
+    {
+      fpi_ssm_mark_failed (ssm, err);
+      return;
+    }
   fp_dbg ("samsung7305: oneshot %zu bytes (state %d)",
           n, fpi_ssm_get_cur_state (ssm));
   fpi_ssm_next_state (ssm);
@@ -766,7 +858,11 @@ static void
 cap_wait_done_cb (FpDevice *dev, FpiSsm *ssm,
                   const guint8 *resp, gsize n, GError *err)
 {
-  if (err) { fpi_ssm_mark_failed (ssm, err); return; }
+  if (err)
+    {
+      fpi_ssm_mark_failed (ssm, err);
+      return;
+    }
   fp_dbg ("samsung7305: cap_wait %zu bytes: %02x %02x (state %d)",
           n, n > 0 ? resp[0] : 0, n > 1 ? resp[1] : 0,
           fpi_ssm_get_cur_state (ssm));
@@ -838,7 +934,7 @@ image_read_cb (FpiUsbTransfer *transfer, FpDevice *dev,
                gpointer unused, GError *error)
 {
   FpiDeviceSamsung7305 *self = FPI_DEVICE_SAMSUNG7305 (dev);
-  gsize                 to_copy;
+  gsize to_copy;
 
   if (check_deactivating (transfer, error))
     return;
@@ -876,7 +972,7 @@ static void
 m_loop_state (FpiSsm *ssm, FpDevice *dev)
 {
   FpiDeviceSamsung7305 *self = FPI_DEVICE_SAMSUNG7305 (dev);
-  FpImageDevice        *img  = FP_IMAGE_DEVICE (dev);
+  FpImageDevice *img  = FP_IMAGE_DEVICE (dev);
 
   if (self->deactivating)
     {
@@ -1023,7 +1119,7 @@ m_loop_state (FpiSsm *ssm, FpDevice *dev)
     case M_ASSEMBLE:
       {
         FpImage *assembled;
-        GSList  *ordered = g_slist_reverse (self->frames);
+        GSList *ordered = g_slist_reverse (self->frames);
         self->frames = NULL;
 
         if (self->frames_captured < MIN_FRAMES)
@@ -1092,7 +1188,7 @@ m_loop_state (FpiSsm *ssm, FpDevice *dev)
         if (!assembled)
           {
             fpi_ssm_mark_failed (ssm,
-                                  fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
+                                 fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
             return;
           }
 
@@ -1116,7 +1212,7 @@ m_loop_state (FpiSsm *ssm, FpDevice *dev)
 static void
 m_loop_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
-  FpImageDevice        *img  = FP_IMAGE_DEVICE (dev);
+  FpImageDevice *img  = FP_IMAGE_DEVICE (dev);
   FpiDeviceSamsung7305 *self = FPI_DEVICE_SAMSUNG7305 (dev);
 
   /* report_finger_status(FALSE) on the completing SSM can synchronously
@@ -1164,8 +1260,8 @@ static void
 samsung_dev_init (FpImageDevice *dev)
 {
   FpiDeviceSamsung7305 *self  = FPI_DEVICE_SAMSUNG7305 (dev);
-  GUsbDevice           *usb   = fpi_device_get_usb_device (FP_DEVICE (dev));
-  GError               *error = NULL;
+  GUsbDevice *usb   = fpi_device_get_usb_device (FP_DEVICE (dev));
+  GError *error = NULL;
 
   /* NOTE: g_usb_device_reset() was previously invoked here to clear stale
    * EP2 data between sessions, but it also resets the device's AGC/calibration
@@ -1185,17 +1281,29 @@ samsung_dev_init (FpImageDevice *dev)
   {
     GError *werr = NULL;
     if (!session_ctrl_out (usb, 0x0006, 0, &werr))
-      { fp_warn ("samsung7305: session open 0xdb/6/0 failed: %s",
-                 werr->message); g_clear_error (&werr); }
+      {
+        fp_warn ("samsung7305: session open 0xdb/6/0 failed: %s",
+                 werr->message);
+        g_clear_error (&werr);
+      }
     if (!session_ctrl_out (usb, 0x0006, 1, &werr))
-      { fp_warn ("samsung7305: session open 0xdb/6/1 failed: %s",
-                 werr->message); g_clear_error (&werr); }
+      {
+        fp_warn ("samsung7305: session open 0xdb/6/1 failed: %s",
+                 werr->message);
+        g_clear_error (&werr);
+      }
     if (!session_ctrl_out (usb, 0x000b, 0, &werr))
-      { fp_warn ("samsung7305: session open 0xdb/b/0 failed: %s",
-                 werr->message); g_clear_error (&werr); }
+      {
+        fp_warn ("samsung7305: session open 0xdb/b/0 failed: %s",
+                 werr->message);
+        g_clear_error (&werr);
+      }
     if (!session_ctrl_out (usb, 0x000b, 1, &werr))
-      { fp_warn ("samsung7305: session open 0xdb/b/1 failed: %s",
-                 werr->message); g_clear_error (&werr); }
+      {
+        fp_warn ("samsung7305: session open 0xdb/b/1 failed: %s",
+                 werr->message);
+        g_clear_error (&werr);
+      }
   }
 
   self->img_buf     = g_malloc0 (FRAME_SIZE + 2);
@@ -1211,7 +1319,7 @@ static void
 samsung_dev_deinit (FpImageDevice *dev)
 {
   FpiDeviceSamsung7305 *self  = FPI_DEVICE_SAMSUNG7305 (dev);
-  GError               *error = NULL;
+  GError *error = NULL;
 
   g_clear_pointer (&self->img_buf,     g_free);
   g_clear_pointer (&self->img_cmd_buf, g_free);
@@ -1224,7 +1332,7 @@ samsung_dev_deinit (FpImageDevice *dev)
     }
 
   g_usb_device_release_interface (fpi_device_get_usb_device (FP_DEVICE (dev)),
-                                   0, 0, &error);
+                                  0, 0, &error);
   fpi_image_device_close_complete (dev, error);
 }
 
@@ -1275,7 +1383,7 @@ fpi_device_samsung7305_init (FpiDeviceSamsung7305 *self)
 static void
 fpi_device_samsung7305_class_init (FpiDeviceSamsung7305Class *klass)
 {
-  FpDeviceClass      *dev_class = FP_DEVICE_CLASS (klass);
+  FpDeviceClass *dev_class = FP_DEVICE_CLASS (klass);
   FpImageDeviceClass *img_class = FP_IMAGE_DEVICE_CLASS (klass);
 
   dev_class->id        = FP_COMPONENT;
