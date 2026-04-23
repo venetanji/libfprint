@@ -65,6 +65,11 @@ static const struct sonly_regwrite awfsm_1000_writev_2[] = {
   { 0x30, 0xe1 }, { 0x15, 0x06 }, { 0x15, 0x86 },
 };
 
+static const struct sonly_regwrite awfsm_1002_writev_2[] = {
+  /* Windows enables 147e:1002 finger detection with bit 0x01 clear here. */
+  { 0x30, 0xe1 }, { 0x15, 0x05 }, { 0x15, 0x85 },
+};
+
 static const struct sonly_regwrite awfsm_2016_writev_3[] = {
   { 0x13, 0x45 }, { 0x30, 0xe0 }, { 0x12, 0x01 }, { 0x20, 0x01 },
   { 0x09, 0x20 }, { 0x0a, 0x00 }, { 0x30, 0xe0 }, { 0x20, 0x01 },
@@ -94,11 +99,12 @@ static const struct sonly_regwrite capsm_1000_writev[] = {
 
 static const struct sonly_regwrite capsm_1002_writev[] = {
   /* 147e:1002 appears close to the 1000 family for init/interrupts, but it
-   * does not start streaming image data with the plain 1000 capture writes.
-   * Try the broader capture-mode enable sequence used by the 2016 variant.
+   * does not start streaming image data with the plain 1000/2016 capture
+   * writes. This sequence matches the Windows driver immediately before bulk
+   * image packets start arriving on endpoint 0x81.
    */
-  { 0x09, 0x28 }, { 0x13, 0x55 }, { 0x0b, 0x80 }, { 0x04, 0x00 },
-  { 0x05, 0x00 },
+  { 0x15, 0x25 }, { 0x30, 0xe0 }, { 0x09, 0x23 }, { 0x13, 0x75 },
+  { 0x0b, 0x80 },
 };
 
 static const struct sonly_regwrite capsm_1001_writev_1[] = {
@@ -198,6 +204,14 @@ static const struct sonly_regwrite initsm_1000_writev_1[] = {
   { 0x04, 0x00 }, { 0x05, 0x00 },
 
   { 0x0b, 0x00 }, { 0x08, 0x00 },       /* Initialize capture control registers */
+};
+
+static const struct sonly_regwrite initsm_1002_writev_1[] = {
+  /* Captured from the Windows 147e:1002 driver before finger detection. */
+  { 0x49, 0x08 },
+  { 0x3e, 0x3d }, { 0x3e, 0x18 }, { 0x3e, 0x38 }, { 0x3e, 0x63 },
+  { 0x3e, 0x9d }, { 0x3e, 0x5c }, { 0x3e, 0xb1 }, { 0x3e, 0x1f },
+  { 0x1a, 0x01 }, { 0x1a, 0x03 }, { 0x0b, 0x00 }, { 0x49, 0x0c },
 };
 
 static const struct sonly_regwrite initsm_1001_writev_1[] = {

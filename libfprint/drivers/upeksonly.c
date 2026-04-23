@@ -864,7 +864,10 @@ awfsm_1000_run_state (FpiSsm *ssm, FpDevice *_dev)
       break;
 
     case AWFSM_1000_WRITEV_2:
-      sm_write_regs (ssm, _dev, awfsm_1000_writev_2, G_N_ELEMENTS (awfsm_1000_writev_2));
+      if (FPI_DEVICE_UPEKSONLY (_dev)->dev_model == UPEKSONLY_1002)
+        sm_write_regs (ssm, _dev, awfsm_1002_writev_2, G_N_ELEMENTS (awfsm_1002_writev_2));
+      else
+        sm_write_regs (ssm, _dev, awfsm_1000_writev_2, G_N_ELEMENTS (awfsm_1000_writev_2));
       break;
     }
 }
@@ -889,8 +892,8 @@ enum capsm_1000_states {
 
 enum capsm_1002_states {
   CAPSM_1002_INIT,
-  CAPSM_1002_FIRE_BULK,
   CAPSM_1002_WRITEV,
+  CAPSM_1002_FIRE_BULK,
   CAPSM_1002_NUM_STATES,
 };
 
@@ -1192,7 +1195,10 @@ initsm_1000_run_state (FpiSsm *ssm, FpDevice *_dev)
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case INITSM_1000_WRITEV_1:
-      sm_write_regs (ssm, _dev, initsm_1000_writev_1, G_N_ELEMENTS (initsm_1000_writev_1));
+      if (FPI_DEVICE_UPEKSONLY (_dev)->dev_model == UPEKSONLY_1002)
+        sm_write_regs (ssm, _dev, initsm_1002_writev_1, G_N_ELEMENTS (initsm_1002_writev_1));
+      else
+        sm_write_regs (ssm, _dev, initsm_1000_writev_1, G_N_ELEMENTS (initsm_1000_writev_1));
       break;
     }
 }
