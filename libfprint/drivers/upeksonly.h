@@ -92,6 +92,15 @@ static const struct sonly_regwrite capsm_1000_writev[] = {
   { 0x08, 0x80 }, { 0x13, 0x55 }, { 0x0b, 0x80 },       /* Enter capture mode */
 };
 
+static const struct sonly_regwrite capsm_1002_writev[] = {
+  /* 147e:1002 appears close to the 1000 family for init/interrupts, but it
+   * does not start streaming image data with the plain 1000 capture writes.
+   * Try the broader capture-mode enable sequence used by the 2016 variant.
+   */
+  { 0x09, 0x28 }, { 0x13, 0x55 }, { 0x0b, 0x80 }, { 0x04, 0x00 },
+  { 0x05, 0x00 },
+};
+
 static const struct sonly_regwrite capsm_1001_writev_1[] = {
   { 0x1a, 0x02 },
   { 0x4a, 0x9d },

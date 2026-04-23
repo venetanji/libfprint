@@ -41,6 +41,7 @@
 enum {
   UPEKSONLY_2016,
   UPEKSONLY_1000,
+  UPEKSONLY_1002,
   UPEKSONLY_1001,
 };
 
@@ -507,6 +508,12 @@ img_data_cb (FpiUsbTransfer *transfer, FpDevice *device,
 
   self->num_flying--;
 
+  fp_dbg ("bulk cb: error=%s actual_length=%zu num_flying=%d capturing=%d",
+          error ? error->message : "none",
+          transfer->actual_length,
+          self->num_flying,
+          self->capturing);
+
   if (self->killing_transfers)
     {
       if (self->num_flying == 0)
@@ -554,6 +561,10 @@ img_data_cb (FpiUsbTransfer *transfer, FpDevice *device,
 
   if (is_capturing (self))
     {
+      fp_dbg ("re-submitting bulk transfer actual_length=%zu rows=%u finger_state=%d",
+              transfer->actual_length,
+              self->num_rows,
+              self->finger_state);
       fpi_usb_transfer_submit (fpi_usb_transfer_ref (transfer),
                                0,
                                self->img_cancellable,
@@ -876,6 +887,13 @@ enum capsm_1000_states {
   CAPSM_1000_NUM_STATES,
 };
 
+enum capsm_1002_states {
+  CAPSM_1002_INIT,
+  CAPSM_1002_FIRE_BULK,
+  CAPSM_1002_WRITEV,
+  CAPSM_1002_NUM_STATES,
+};
+
 enum capsm_1001_states {
   CAPSM_1001_INIT,
   CAPSM_1001_FIRE_BULK,
@@ -898,6 +916,7 @@ capsm_fire_bulk (FpiSsm   *ssm,
 
   g_clear_object (&self->img_cancellable);
   self->img_cancellable = g_cancellable_new ();
+  fp_dbg ("submitting %u bulk transfers on ep 0x81", self->img_transfers->len);
   for (i = 0; i < self->img_transfers->len; i++)
     {
       fpi_usb_transfer_submit (fpi_usb_transfer_ref (g_ptr_array_index (self->img_transfers, i)),
@@ -1019,6 +1038,35 @@ capsm_1001_run_state (FpiSsm *ssm, FpDevice *_dev)
 
     case CAPSM_1001_WRITEV_5:
       sm_write_regs (ssm, _dev, capsm_1001_writev_5, G_N_ELEMENTS (capsm_1001_writev_5));
+      break;
+    }
+}
+
+static void
+capsm_1002_run_state (FpiSsm *ssm, FpDevice *_dev)
+{
+  FpiDeviceUpeksonly *self = FPI_DEVICE_UPEKSONLY (_dev);
+
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case CAPSM_1002_INIT:
+      self->rowbuf_offset = -1;
+      self->num_rows = 0;
+      self->wraparounds = -1;
+      self->num_blank = 0;
+      self->num_nonblank = 0;
+      self->finger_state = FINGER_DETECTED;
+      self->last_seqnum = 16383;
+      self->killing_transfers = 0;
+      fpi_ssm_next_state (ssm);
+      break;
+
+    case CAPSM_1002_FIRE_BULK:
+      capsm_fire_bulk (ssm, _dev);
+      break;
+
+    case CAPSM_1002_WRITEV:
+      sm_write_regs (ssm, _dev, capsm_1002_writev, G_N_ELEMENTS (capsm_1002_writev));
       break;
     }
 }
@@ -1223,6 +1271,7 @@ loopsm_run_state (FpiSsm *ssm, FpDevice *_dev)
                   break;
 
                 case UPEKSONLY_1000:
+                case UPEKSONLY_1002:
                   awfsm = fpi_ssm_new (FP_DEVICE (dev),
                                        awfsm_1000_run_state,
                                        AWFSM_1000_NUM_STATES);
@@ -1266,6 +1315,12 @@ loopsm_run_state (FpiSsm *ssm, FpDevice *_dev)
                                CAPSM_1000_NUM_STATES);
           break;
 
+        case UPEKSONLY_1002:
+          capsm = fpi_ssm_new (FP_DEVICE (dev),
+                               capsm_1002_run_state,
+                               CAPSM_1002_NUM_STATES);
+          break;
+
         case UPEKSONLY_1001:
           capsm = fpi_ssm_new (FP_DEVICE (dev),
                                capsm_1001_run_state,
@@ -1292,6 +1347,7 @@ loopsm_run_state (FpiSsm *ssm, FpDevice *_dev)
           break;
 
         case UPEKSONLY_1000:
+        case UPEKSONLY_1002:
           deinitsm = fpi_ssm_new (FP_DEVICE (dev),
                                   deinitsm_1000_run_state,
                                   DEINITSM_1000_NUM_STATES);
@@ -1421,6 +1477,7 @@ dev_activate (FpImageDevice *dev)
       break;
 
     case UPEKSONLY_1000:
+    case UPEKSONLY_1002:
       ssm = fpi_ssm_new (FP_DEVICE (dev), initsm_1000_run_state,
                          INITSM_1000_NUM_STATES);
       break;
@@ -1461,6 +1518,10 @@ dev_discover (GUsbDevice *usb_device)
     if (bcd == 0x0033)             /* Looking for revision 0.33 */
       return 1;
 
+  if (pid == 0x1002)
+    if (bcd == 0x0048)             /* TouchStrip Fingerprint Sensor */
+      return 1;
+
   if (pid == 0x1001)
     return 1;
 
@@ -1470,6 +1531,7 @@ dev_discover (GUsbDevice *usb_device)
 static const FpIdEntry id_table[] = {
   { .vid = 0x147e,  .pid = 0x2016, .driver_data = UPEKSONLY_2016 },
   { .vid = 0x147e,  .pid = 0x1000, .driver_data = UPEKSONLY_1000 },
+  { .vid = 0x147e,  .pid = 0x1002, .driver_data = UPEKSONLY_1002 },
   { .vid = 0x147e,  .pid = 0x1001, .driver_data = UPEKSONLY_1001 },
   { .vid = 0,  .pid = 0,  .driver_data = 0 },
 };
@@ -1531,6 +1593,7 @@ dev_init (FpImageDevice *dev)
   switch (self->dev_model)
     {
     case UPEKSONLY_1000:
+    case UPEKSONLY_1002:
       self->img_width = IMG_WIDTH_1000;
       self->assembling_ctx.line_width = IMG_WIDTH_1000;
       break;
