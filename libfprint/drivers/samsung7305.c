@@ -1158,7 +1158,7 @@ m_loop_state (FpiSsm *ssm, FpDevice *dev)
                   self->frames_captured);
         }
 
-        if (self->frames_captured >= 2)
+        if (self->frames_captured >= 2 && ordered && ordered->next)
           {
             /* Fixed stride instead of motion estimation — see the note
              * near ASSEMBLE_STRIDE. First frame's delta_y is forced to 0
