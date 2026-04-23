@@ -141,6 +141,7 @@ default_drivers = [
     'upekts',
     'goodixmoc',
     'nb1010',
+    'samsung7305',
     'fpcmoc',
     'realtek',
     'focaltech_moc',
