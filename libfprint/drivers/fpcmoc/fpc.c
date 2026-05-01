@@ -272,15 +272,14 @@ static void
 fpc_cmd_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
   FpiDeviceFpcMoc *self = FPI_DEVICE_FPCMOC (dev);
-  CommandData *data = fpi_ssm_get_data (ssm);
 
   self->cmd_ssm = NULL;
   /* Notify about the SSM failure from here instead. */
   if (error)
     {
       fp_err ("%s error: %s ", G_STRFUNC, error->message);
-      if (data->callback)
-        data->callback (self, NULL, error);
+      if (fpi_ssm_get_data (ssm)->callback)
+        fpi_ssm_get_data (ssm)->callback (self, NULL, error);
     }
 }
 

@@ -292,7 +292,7 @@ handoff_img (FpImageDevice *dev)
       guint cropped_rows;
       guint out_height;
       guint row_count = g_slist_length (self->rows);
-      g_autofree guchar **rows = g_new (guchar *, row_count);
+      g_autofree guchar **rows = g_new0 (guchar *, row_count);
       guint row_idx = 0;
 
       if (row_count != self->num_rows)
@@ -331,7 +331,15 @@ handoff_img (FpImageDevice *dev)
                   guint src_y = crop_start + y * IMG_HEIGHT_SCALE_1002 + i;
                   guint src_x = IMG_CROP_X_1002 + x;
 
-                  sum += rows[src_y][src_x];
+                  if (src_y >= row_count)
+                    continue;
+
+                  guchar *src_row = rows[src_y];
+
+                  if (!src_row)
+                    continue;
+
+                  sum += src_row[src_x];
                 }
 
               img->data[y * IMG_CROP_WIDTH_1002 + x] = sum / IMG_HEIGHT_SCALE_1002;
