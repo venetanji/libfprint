@@ -108,7 +108,7 @@ struct _FpiDeviceUpeksonly
   int            wraparounds;
   int            num_blank;
   int            num_nonblank;
-  enum sonly_fs finger_state;
+  enum sonly_fs  finger_state;
   int            last_seqnum;
   guint32        marker_window;
   int            marker_skip;
@@ -399,7 +399,7 @@ update_1002_finger_detection (FpiDeviceUpeksonly *self)
         {
           self->finger_start_row_1002 =
             MAX (0, (int) self->num_rows -
-                    (int) self->detail_rows_1002 * IMG_HEIGHT_SCALE_1002);
+                 (int) self->detail_rows_1002 * IMG_HEIGHT_SCALE_1002);
           fp_dbg ("detected 1002 finger data at row %d", self->finger_start_row_1002);
         }
     }
@@ -413,8 +413,8 @@ update_1002_finger_detection (FpiDeviceUpeksonly *self)
 
   return self->finger_start_row_1002 >= 0 &&
          self->num_rows >= (guint) self->finger_start_row_1002 +
-                           IMG_CROP_OFFSET_1002 +
-                           IMG_CROP_ROWS_1002;
+         IMG_CROP_OFFSET_1002 +
+         IMG_CROP_ROWS_1002;
 }
 
 static void
@@ -736,10 +736,8 @@ handle_packet_1002 (FpImageDevice *dev, unsigned char *data)
         }
 
       if (self->rowbuf)
-        {
-          if (self->rowbuf_offset < self->img_width)
-            self->rowbuf[self->rowbuf_offset++] = byte;
-        }
+        if (self->rowbuf_offset < self->img_width)
+          self->rowbuf[self->rowbuf_offset++] = byte;
 
       self->marker_window = ((self->marker_window << 8) | byte) & 0xffffff;
 
@@ -757,7 +755,9 @@ handle_packet_1002 (FpImageDevice *dev, unsigned char *data)
                     return;
                 }
               else
-                g_clear_pointer (&self->rowbuf, g_free);
+                {
+                  g_clear_pointer (&self->rowbuf, g_free);
+                }
             }
 
           self->rowbuf = g_malloc0 (self->img_width);
@@ -779,11 +779,13 @@ img_data_cb (FpiUsbTransfer *transfer, FpDevice *device,
   self->num_flying--;
 
   if (self->dev_model != UPEKSONLY_1002)
-    fp_dbg ("bulk cb: error=%s actual_length=%zu num_flying=%d capturing=%d",
-            error ? error->message : "none",
-            transfer->actual_length,
-            self->num_flying,
-            self->capturing);
+    {
+      fp_dbg ("bulk cb: error=%s actual_length=%zu num_flying=%d capturing=%d",
+              error ? error->message : "none",
+              transfer->actual_length,
+              self->num_flying,
+              self->capturing);
+    }
 
   if (self->killing_transfers)
     {
@@ -837,10 +839,12 @@ img_data_cb (FpiUsbTransfer *transfer, FpDevice *device,
   if (is_capturing (self))
     {
       if (self->dev_model != UPEKSONLY_1002)
-        fp_dbg ("re-submitting bulk transfer actual_length=%zu rows=%u finger_state=%d",
-                transfer->actual_length,
-                self->num_rows,
-                self->finger_state);
+        {
+          fp_dbg ("re-submitting bulk transfer actual_length=%zu rows=%u finger_state=%d",
+                  transfer->actual_length,
+                  self->num_rows,
+                  self->finger_state);
+        }
       fpi_usb_transfer_submit (fpi_usb_transfer_ref (transfer),
                                0,
                                self->img_cancellable,
@@ -871,7 +875,8 @@ struct write_regs_data_data
   size_t                            regs_written;
 };
 
-static void sm_await_intr (FpiSsm *ssm, FpImageDevice *dev);
+static void sm_await_intr (FpiSsm        *ssm,
+                           FpImageDevice *dev);
 
 static void
 write_regs_finished (struct write_regs_data *wrdata, GError *error)
@@ -951,7 +956,8 @@ sm_write_regs (FpiSsm                      *ssm,
 }
 
 static void write_regs_data_iterate (struct write_regs_data_data *wrdata);
-static void write_regs_data_finished (struct write_regs_data_data *wrdata, GError *error);
+static void write_regs_data_finished (struct write_regs_data_data *wrdata,
+                                      GError                      *error);
 
 static void
 write_regs_data_readback_cb (FpiUsbTransfer *transfer, FpDevice *device,
