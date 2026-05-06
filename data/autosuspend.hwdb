@@ -293,6 +293,7 @@ usb:v06CBp01A0*
 # Supported by libfprint driver upeksonly
 usb:v147Ep2016*
 usb:v147Ep1000*
+usb:v147Ep1002*
 usb:v147Ep1001*
  ID_AUTOSUSPEND=1
  ID_PERSIST=0
@@ -443,7 +444,6 @@ usb:v138Ap0097*
 usb:v138Ap009D*
 usb:v138Ap00AB*
 usb:v138Ap00A6*
-usb:v147Ep1002*
 usb:v1491p0088*
 usb:v16D1p1027*
 usb:v1C7Ap0300*

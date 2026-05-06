@@ -277,11 +277,9 @@ fpc_cmd_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
   /* Notify about the SSM failure from here instead. */
   if (error)
     {
-      CommandData *data = fpi_ssm_get_data (ssm);
-
       fp_err ("%s error: %s ", G_STRFUNC, error->message);
-      if (data->callback)
-        data->callback (self, NULL, error);
+      if (((CommandData *) fpi_ssm_get_data (ssm))->callback)
+        ((CommandData *) fpi_ssm_get_data (ssm))->callback (self, NULL, error);
     }
 }
 
