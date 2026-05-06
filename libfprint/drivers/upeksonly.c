@@ -31,7 +31,15 @@
 #define CTRL_TIMEOUT 1000
 #define NUM_BULK_TRANSFERS 24
 #define MAX_ROWS 2048
+#define MAX_ROWS_1002 24000
 #define MIN_ROWS 64
+#define DETAIL_THRESHOLD_SQ_1002 800.0
+#define MOTION_THRESHOLD_1002 18.0
+#define DETAIL_TRIGGER_ROWS_1002 3
+#define MIN_DETECTION_ROW_1002 1000
+#define INITIAL_FINGER_IRQ_IGNORE_MS_1002 250
+#define MAX_EARLY_FINGER_IRQS_1002 3
+#define AWAIT_FINGER_SETTLE_DELAY_MS_1002 100
 
 #define BLANK_THRESHOLD 250
 #define FINGER_PRESENT_THRESHOLD 32
@@ -41,6 +49,7 @@
 enum {
   UPEKSONLY_2016,
   UPEKSONLY_1000,
+  UPEKSONLY_1002,
   UPEKSONLY_1001,
 };
 
@@ -60,6 +69,18 @@ enum sonly_fs {
   FINGER_REMOVED,
 };
 
+enum loopsm_states {
+  LOOPSM_RUN_AWFSM,
+  LOOPSM_DELAY_AWAIT_FINGER,
+  LOOPSM_STATUS_READ,
+  LOOPSM_AWAIT_FINGER,
+  LOOPSM_RUN_CAPSM,
+  LOOPSM_CAPTURE,
+  LOOPSM_RUN_DEINITSM,
+  LOOPSM_FINAL,
+  LOOPSM_NUM_STATES,
+};
+
 struct _FpiDeviceUpeksonly
 {
   FpImageDevice parent;
@@ -75,6 +96,7 @@ struct _FpiDeviceUpeksonly
 
   /* Do we really need multiple concurrent transfers? */
   GCancellable  *img_cancellable;
+  GCancellable  *await_cancellable;
   GPtrArray     *img_transfers;
   int            num_flying;
 
@@ -86,8 +108,16 @@ struct _FpiDeviceUpeksonly
   int            wraparounds;
   int            num_blank;
   int            num_nonblank;
-  enum sonly_fs finger_state;
+  enum sonly_fs  finger_state;
   int            last_seqnum;
+  guint32        marker_window;
+  int            marker_skip;
+  int            finger_start_row_1002;
+  unsigned       detail_rows_1002;
+  gboolean       have_avg_row_1002;
+  guchar         avg_row_1002[IMG_CROP_WIDTH_1002];
+  gint64         await_intr_start_us;
+  unsigned       early_finger_irq_count_1002;
 
   enum sonly_kill_transfers_action killing_transfers;
   GError                   *kill_error;
@@ -149,6 +179,43 @@ upeksonly_get_pixel (struct fpi_line_asmbl_ctx *ctx,
   return buf[offset];
 }
 
+static int
+upeksonly_get_deviation_simple (struct fpi_line_asmbl_ctx *ctx,
+                                GSList                    *line1,
+                                GSList                    *line2)
+{
+  unsigned char *buf1 = line1->data, *buf2 = line2->data;
+  int res = 0, mean = 0;
+
+  g_assert (ctx->line_width > 0);
+
+  for (int i = 0; i < ctx->line_width; i++)
+    mean += (int) buf1[i] + (int) buf2[i];
+
+  mean /= ctx->line_width;
+
+  for (int i = 0; i < ctx->line_width; i++)
+    {
+      int dev = (int) buf1[i] + (int) buf2[i] - mean;
+      res += dev * dev;
+    }
+
+  return res / ctx->line_width;
+}
+
+static unsigned char
+upeksonly_get_pixel_simple (struct fpi_line_asmbl_ctx *ctx,
+                            GSList                    *row,
+                            unsigned                   x)
+{
+  unsigned char *buf = row->data;
+
+  if (x >= ctx->line_width)
+    return 0;
+
+  return buf[x];
+}
+
 /***** IMAGE PROCESSING *****/
 
 static void
@@ -196,7 +263,9 @@ cancel_img_transfers (FpImageDevice *dev)
 static gboolean
 is_capturing (FpiDeviceUpeksonly *sdev)
 {
-  return sdev->num_rows < MAX_ROWS && (sdev->finger_state != FINGER_REMOVED);
+  guint max_rows = sdev->dev_model == UPEKSONLY_1002 ? MAX_ROWS_1002 : MAX_ROWS;
+
+  return sdev->num_rows < max_rows && (sdev->finger_state != FINGER_REMOVED);
 }
 
 static void
@@ -216,7 +285,72 @@ handoff_img (FpImageDevice *dev)
   self->rows = g_slist_reverse (self->rows);
 
   fp_dbg ("%u rows", self->num_rows);
-  img = fpi_assemble_lines (&self->assembling_ctx, self->rows, self->num_rows);
+
+  if (self->dev_model == UPEKSONLY_1002)
+    {
+      guint crop_start = 0;
+      guint cropped_rows;
+      guint out_height;
+      guint row_count = g_slist_length (self->rows);
+      g_autofree guchar **rows = g_new0 (guchar *, row_count);
+      guint row_idx = 0;
+
+      if (row_count != self->num_rows)
+        {
+          fp_warn ("1002 row list length %u differs from row counter %u",
+                   row_count,
+                   self->num_rows);
+          self->num_rows = row_count;
+        }
+
+      if (self->finger_start_row_1002 >= 0)
+        crop_start = self->finger_start_row_1002 + IMG_CROP_OFFSET_1002;
+      else if (row_count > IMG_CROP_ROWS_1002)
+        crop_start = row_count - IMG_CROP_ROWS_1002;
+
+      if (crop_start >= row_count)
+        crop_start = 0;
+
+      cropped_rows = MIN (IMG_CROP_ROWS_1002, row_count - crop_start);
+      out_height = cropped_rows / IMG_HEIGHT_SCALE_1002;
+
+      for (GSList *row = self->rows; row; row = g_slist_next (row))
+        rows[row_idx++] = row->data;
+
+      img = fp_image_new (IMG_CROP_WIDTH_1002, out_height);
+      img->flags = FPI_IMAGE_COLORS_INVERTED;
+
+      for (guint y = 0; y < out_height; y++)
+        {
+          for (guint x = 0; x < IMG_CROP_WIDTH_1002; x++)
+            {
+              guint sum = 0;
+
+              for (guint i = 0; i < IMG_HEIGHT_SCALE_1002; i++)
+                {
+                  guint src_y = crop_start + y * IMG_HEIGHT_SCALE_1002 + i;
+                  guint src_x = IMG_CROP_X_1002 + x;
+
+                  if (src_y >= row_count)
+                    continue;
+
+                  guchar *src_row = rows[src_y];
+
+                  if (!src_row)
+                    continue;
+
+                  sum += src_row[src_x];
+                }
+
+              img->data[y * IMG_CROP_WIDTH_1002 + x] = sum / IMG_HEIGHT_SCALE_1002;
+            }
+        }
+
+    }
+  else
+    {
+      img = fpi_assemble_lines (&self->assembling_ctx, self->rows, self->num_rows);
+    }
 
   g_slist_free_full (self->rows, g_free);
   self->rows = NULL;
@@ -229,21 +363,116 @@ handoff_img (FpImageDevice *dev)
   cancel_img_transfers (dev);
 }
 
+static gboolean
+update_1002_finger_detection (FpiDeviceUpeksonly *self)
+{
+  GSList *row;
+  double sum = 0.0;
+  double sq_sum = 0.0;
+  double motion = 0.0;
+  guchar avg_row[IMG_CROP_WIDTH_1002];
+
+  if (self->num_rows % IMG_HEIGHT_SCALE_1002 != 0)
+    return FALSE;
+
+  for (guint x = 0; x < IMG_CROP_WIDTH_1002; x++)
+    {
+      guint col_sum = 0;
+
+      row = self->rows;
+      for (guint i = 0; i < IMG_HEIGHT_SCALE_1002 && row; i++, row = g_slist_next (row))
+        col_sum += ((guchar *) row->data)[IMG_CROP_X_1002 + x];
+
+      avg_row[x] = col_sum / IMG_HEIGHT_SCALE_1002;
+      sum += avg_row[x];
+      sq_sum += avg_row[x] * avg_row[x];
+
+      if (self->have_avg_row_1002)
+        motion += ABS ((int) avg_row[x] - (int) self->avg_row_1002[x]);
+    }
+
+  if (self->have_avg_row_1002)
+    motion /= IMG_CROP_WIDTH_1002;
+
+  if (self->num_rows >= MIN_DETECTION_ROW_1002 &&
+      (sq_sum / IMG_CROP_WIDTH_1002) -
+      (sum / IMG_CROP_WIDTH_1002) * (sum / IMG_CROP_WIDTH_1002) > DETAIL_THRESHOLD_SQ_1002 &&
+      self->have_avg_row_1002 &&
+      motion > MOTION_THRESHOLD_1002)
+    {
+      self->detail_rows_1002++;
+
+      if (self->finger_start_row_1002 < 0 &&
+          self->detail_rows_1002 >= DETAIL_TRIGGER_ROWS_1002)
+        {
+          self->finger_start_row_1002 =
+            MAX (0, (int) self->num_rows -
+                 (int) self->detail_rows_1002 * IMG_HEIGHT_SCALE_1002);
+          fp_dbg ("detected 1002 finger data at row %d", self->finger_start_row_1002);
+        }
+    }
+  else if (self->finger_start_row_1002 < 0)
+    {
+      self->detail_rows_1002 = 0;
+    }
+
+  memcpy (self->avg_row_1002, avg_row, sizeof (avg_row));
+  self->have_avg_row_1002 = TRUE;
+
+  return self->finger_start_row_1002 >= 0 &&
+         self->num_rows >= (guint) self->finger_start_row_1002 +
+         IMG_CROP_OFFSET_1002 +
+         IMG_CROP_ROWS_1002;
+}
+
 static void
 row_complete (FpImageDevice *dev)
 {
   FpiDeviceUpeksonly *self = FPI_DEVICE_UPEKSONLY (dev);
+  int line_width = self->assembling_ctx.line_width;
 
   self->rowbuf_offset = -1;
+
+  if (self->dev_model == UPEKSONLY_1002)
+    {
+      if (!is_capturing (self) || self->killing_transfers)
+        {
+          g_clear_pointer (&self->rowbuf, g_free);
+          return;
+        }
+
+      self->rows = g_slist_prepend (self->rows, self->rowbuf);
+      self->num_rows++;
+      self->rowbuf = NULL;
+
+      if (update_1002_finger_detection (self))
+        {
+          fp_dbg ("row limit met");
+          self->finger_state = FINGER_REMOVED;
+          handoff_img (dev);
+        }
+      else if (self->num_rows >= MAX_ROWS_1002)
+        {
+          fp_dbg ("1002 capture timed out without finger data");
+          self->finger_state = FINGER_REMOVED;
+          fpi_image_device_retry_scan (dev, FP_DEVICE_RETRY_TOO_SHORT);
+          fpi_image_device_report_finger_status (dev, FALSE);
+          self->killing_transfers = ITERATE_SSM;
+          self->kill_ssm = self->loopsm;
+          cancel_img_transfers (dev);
+        }
+
+      return;
+    }
 
   if (self->num_rows > 0)
     {
       unsigned char *lastrow = self->rows->data;
       int std_sq_dev, mean_sq_diff;
 
-      std_sq_dev = fpi_std_sq_dev (self->rowbuf, self->img_width);
+      std_sq_dev = fpi_std_sq_dev (self->rowbuf, line_width);
       mean_sq_diff = fpi_mean_sq_diff_norm (lastrow, self->rowbuf,
-                                            self->img_width);
+                                            line_width);
 
       switch (self->finger_state)
         {
@@ -498,6 +727,56 @@ handle_packet (FpImageDevice *dev, unsigned char *data)
 }
 
 static void
+handle_packet_1002 (FpImageDevice *dev, unsigned char *data)
+{
+  FpiDeviceUpeksonly *self = FPI_DEVICE_UPEKSONLY (dev);
+
+  data += 2;       /* skip sequence number */
+
+  for (int i = 0; i < 62; i++)
+    {
+      guint8 byte = data[i];
+
+      if (self->marker_skip > 0)
+        {
+          self->marker_skip--;
+          continue;
+        }
+
+      if (self->rowbuf)
+        if (self->rowbuf_offset < self->img_width)
+          self->rowbuf[self->rowbuf_offset++] = byte;
+
+      self->marker_window = ((self->marker_window << 8) | byte) & 0xffffff;
+
+      if (self->marker_window == 0xffa5a5)
+        {
+          if (self->rowbuf)
+            {
+              if (self->rowbuf_offset >= 3)
+                self->rowbuf_offset -= 3;
+
+              if (self->rowbuf_offset > IMG_WIDTH_1002 / 2)
+                {
+                  row_complete (dev);
+                  if (!is_capturing (self))
+                    return;
+                }
+              else
+                {
+                  g_clear_pointer (&self->rowbuf, g_free);
+                }
+            }
+
+          self->rowbuf = g_malloc0 (self->img_width);
+          self->rowbuf_offset = 0;
+          self->marker_skip = 5;
+          self->marker_window = 0;
+        }
+    }
+}
+
+static void
 img_data_cb (FpiUsbTransfer *transfer, FpDevice *device,
              gpointer user_data, GError *error)
 {
@@ -506,6 +785,15 @@ img_data_cb (FpiUsbTransfer *transfer, FpDevice *device,
   int i;
 
   self->num_flying--;
+
+  if (self->dev_model != UPEKSONLY_1002)
+    {
+      fp_dbg ("bulk cb: error=%s actual_length=%zu num_flying=%d capturing=%d",
+              error ? error->message : "none",
+              transfer->actual_length,
+              self->num_flying,
+              self->capturing);
+    }
 
   if (self->killing_transfers)
     {
@@ -549,11 +837,22 @@ img_data_cb (FpiUsbTransfer *transfer, FpDevice *device,
     {
       if (!is_capturing (self))
         return;
-      handle_packet (dev, transfer->buffer + i);
+
+      if (self->dev_model == UPEKSONLY_1002)
+        handle_packet_1002 (dev, transfer->buffer + i);
+      else
+        handle_packet (dev, transfer->buffer + i);
     }
 
   if (is_capturing (self))
     {
+      if (self->dev_model != UPEKSONLY_1002)
+        {
+          fp_dbg ("re-submitting bulk transfer actual_length=%zu rows=%u finger_state=%d",
+                  transfer->actual_length,
+                  self->num_rows,
+                  self->finger_state);
+        }
       fpi_usb_transfer_submit (fpi_usb_transfer_ref (transfer),
                                0,
                                self->img_cancellable,
@@ -574,6 +873,18 @@ struct write_regs_data
   size_t                       num_regs;
   size_t                       regs_written;
 };
+
+struct write_regs_data_data
+{
+  FpDevice                         *dev;
+  FpiSsm                           *ssm;
+  const struct sonly_regwrite_data *regs;
+  size_t                            num_regs;
+  size_t                            regs_written;
+};
+
+static void sm_await_intr (FpiSsm        *ssm,
+                           FpImageDevice *dev);
 
 static void
 write_regs_finished (struct write_regs_data *wrdata, GError *error)
@@ -652,6 +963,162 @@ sm_write_regs (FpiSsm                      *ssm,
   write_regs_iterate (wrdata);
 }
 
+static void write_regs_data_iterate (struct write_regs_data_data *wrdata);
+static void write_regs_data_finished (struct write_regs_data_data *wrdata,
+                                      GError                      *error);
+
+static void
+write_regs_data_readback_cb (FpiUsbTransfer *transfer, FpDevice *device,
+                             gpointer user_data, GError *error)
+{
+  struct write_regs_data_data *wrdata = user_data;
+
+  if (error)
+    {
+      write_regs_data_finished (wrdata, error);
+      return;
+    }
+
+  fp_dbg ("read %02x result = %02x %02x %02x %02x %02x %02x %02x %02x",
+          transfer->endpoint & 0xff,
+          transfer->buffer[0], transfer->buffer[1], transfer->buffer[2], transfer->buffer[3],
+          transfer->buffer[4], transfer->buffer[5], transfer->buffer[6], transfer->buffer[7]);
+
+  wrdata->regs_written++;
+  write_regs_data_iterate (wrdata);
+}
+
+static void
+write_regs_data_finished (struct write_regs_data_data *wrdata, GError *error)
+{
+  if (!error)
+    fpi_ssm_next_state (wrdata->ssm);
+  else
+    fpi_ssm_mark_failed (wrdata->ssm, error);
+
+  g_free (wrdata);
+}
+
+static void
+write_regs_data_cb (FpiUsbTransfer *transfer, FpDevice *device,
+                    gpointer user_data, GError *error)
+{
+  struct write_regs_data_data *wrdata = user_data;
+  const struct sonly_regwrite_data *regwrite;
+
+  if (error)
+    {
+      write_regs_data_finished (wrdata, error);
+      return;
+    }
+
+  regwrite = &wrdata->regs[wrdata->regs_written];
+
+  if (regwrite->reg == 0x47 &&
+      regwrite->len == 1 &&
+      (regwrite->value[0] == 0x00 || regwrite->value[0] == 0x04))
+    {
+      FpiUsbTransfer *read_transfer = fpi_usb_transfer_new (wrdata->dev);
+
+      fp_dbg ("read 58 len=8");
+      fpi_usb_transfer_fill_control (read_transfer,
+                                     G_USB_DEVICE_DIRECTION_DEVICE_TO_HOST,
+                                     G_USB_DEVICE_REQUEST_TYPE_VENDOR,
+                                     G_USB_DEVICE_RECIPIENT_DEVICE,
+                                     0x0c,
+                                     0,
+                                     0x58,
+                                     8);
+      read_transfer->short_is_error = TRUE;
+      read_transfer->ssm = wrdata->ssm;
+      read_transfer->endpoint = 0x58;
+
+      fpi_usb_transfer_submit (read_transfer,
+                               CTRL_TIMEOUT,
+                               NULL,
+                               write_regs_data_readback_cb,
+                               wrdata);
+      return;
+    }
+
+  wrdata->regs_written++;
+  write_regs_data_iterate (wrdata);
+}
+
+static void
+write_regs_data_iterate (struct write_regs_data_data *wrdata)
+{
+  FpiUsbTransfer *transfer;
+  const struct sonly_regwrite_data *regwrite;
+
+  if (wrdata->regs_written >= wrdata->num_regs)
+    {
+      write_regs_data_finished (wrdata, NULL);
+      return;
+    }
+
+  regwrite = &wrdata->regs[wrdata->regs_written];
+  fp_dbg ("set %02x len=%u", regwrite->reg, regwrite->len);
+
+  if (regwrite->len == 0)
+    {
+      guint8 read_len = regwrite->value[0] ? regwrite->value[0] : 8;
+
+      fp_dbg ("read %02x len=%u", regwrite->reg, read_len);
+      transfer = fpi_usb_transfer_new (wrdata->dev);
+      fpi_usb_transfer_fill_control (transfer,
+                                     G_USB_DEVICE_DIRECTION_DEVICE_TO_HOST,
+                                     G_USB_DEVICE_REQUEST_TYPE_VENDOR,
+                                     G_USB_DEVICE_RECIPIENT_DEVICE,
+                                     0x0c,
+                                     0,
+                                     regwrite->reg,
+                                     read_len);
+      transfer->short_is_error = TRUE;
+      transfer->ssm = wrdata->ssm;
+      transfer->endpoint = regwrite->reg;
+
+      fpi_usb_transfer_submit (transfer,
+                               CTRL_TIMEOUT,
+                               NULL,
+                               write_regs_data_readback_cb,
+                               wrdata);
+      return;
+    }
+
+  transfer = fpi_usb_transfer_new (wrdata->dev);
+  fpi_usb_transfer_fill_control (transfer,
+                                 G_USB_DEVICE_DIRECTION_HOST_TO_DEVICE,
+                                 G_USB_DEVICE_REQUEST_TYPE_VENDOR,
+                                 G_USB_DEVICE_RECIPIENT_DEVICE,
+                                 0x0c,
+                                 0,
+                                 regwrite->reg,
+                                 regwrite->len);
+  transfer->short_is_error = TRUE;
+  transfer->ssm = wrdata->ssm;
+  memcpy (transfer->buffer, regwrite->value, regwrite->len);
+
+  fpi_usb_transfer_submit (transfer, CTRL_TIMEOUT, NULL, write_regs_data_cb, wrdata);
+}
+
+static void
+sm_write_regs_data (FpiSsm                           *ssm,
+                    FpDevice                         *dev,
+                    const struct sonly_regwrite_data *regs,
+                    size_t                            num_regs)
+{
+  struct write_regs_data_data *wrdata = g_malloc (sizeof (*wrdata));
+
+  wrdata->ssm = ssm;
+  wrdata->regs = regs;
+  wrdata->num_regs = num_regs;
+  wrdata->regs_written = 0;
+  wrdata->dev = dev;
+
+  write_regs_data_iterate (wrdata);
+}
+
 static void
 sm_write_reg (FpiSsm        *ssm,
               FpImageDevice *dev,
@@ -722,14 +1189,64 @@ sm_read_reg (FpiSsm        *ssm,
 }
 
 static void
+sm_read_status_cb (FpiUsbTransfer *transfer, FpDevice *device,
+                   gpointer user_data, GError *error)
+{
+  if (error)
+    {
+      fpi_ssm_mark_failed (transfer->ssm, error);
+      return;
+    }
+
+  fp_dbg ("read status result = %02x %02x %02x %02x %02x %02x %02x %02x",
+          transfer->buffer[0], transfer->buffer[1], transfer->buffer[2], transfer->buffer[3],
+          transfer->buffer[4], transfer->buffer[5], transfer->buffer[6], transfer->buffer[7]);
+  fpi_ssm_next_state (transfer->ssm);
+}
+
+static void
+sm_read_status (FpiSsm        *ssm,
+                FpImageDevice *dev)
+{
+  FpiUsbTransfer *transfer = fpi_usb_transfer_new (FP_DEVICE (dev));
+
+  fp_dbg ("read status");
+  fpi_usb_transfer_fill_control (transfer,
+                                 G_USB_DEVICE_DIRECTION_DEVICE_TO_HOST,
+                                 G_USB_DEVICE_REQUEST_TYPE_VENDOR,
+                                 G_USB_DEVICE_RECIPIENT_DEVICE,
+                                 0x04,
+                                 0,
+                                 0,
+                                 8);
+  transfer->ssm = ssm;
+  transfer->short_is_error = TRUE;
+  fpi_usb_transfer_submit (transfer,
+                           CTRL_TIMEOUT,
+                           NULL,
+                           sm_read_status_cb,
+                           NULL);
+}
+
+static void
 sm_await_intr_cb (FpiUsbTransfer *transfer, FpDevice *device,
                   gpointer user_data, GError *error)
 {
   FpImageDevice *dev = FP_IMAGE_DEVICE (device);
   FpiDeviceUpeksonly *self = FPI_DEVICE_UPEKSONLY (dev);
+  gboolean finger_detected = TRUE;
+
+  g_clear_object (&self->await_cancellable);
 
   if (error)
     {
+      if (self->deactivating &&
+          g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        {
+          fpi_ssm_mark_completed (transfer->ssm);
+          return;
+        }
+
       fpi_ssm_mark_failed (transfer->ssm, error);
       return;
     }
@@ -738,6 +1255,42 @@ sm_await_intr_cb (FpiUsbTransfer *transfer, FpDevice *device,
           transfer->buffer[0], transfer->buffer[1],
           transfer->buffer[2], transfer->buffer[3]);
 
+  if (self->dev_model == UPEKSONLY_1002)
+    {
+      gint64 elapsed_ms = (g_get_monotonic_time () - self->await_intr_start_us) / 1000;
+
+      /* Windows keeps polling 0x83 with 12 12 12 12 while idle and only
+       * switches to 01 00 00 00 when a finger is actually detected. */
+      finger_detected = transfer->buffer[0] == 0x01 &&
+                        transfer->buffer[1] == 0x00 &&
+                        transfer->buffer[2] == 0x00 &&
+                        transfer->buffer[3] == 0x00;
+
+      if (finger_detected && elapsed_ms < INITIAL_FINGER_IRQ_IGNORE_MS_1002)
+        {
+          self->early_finger_irq_count_1002++;
+
+          if (self->early_finger_irq_count_1002 < MAX_EARLY_FINGER_IRQS_1002)
+            {
+              fp_dbg ("1002 early finger interrupt after %" G_GINT64_FORMAT " ms, restart wait setup",
+                      elapsed_ms);
+              fpi_ssm_jump_to_state_delayed (transfer->ssm, LOOPSM_RUN_AWFSM, 200);
+              return;
+            }
+
+          fp_dbg ("1002 accepting repeated early finger interrupt after %u attempts",
+                  self->early_finger_irq_count_1002);
+        }
+
+      if (!finger_detected)
+        {
+          fp_dbg ("1002 idle interrupt, continue waiting");
+          sm_await_intr (transfer->ssm, dev);
+          return;
+        }
+    }
+
+  self->early_finger_irq_count_1002 = 0;
   self->finger_state = FINGER_DETECTED;
   fpi_image_device_report_finger_status (dev, TRUE);
   fpi_ssm_next_state (transfer->ssm);
@@ -748,8 +1301,13 @@ sm_await_intr (FpiSsm        *ssm,
                FpImageDevice *dev)
 {
   FpiUsbTransfer *transfer = fpi_usb_transfer_new (FP_DEVICE (dev));
+  FpiDeviceUpeksonly *self = FPI_DEVICE_UPEKSONLY (dev);
 
   G_DEBUG_HERE ();
+
+  self->await_intr_start_us = g_get_monotonic_time ();
+  g_clear_object (&self->await_cancellable);
+  self->await_cancellable = g_cancellable_new ();
 
   fpi_usb_transfer_fill_interrupt (transfer, 0x83, 4);
   transfer->short_is_error = TRUE;
@@ -758,7 +1316,7 @@ sm_await_intr (FpiSsm        *ssm,
   /* NOTE: This was changed to be cancellable with the version 2 port! */
   fpi_usb_transfer_submit (transfer,
                            0,
-                           fpi_device_get_cancellable (FP_DEVICE (dev)),
+                           self->await_cancellable,
                            sm_await_intr_cb,
                            NULL);
 }
@@ -849,11 +1407,17 @@ awfsm_1000_run_state (FpiSsm *ssm, FpDevice *_dev)
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case AWFSM_1000_WRITEV_1:
-      sm_write_regs (ssm, _dev, awfsm_1000_writev_1, G_N_ELEMENTS (awfsm_1000_writev_1));
+      if (FPI_DEVICE_UPEKSONLY (_dev)->dev_model == UPEKSONLY_1002)
+        fpi_ssm_next_state (ssm);
+      else
+        sm_write_regs (ssm, _dev, awfsm_1000_writev_1, G_N_ELEMENTS (awfsm_1000_writev_1));
       break;
 
     case AWFSM_1000_WRITEV_2:
-      sm_write_regs (ssm, _dev, awfsm_1000_writev_2, G_N_ELEMENTS (awfsm_1000_writev_2));
+      if (FPI_DEVICE_UPEKSONLY (_dev)->dev_model == UPEKSONLY_1002)
+        sm_write_regs (ssm, _dev, awfsm_1002_writev_2, G_N_ELEMENTS (awfsm_1002_writev_2));
+      else
+        sm_write_regs (ssm, _dev, awfsm_1000_writev_2, G_N_ELEMENTS (awfsm_1000_writev_2));
       break;
     }
 }
@@ -874,6 +1438,14 @@ enum capsm_1000_states {
   CAPSM_1000_FIRE_BULK,
   CAPSM_1000_WRITEV,
   CAPSM_1000_NUM_STATES,
+};
+
+enum capsm_1002_states {
+  CAPSM_1002_INIT,
+  CAPSM_1002_STREAM_SETUP,
+  CAPSM_1002_FIRE_BULK,
+  CAPSM_1002_WRITEV,
+  CAPSM_1002_NUM_STATES,
 };
 
 enum capsm_1001_states {
@@ -898,6 +1470,7 @@ capsm_fire_bulk (FpiSsm   *ssm,
 
   g_clear_object (&self->img_cancellable);
   self->img_cancellable = g_cancellable_new ();
+  fp_dbg ("submitting %u bulk transfers on ep 0x81", self->img_transfers->len);
   for (i = 0; i < self->img_transfers->len; i++)
     {
       fpi_usb_transfer_submit (fpi_usb_transfer_ref (g_ptr_array_index (self->img_transfers, i)),
@@ -912,6 +1485,14 @@ capsm_fire_bulk (FpiSsm   *ssm,
 }
 
 static void
+clear_capture_rows (FpiDeviceUpeksonly *self)
+{
+  g_clear_pointer (&self->rowbuf, g_free);
+  g_slist_free_full (self->rows, g_free);
+  self->rows = NULL;
+}
+
+static void
 capsm_2016_run_state (FpiSsm *ssm, FpDevice *_dev)
 {
   FpImageDevice *dev = FP_IMAGE_DEVICE (_dev);
@@ -920,6 +1501,7 @@ capsm_2016_run_state (FpiSsm *ssm, FpDevice *_dev)
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case CAPSM_2016_INIT:
+      clear_capture_rows (self);
       self->rowbuf_offset = -1;
       self->num_rows = 0;
       self->wraparounds = -1;
@@ -927,6 +1509,8 @@ capsm_2016_run_state (FpiSsm *ssm, FpDevice *_dev)
       self->num_nonblank = 0;
       self->finger_state = FINGER_DETECTED;
       self->last_seqnum = 16383;
+      self->marker_window = 0;
+      self->marker_skip = 0;
       self->killing_transfers = 0;
       fpi_ssm_next_state (ssm);
       break;
@@ -957,6 +1541,7 @@ capsm_1000_run_state (FpiSsm *ssm, FpDevice *_dev)
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case CAPSM_1000_INIT:
+      clear_capture_rows (self);
       self->rowbuf_offset = -1;
       self->num_rows = 0;
       self->wraparounds = -1;
@@ -964,6 +1549,8 @@ capsm_1000_run_state (FpiSsm *ssm, FpDevice *_dev)
       self->num_nonblank = 0;
       self->finger_state = FINGER_DETECTED;
       self->last_seqnum = 16383;
+      self->marker_window = 0;
+      self->marker_skip = 0;
       self->killing_transfers = 0;
       fpi_ssm_next_state (ssm);
       break;
@@ -986,6 +1573,7 @@ capsm_1001_run_state (FpiSsm *ssm, FpDevice *_dev)
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case CAPSM_1001_INIT:
+      clear_capture_rows (self);
       self->rowbuf_offset = -1;
       self->num_rows = 0;
       self->wraparounds = -1;
@@ -993,6 +1581,8 @@ capsm_1001_run_state (FpiSsm *ssm, FpDevice *_dev)
       self->num_nonblank = 0;
       self->finger_state = AWAIT_FINGER;
       self->last_seqnum = 16383;
+      self->marker_window = 0;
+      self->marker_skip = 0;
       self->killing_transfers = 0;
       fpi_ssm_next_state (ssm);
       break;
@@ -1019,6 +1609,46 @@ capsm_1001_run_state (FpiSsm *ssm, FpDevice *_dev)
 
     case CAPSM_1001_WRITEV_5:
       sm_write_regs (ssm, _dev, capsm_1001_writev_5, G_N_ELEMENTS (capsm_1001_writev_5));
+      break;
+    }
+}
+
+static void
+capsm_1002_run_state (FpiSsm *ssm, FpDevice *_dev)
+{
+  FpiDeviceUpeksonly *self = FPI_DEVICE_UPEKSONLY (_dev);
+
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case CAPSM_1002_INIT:
+      clear_capture_rows (self);
+      self->rowbuf_offset = -1;
+      self->num_rows = 0;
+      self->wraparounds = -1;
+      self->num_blank = 0;
+      self->num_nonblank = 0;
+      self->finger_state = FINGER_DETECTED;
+      self->last_seqnum = 16383;
+      self->marker_window = 0;
+      self->marker_skip = 0;
+      self->finger_start_row_1002 = -1;
+      self->detail_rows_1002 = 0;
+      self->have_avg_row_1002 = FALSE;
+      self->early_finger_irq_count_1002 = 0;
+      self->killing_transfers = 0;
+      fpi_ssm_next_state (ssm);
+      break;
+
+    case CAPSM_1002_STREAM_SETUP:
+      sm_write_regs_data (ssm, _dev, capsm_1002_writev_data, G_N_ELEMENTS (capsm_1002_writev_data));
+      break;
+
+    case CAPSM_1002_WRITEV:
+      sm_write_regs (ssm, _dev, capsm_1002_writev, G_N_ELEMENTS (capsm_1002_writev));
+      break;
+
+    case CAPSM_1002_FIRE_BULK:
+      capsm_fire_bulk (ssm, _dev);
       break;
     }
 }
@@ -1144,7 +1774,10 @@ initsm_1000_run_state (FpiSsm *ssm, FpDevice *_dev)
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case INITSM_1000_WRITEV_1:
-      sm_write_regs (ssm, _dev, initsm_1000_writev_1, G_N_ELEMENTS (initsm_1000_writev_1));
+      if (FPI_DEVICE_UPEKSONLY (_dev)->dev_model == UPEKSONLY_1002)
+        sm_write_regs_data (ssm, _dev, initsm_1002_writev_1, G_N_ELEMENTS (initsm_1002_writev_1));
+      else
+        sm_write_regs (ssm, _dev, initsm_1000_writev_1, G_N_ELEMENTS (initsm_1000_writev_1));
       break;
     }
 }
@@ -1177,16 +1810,6 @@ initsm_1001_run_state (FpiSsm *ssm, FpDevice *_dev)
 }
 
 /***** CAPTURE LOOP *****/
-
-enum loopsm_states {
-  LOOPSM_RUN_AWFSM,
-  LOOPSM_AWAIT_FINGER,
-  LOOPSM_RUN_CAPSM,
-  LOOPSM_CAPTURE,
-  LOOPSM_RUN_DEINITSM,
-  LOOPSM_FINAL,
-  LOOPSM_NUM_STATES,
-};
 
 static void
 loopsm_run_state (FpiSsm *ssm, FpDevice *_dev)
@@ -1223,6 +1846,7 @@ loopsm_run_state (FpiSsm *ssm, FpDevice *_dev)
                   break;
 
                 case UPEKSONLY_1000:
+                case UPEKSONLY_1002:
                   awfsm = fpi_ssm_new (FP_DEVICE (dev),
                                        awfsm_1000_run_state,
                                        AWFSM_1000_NUM_STATES);
@@ -1237,7 +1861,39 @@ loopsm_run_state (FpiSsm *ssm, FpDevice *_dev)
         }
       break;
 
+    case LOOPSM_DELAY_AWAIT_FINGER:
+      if (self->deactivating)
+        {
+          fpi_ssm_mark_completed (ssm);
+          break;
+        }
+
+      if (self->dev_model == UPEKSONLY_1002)
+        fpi_ssm_next_state_delayed (ssm, AWAIT_FINGER_SETTLE_DELAY_MS_1002);
+      else
+        fpi_ssm_next_state (ssm);
+      break;
+
+    case LOOPSM_STATUS_READ:
+      if (self->deactivating)
+        {
+          fpi_ssm_mark_completed (ssm);
+          break;
+        }
+
+      if (self->dev_model == UPEKSONLY_1002)
+        sm_read_status (ssm, dev);
+      else
+        fpi_ssm_next_state (ssm);
+      break;
+
     case LOOPSM_AWAIT_FINGER:
+      if (self->deactivating)
+        {
+          fpi_ssm_mark_completed (ssm);
+          break;
+        }
+
       switch (self->dev_model)
         {
         case UPEKSONLY_1001:
@@ -1266,6 +1922,12 @@ loopsm_run_state (FpiSsm *ssm, FpDevice *_dev)
                                CAPSM_1000_NUM_STATES);
           break;
 
+        case UPEKSONLY_1002:
+          capsm = fpi_ssm_new (FP_DEVICE (dev),
+                               capsm_1002_run_state,
+                               CAPSM_1002_NUM_STATES);
+          break;
+
         case UPEKSONLY_1001:
           capsm = fpi_ssm_new (FP_DEVICE (dev),
                                capsm_1001_run_state,
@@ -1292,6 +1954,7 @@ loopsm_run_state (FpiSsm *ssm, FpDevice *_dev)
           break;
 
         case UPEKSONLY_1000:
+        case UPEKSONLY_1002:
           deinitsm = fpi_ssm_new (FP_DEVICE (dev),
                                   deinitsm_1000_run_state,
                                   DEINITSM_1000_NUM_STATES);
@@ -1311,7 +1974,10 @@ loopsm_run_state (FpiSsm *ssm, FpDevice *_dev)
       break;
 
     case LOOPSM_FINAL:
-      fpi_ssm_jump_to_state (ssm, LOOPSM_RUN_AWFSM);
+      if (self->deactivating)
+        fpi_ssm_mark_completed (ssm);
+      else
+        fpi_ssm_jump_to_state (ssm, LOOPSM_RUN_AWFSM);
       break;
     }
 
@@ -1326,6 +1992,7 @@ deactivate_done (FpImageDevice *dev, GError *error)
 
   G_DEBUG_HERE ();
   free_img_transfers (self);
+  g_clear_object (&self->await_cancellable);
   g_free (self->rowbuf);
   self->rowbuf = NULL;
 
@@ -1342,7 +2009,16 @@ dev_deactivate (FpImageDevice *dev)
 
   if (!self->capturing)
     {
-      deactivate_done (dev, NULL);
+      if (self->loopsm)
+        {
+          self->deactivating = TRUE;
+          if (self->await_cancellable)
+            g_cancellable_cancel (self->await_cancellable);
+        }
+      else
+        {
+          deactivate_done (dev, NULL);
+        }
       return;
     }
 
@@ -1358,6 +2034,8 @@ loopsm_complete (FpiSsm *ssm, FpDevice *_dev, GError *error)
   FpImageDevice *dev = FP_IMAGE_DEVICE (_dev);
   FpiDeviceUpeksonly *self = FPI_DEVICE_UPEKSONLY (_dev);
 
+
+  self->loopsm = NULL;
 
   if (self->deactivating)
     {
@@ -1421,6 +2099,7 @@ dev_activate (FpImageDevice *dev)
       break;
 
     case UPEKSONLY_1000:
+    case UPEKSONLY_1002:
       ssm = fpi_ssm_new (FP_DEVICE (dev), initsm_1000_run_state,
                          INITSM_1000_NUM_STATES);
       break;
@@ -1461,6 +2140,10 @@ dev_discover (GUsbDevice *usb_device)
     if (bcd == 0x0033)             /* Looking for revision 0.33 */
       return 1;
 
+  if (pid == 0x1002)
+    if (bcd == 0x0048)             /* TouchStrip Fingerprint Sensor */
+      return 1;
+
   if (pid == 0x1001)
     return 1;
 
@@ -1470,6 +2153,7 @@ dev_discover (GUsbDevice *usb_device)
 static const FpIdEntry id_table[] = {
   { .vid = 0x147e,  .pid = 0x2016, .driver_data = UPEKSONLY_2016 },
   { .vid = 0x147e,  .pid = 0x1000, .driver_data = UPEKSONLY_1000 },
+  { .vid = 0x147e,  .pid = 0x1002, .driver_data = UPEKSONLY_1002 },
   { .vid = 0x147e,  .pid = 0x1001, .driver_data = UPEKSONLY_1001 },
   { .vid = 0,  .pid = 0,  .driver_data = 0 },
 };
@@ -1523,19 +2207,29 @@ dev_init (FpImageDevice *dev)
   self->assembling_ctx.resolution = 8;
   self->assembling_ctx.median_filter_size = 25;
   self->assembling_ctx.max_search_offset = 30;
-  self->assembling_ctx.get_deviation = upeksonly_get_deviation2;
-  self->assembling_ctx.get_pixel = upeksonly_get_pixel;
 
   self = FPI_DEVICE_UPEKSONLY (dev);
   self->dev_model = (int) fpi_device_get_driver_data (FP_DEVICE (dev));
   switch (self->dev_model)
     {
     case UPEKSONLY_1000:
+      self->assembling_ctx.get_deviation = upeksonly_get_deviation2;
+      self->assembling_ctx.get_pixel = upeksonly_get_pixel;
       self->img_width = IMG_WIDTH_1000;
       self->assembling_ctx.line_width = IMG_WIDTH_1000;
       break;
 
+    case UPEKSONLY_1002:
+      self->assembling_ctx.get_deviation = upeksonly_get_deviation_simple;
+      self->assembling_ctx.get_pixel = upeksonly_get_pixel_simple;
+      self->img_width = IMG_WIDTH_1002;
+      self->assembling_ctx.line_width = IMG_WIDTH_1002;
+      fpi_image_device_set_bz3_threshold (dev, 7);
+      break;
+
     case UPEKSONLY_1001:
+      self->assembling_ctx.get_deviation = upeksonly_get_deviation2;
+      self->assembling_ctx.get_pixel = upeksonly_get_pixel;
       self->img_width = IMG_WIDTH_1001;
       self->assembling_ctx.line_width = IMG_WIDTH_1001;
 
@@ -1544,6 +2238,8 @@ dev_init (FpImageDevice *dev)
       break;
 
     case UPEKSONLY_2016:
+      self->assembling_ctx.get_deviation = upeksonly_get_deviation2;
+      self->assembling_ctx.get_pixel = upeksonly_get_pixel;
       self->img_width = IMG_WIDTH_2016;
       self->assembling_ctx.line_width = IMG_WIDTH_2016;
       break;
