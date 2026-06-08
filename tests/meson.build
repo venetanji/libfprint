@@ -56,9 +56,10 @@ drivers_tests = [
     'egismoc-0586',
     'egismoc-0587',
     'fpcmoc',
-	'realtek',
-	'realtek-5816',
+    'realtek',
+    'realtek-5816',
     'focaltech_moc',
+    'egis0576',
 ]
 
 if get_option('introspection')
