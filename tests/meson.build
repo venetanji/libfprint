@@ -19,6 +19,7 @@ envs.set('FP_DRIVERS_ALLOWLIST', ':'.join([
     'virtual_image',
     'virtual_device',
     'virtual_device_storage',
+    'virtual_sdcp',
 ]))
 
 envs.set('FP_PRINTS_PATH', meson.project_source_root() / 'examples' / 'prints')
@@ -52,9 +53,9 @@ drivers_tests = [
     'nb1010',
     'egis0570',
     'egismoc',
-    'egismoc-05a1',
-    'egismoc-0586',
-    'egismoc-0587',
+#    'egismoc-05a1', # commented out until new capture with SDCP support can be provided
+#    'egismoc-0586', # commented out until new capture with SDCP support can be provided
+#    'egismoc-0587', # commented out until new capture with SDCP support can be provided
     'fpcmoc',
 	'realtek',
 	'realtek-5816',
@@ -91,6 +92,7 @@ if get_option('introspection')
     virtual_devices_tests = [
         'virtual-image',
         'virtual-device',
+        'virtual-sdcp',
     ]
 
     unittest_inspector = find_program('unittest_inspector.py')
@@ -131,6 +133,7 @@ if get_option('introspection')
                     suite: ut_suite,
                     depends: libfprint_typelib,
                     env: envs,
+                    workdir: meson.current_source_dir(),
                 )
             endforeach
 
@@ -181,6 +184,7 @@ if get_option('introspection')
                     meson.current_source_dir() / driver_test,
                 ],
                 env: driver_envs,
+                workdir: meson.current_source_dir(),
                 suite: ['drivers'],
                 timeout: 15,
                 depends: libfprint_typelib,
@@ -244,13 +248,10 @@ else
     endforeach
 endif
 
-test_utils = static_library('fprint-test-utils',
-    sources: [
-        'test-utils.c',
-        'test-device-fake.c',
-    ],
-    dependencies: libfprint_private_dep,
-    install: false)
+test_util_sources = [
+    'test-utils.c',
+    'test-device-fake.c',
+]
 
 unit_tests = [
     'fpi-device',
@@ -264,6 +265,17 @@ if 'virtual_image' in drivers
         'fp-device',
     ]
 endif
+
+if 'sdcp' in driver_helpers
+    unit_tests += [
+        'fpi-sdcp',
+    ]
+endif
+
+test_utils = static_library('fprint-test-utils',
+    sources: test_util_sources,
+    dependencies: libfprint_private_dep,
+    install: false)
 
 unit_tests_deps = { 'fpi-assembling' : [cairo_dep] }
 

@@ -101,6 +101,12 @@ FpImageDevice
 </SECTION>
 
 <SECTION>
+<FILE>fp-sdcp-device</FILE>
+FP_TYPE_SDCP_DEVICE
+FpSdcpDevice
+</SECTION>
+
+<SECTION>
 <FILE>fp-print</FILE>
 FP_TYPE_PRINT
 FpFinger
@@ -344,6 +350,31 @@ fpi_image_device_set_bz3_threshold
 </SECTION>
 
 <SECTION>
+<FILE>fpi-sdcp-device</FILE>
+<TITLE>Internal FpSdcpDevice</TITLE>
+FpiSdcpClaim
+FpSdcpDeviceClass
+fpi_sdcp_claim_get_type
+fpi_sdcp_claim_new
+fpi_sdcp_claim_copy
+fpi_sdcp_claim_free
+fpi_sdcp_device_open_complete
+fpi_sdcp_device_get_connect_data
+fpi_sdcp_device_connect_complete
+fpi_sdcp_device_get_reconnect_data
+fpi_sdcp_device_reconnect_complete
+fpi_sdcp_device_list_complete
+fpi_sdcp_device_enroll_commit
+fpi_sdcp_device_enroll_commit_complete
+fpi_sdcp_device_get_identify_data
+fpi_sdcp_device_set_identify_data
+fpi_sdcp_device_identify_retry
+fpi_sdcp_device_identify_complete
+fpi_sdcp_device_get_print_id
+fpi_sdcp_device_set_print_id
+</SECTION>
+
+<SECTION>
 <FILE>fpi-log</FILE>
 fp_dbg
 fp_info
@@ -351,6 +382,8 @@ fp_warn
 fp_err
 BUG_ON
 BUG
+fp_dbg_hex_dump_bytes
+fp_dbg_hex_dump_gbytes
 </SECTION>
 
 <SECTION>

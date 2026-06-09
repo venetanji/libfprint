@@ -112,8 +112,8 @@ virtual_drivers = [
     'virtual_image',
     'virtual_device',
     'virtual_device_storage',
+    'virtual_sdcp',
 ]
-
 default_drivers = [
     'upektc_img',
     'vfs5011',
@@ -209,11 +209,13 @@ driver_helper_mapping = {
     'aes2660' : [ 'aeslib', 'aesx660' ],
     'aes3500' : [ 'aeslib', 'aes3k' ],
     'aes4000' : [ 'aeslib', 'aes3k' ],
-    'uru4000' : [ 'openssl' ],
+    'egismoc' : [ 'sdcp' ],
     'elanspi' : [ 'udev' ],
+    'uru4000' : [ 'openssl' ],
     'virtual_image'          : [ 'virtual' ],
     'virtual_device'         : [ 'virtual' ],
     'virtual_device_storage' : [ 'virtual' ],
+    'virtual_sdcp'           : [ 'virtual', 'sdcp' ],
 }
 
 driver_helpers = []
@@ -270,6 +272,13 @@ foreach i : driver_helpers
         openssl_dep = dependency('openssl', version: '>= 3.0', required: false)
         if not openssl_dep.found()
             error('OpenSSL is required for @0@ and possibly others'.format(driver))
+        endif
+
+        optional_deps += openssl_dep
+    elif i == 'sdcp'
+        openssl_dep = dependency('openssl', version: '>= 3.0.8', required: false)
+        if not openssl_dep.found()
+            error('OpenSSL >= 3.0.8 is required for SDCP support (@0@ and possibly others)'.format(driver))
         endif
 
         optional_deps += openssl_dep
