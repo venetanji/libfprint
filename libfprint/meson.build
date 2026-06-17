@@ -139,6 +139,8 @@ driver_sources = {
         [ 'drivers/elanspi.c' ],
     'nb1010' :
         [ 'drivers/nb1010.c' ],
+    'samsung7305' :
+        [ 'drivers/samsung7305.c' ],
     'virtual_image' :
         [ 'drivers/virtual-image.c' ],
     'virtual_device' :
