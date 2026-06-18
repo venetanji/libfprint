@@ -70,6 +70,11 @@ typedef struct egis_etu905_enroll_print
   int      stage;
 } EnrollPrint;
 
+static void egis_etu905_identify_send_cancel_result_cb (FpDevice *device,
+                                                        guchar   *buffer_in,
+                                                        gsize     length_in,
+                                                        GError   *error);
+
 static void
 egis_etu905_finger_on_sensor_cb (FpiUsbTransfer *transfer,
                                  FpDevice       *device,
@@ -1292,6 +1297,24 @@ egis_etu905_identify_check_cb (FpDevice *device,
 }
 
 static void
+egis_etu905_identify_send_cancel_result_cb (FpDevice *device,
+                                            guchar   *buffer_in,
+                                            gsize     length_in,
+                                            GError   *error)
+{
+  FpiDeviceEgisEtu905 *self = FPI_DEVICE_EGIS_ETU905 (device);
+
+  if (error)
+    {
+      fpi_ssm_mark_failed (self->task_ssm, error);
+      return;
+    }
+
+  /* Advance to complete state */
+  fpi_ssm_next_state (self->task_ssm);
+}
+
+static void
 egis_etu905_identify_run_state (FpiSsm   *ssm,
                                 FpDevice *device)
 {
@@ -1340,6 +1363,14 @@ egis_etu905_identify_run_state (FpiSsm   *ssm,
       payload = egis_etu905_get_check_cmd (device, &payload_length);
       egis_etu905_exec_cmd (device, g_steal_pointer (&payload), payload_length,
                             g_free, egis_etu905_identify_check_cb);
+      break;
+
+    case IDENTIFY_SEND_CANCEL_RESULT:
+      egis_etu905_exec_cmd (device,
+                            g_memdup2 (cmd_identify_cancel_result, cmd_identify_cancel_result_len),
+                            cmd_identify_cancel_result_len,
+                            g_free,
+                            egis_etu905_identify_send_cancel_result_cb);
       break;
 
     case IDENTIFY_COMPLETE_SENSOR_RESET:
@@ -1614,6 +1645,32 @@ egis_etu905_close (FpDevice *device)
 }
 
 static void
+egis_etu905_cancel (FpDevice *device)
+{
+  FpiDeviceAction action = fpi_device_get_current_action (device);
+
+  fp_dbg ("Cancelling action %d", action);
+
+  if (action == FPI_DEVICE_ACTION_ENROLL)
+    {
+      egis_etu905_exec_cmd (device,
+                            g_memdup2 (cmd_enroll_discard, cmd_enroll_discard_len),
+                            cmd_enroll_discard_len,
+                            g_free,
+                            NULL);
+    }
+  else if (action == FPI_DEVICE_ACTION_IDENTIFY ||
+           action == FPI_DEVICE_ACTION_VERIFY)
+    {
+      egis_etu905_exec_cmd (device,
+                            g_memdup2 (cmd_identify_cancel, cmd_identify_cancel_len),
+                            cmd_identify_cancel_len,
+                            g_free,
+                            NULL);
+    }
+}
+
+static void
 fpi_device_egis_etu905_init (FpiDeviceEgisEtu905 *self)
 {
   G_DEBUG_HERE ();
@@ -1636,6 +1693,7 @@ fpi_device_egis_etu905_class_init (FpiDeviceEgisEtu905Class *klass)
   dev_class->probe = egis_etu905_probe;
   dev_class->open = egis_etu905_open;
   dev_class->close = egis_etu905_close;
+  dev_class->cancel = egis_etu905_cancel;
   dev_class->identify = egis_etu905_identify;
   dev_class->enroll = egis_etu905_enroll;
   dev_class->delete = egis_etu905_delete;

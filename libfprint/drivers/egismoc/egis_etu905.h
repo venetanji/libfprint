@@ -118,6 +118,15 @@ static gsize rsp_read_dirty_prefix_len = sizeof (rsp_read_dirty_prefix) / sizeof
 static guchar cmd_commit_starting[] = {0x00, 0x00, 0x00, 0x07, 0x50, 0x16, 0x05, 0x00, 0x00, 0x00, 0x20};
 static gsize cmd_commit_starting_len = sizeof (cmd_commit_starting) / sizeof (cmd_commit_starting[0]);
 
+static guchar cmd_enroll_discard[] = {0x00, 0x00, 0x00, 0x07, 0x50, 0x16, 0x04, 0x00, 0x00, 0x00, 0x20};
+static gsize cmd_enroll_discard_len = sizeof (cmd_enroll_discard) / sizeof (cmd_enroll_discard[0]);
+
+static guchar cmd_identify_cancel[] = {0x00, 0x00, 0x00, 0x04, 0x50, 0x04, 0x01, 0x00};
+static gsize cmd_identify_cancel_len = sizeof (cmd_identify_cancel) / sizeof (cmd_identify_cancel[0]);
+
+static guchar cmd_identify_cancel_result[] = {0x00, 0x00, 0x00, 0x04, 0x50, 0x04, 0x02, 0x00};
+static gsize cmd_identify_cancel_result_len = sizeof (cmd_identify_cancel_result) / sizeof (cmd_identify_cancel_result[0]);
+
 /* prefixes/suffixes and other things for dynamically created command payloads */
 
 #define EGIS_ETU905_CHECK_BYTES_LENGTH 2
@@ -164,6 +173,7 @@ typedef enum {
   IDENTIFY_WAIT_FINGER,
   IDENTIFY_SENSOR_CHECK,
   IDENTIFY_CHECK,
+  IDENTIFY_SEND_CANCEL_RESULT,
   IDENTIFY_COMPLETE_SENSOR_RESET,
   IDENTIFY_COMPLETE,
   IDENTIFY_STATES,
