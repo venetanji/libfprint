@@ -81,7 +81,7 @@ fpi_device_class_auto_initialize_features (FpDeviceClass *device_class)
   if (device_class->clear_storage)
     device_class->features |= FP_DEVICE_FEATURE_STORAGE_CLEAR;
 
-  if (device_class->delete && (device_class->list || device_class->clear_storage))
+  if (device_class->clear_storage || (device_class->delete && device_class->list))
     device_class->features |= FP_DEVICE_FEATURE_STORAGE;
 
   if (device_class->temp_hot_seconds < 0)
