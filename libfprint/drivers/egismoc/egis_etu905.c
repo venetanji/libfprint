@@ -52,6 +52,7 @@ typedef struct egis_etu905_command_data
 {
   SynCmdMsgCallback callback;
   FpiUsbTransfer   *cmd_transfer;
+  GCancellable     *cancellable;
   guchar           *buffer_in;
   gsize             length_in;
 } CommandData;
@@ -60,6 +61,7 @@ static void
 egis_etu905_command_data_free (CommandData *data)
 {
   g_clear_pointer (&data->cmd_transfer, fpi_usb_transfer_unref);
+  g_clear_object (&data->cancellable);
   g_free (data->buffer_in);
   g_free (data);
 }
@@ -264,7 +266,7 @@ egis_etu905_cmd_run_state (FpiSsm   *ssm,
           transfer->ssm = ssm;
           fpi_usb_transfer_submit (g_steal_pointer (&transfer),
                                    EGIS_ETU905_USB_SEND_TIMEOUT,
-                                   fpi_device_get_cancellable (device),
+                                   data->cancellable,
                                    fpi_ssm_usb_transfer_cb,
                                    NULL);
           break;
@@ -280,7 +282,7 @@ egis_etu905_cmd_run_state (FpiSsm   *ssm,
                                   EGIS_ETU905_USB_IN_RECV_LENGTH);
       fpi_usb_transfer_submit (g_steal_pointer (&transfer),
                                EGIS_ETU905_USB_RECV_TIMEOUT,
-                               fpi_device_get_cancellable (device),
+                               data->cancellable,
                                egis_etu905_cmd_receive_cb,
                                fpi_ssm_get_data (ssm));
       break;
@@ -329,11 +331,12 @@ egis_etu905_get_check_bytes (FpiByteReader *reader)
 }
 
 static void
-egis_etu905_exec_cmd (FpDevice         *device,
-                      guchar           *cmd,
-                      const gsize       cmd_length,
-                      GDestroyNotify    cmd_destroy,
-                      SynCmdMsgCallback callback)
+egis_etu905_exec_cmd_full (FpDevice         *device,
+                           guchar           *cmd,
+                           const gsize       cmd_length,
+                           GDestroyNotify    cmd_destroy,
+                           SynCmdMsgCallback callback,
+                           GCancellable     *cancellable)
 {
   g_auto(FpiByteWriter) writer = {0};
   g_autoptr(FpiUsbTransfer) transfer = NULL;
@@ -387,6 +390,7 @@ egis_etu905_exec_cmd (FpDevice         *device,
    * (e.g. an in-progress operation and a cancellation) cannot collide. */
   data = g_new0 (CommandData, 1);
   data->callback = callback;
+  g_set_object (&data->cancellable, cancellable);
 
   if (written)
     {
@@ -410,6 +414,17 @@ egis_etu905_exec_cmd (FpDevice         *device,
 
   if (!written)
     fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+}
+
+static void
+egis_etu905_exec_cmd (FpDevice         *device,
+                      guchar           *cmd,
+                      const gsize       cmd_length,
+                      GDestroyNotify    cmd_destroy,
+                      SynCmdMsgCallback callback)
+{
+  egis_etu905_exec_cmd_full (device, cmd, cmd_length, cmd_destroy, callback,
+                             fpi_device_get_cancellable (device));
 }
 
 static void
@@ -1643,22 +1658,30 @@ egis_etu905_cancel (FpDevice *device)
 
   fp_dbg ("Cancelling action %d", action);
 
+  /* The cancellation commands must reach the device to abort the ongoing
+   * sensor operation. By the time we get here the device cancellable is
+   * already cancelled (it aborted the in-flight operation transfer), so we
+   * must not bind these commands to it or they would never be sent.
+   * Cancellation is effectively non-cancellable; the commands are allowed to
+   * fail (no callback), the device is reset by the next operation anyway. */
   if (action == FPI_DEVICE_ACTION_ENROLL)
     {
-      egis_etu905_exec_cmd (device,
-                            g_memdup2 (cmd_enroll_discard, cmd_enroll_discard_len),
-                            cmd_enroll_discard_len,
-                            g_free,
-                            NULL);
+      egis_etu905_exec_cmd_full (device,
+                                 g_memdup2 (cmd_enroll_discard, cmd_enroll_discard_len),
+                                 cmd_enroll_discard_len,
+                                 g_free,
+                                 NULL,
+                                 NULL);
     }
   else if (action == FPI_DEVICE_ACTION_IDENTIFY ||
            action == FPI_DEVICE_ACTION_VERIFY)
     {
-      egis_etu905_exec_cmd (device,
-                            g_memdup2 (cmd_identify_cancel, cmd_identify_cancel_len),
-                            cmd_identify_cancel_len,
-                            g_free,
-                            NULL);
+      egis_etu905_exec_cmd_full (device,
+                                 g_memdup2 (cmd_identify_cancel, cmd_identify_cancel_len),
+                                 cmd_identify_cancel_len,
+                                 g_free,
+                                 NULL,
+                                 NULL);
     }
 }
 
