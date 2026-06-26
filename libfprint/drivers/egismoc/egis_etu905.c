@@ -72,10 +72,12 @@ typedef struct egis_etu905_enroll_print
   int      stage;
 } EnrollPrint;
 
-static void egis_etu905_identify_send_cancel_result_cb (FpDevice *device,
-                                                        guchar   *buffer_in,
-                                                        gsize     length_in,
-                                                        GError   *error);
+static void egis_etu905_exec_cmd_full (FpDevice         *device,
+                                       guchar           *cmd,
+                                       gsize             cmd_length,
+                                       GDestroyNotify    cmd_destroy,
+                                       SynCmdMsgCallback callback,
+                                       GCancellable     *cancellable);
 
 static void
 egis_etu905_finger_on_sensor_cb (FpiUsbTransfer *transfer,
@@ -178,6 +180,34 @@ egis_etu905_task_ssm_done (FpiSsm   *ssm,
   self->task_ssm = NULL;
 
   g_clear_pointer (&self->enrolled_ids, g_ptr_array_unref);
+
+  /* On cancellation we need to send the device-side cancel command before
+   * reporting the error, as the idle ->cancel vfunc may not be called due
+   * to the operation already being completed by the cancellable abort. */
+  if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+    {
+      FpiDeviceAction action = fpi_device_get_current_action (device);
+
+      if (action == FPI_DEVICE_ACTION_ENROLL)
+        {
+          egis_etu905_exec_cmd_full (device,
+                                     g_memdup2 (cmd_enroll_discard, cmd_enroll_discard_len),
+                                     cmd_enroll_discard_len,
+                                     g_free,
+                                     NULL,
+                                     NULL);
+        }
+      else if (action == FPI_DEVICE_ACTION_IDENTIFY ||
+               action == FPI_DEVICE_ACTION_VERIFY)
+        {
+          egis_etu905_exec_cmd_full (device,
+                                     g_memdup2 (cmd_identify_cancel, cmd_identify_cancel_len),
+                                     cmd_identify_cancel_len,
+                                     g_free,
+                                     NULL,
+                                     NULL);
+        }
+    }
 
   if (error)
     fpi_device_action_error (device, error);
@@ -1652,40 +1682,6 @@ egis_etu905_close (FpDevice *device)
 }
 
 static void
-egis_etu905_cancel (FpDevice *device)
-{
-  FpiDeviceAction action = fpi_device_get_current_action (device);
-
-  fp_dbg ("Cancelling action %d", action);
-
-  /* The cancellation commands must reach the device to abort the ongoing
-   * sensor operation. By the time we get here the device cancellable is
-   * already cancelled (it aborted the in-flight operation transfer), so we
-   * must not bind these commands to it or they would never be sent.
-   * Cancellation is effectively non-cancellable; the commands are allowed to
-   * fail (no callback), the device is reset by the next operation anyway. */
-  if (action == FPI_DEVICE_ACTION_ENROLL)
-    {
-      egis_etu905_exec_cmd_full (device,
-                                 g_memdup2 (cmd_enroll_discard, cmd_enroll_discard_len),
-                                 cmd_enroll_discard_len,
-                                 g_free,
-                                 NULL,
-                                 NULL);
-    }
-  else if (action == FPI_DEVICE_ACTION_IDENTIFY ||
-           action == FPI_DEVICE_ACTION_VERIFY)
-    {
-      egis_etu905_exec_cmd_full (device,
-                                 g_memdup2 (cmd_identify_cancel, cmd_identify_cancel_len),
-                                 cmd_identify_cancel_len,
-                                 g_free,
-                                 NULL,
-                                 NULL);
-    }
-}
-
-static void
 fpi_device_egis_etu905_init (FpiDeviceEgisEtu905 *self)
 {
   G_DEBUG_HERE ();
@@ -1708,7 +1704,6 @@ fpi_device_egis_etu905_class_init (FpiDeviceEgisEtu905Class *klass)
   dev_class->probe = egis_etu905_probe;
   dev_class->open = egis_etu905_open;
   dev_class->close = egis_etu905_close;
-  dev_class->cancel = egis_etu905_cancel;
   dev_class->identify = egis_etu905_identify;
   dev_class->enroll = egis_etu905_enroll;
   dev_class->delete = egis_etu905_delete;
