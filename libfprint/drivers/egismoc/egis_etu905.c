@@ -29,12 +29,10 @@
 
 struct _FpiDeviceEgisEtu905
 {
-  FpDevice        parent;
-  FpiSsm         *task_ssm;
-  FpiSsm         *cmd_ssm;
-  FpiUsbTransfer *cmd_transfer;
-  GPtrArray      *enrolled_ids;
-  gint            max_enroll_stages;
+  FpDevice   parent;
+  FpiSsm    *task_ssm;
+  GPtrArray *enrolled_ids;
+  gint       max_enroll_stages;
 };
 
 G_DEFINE_TYPE (FpiDeviceEgisEtu905, fpi_device_egis_etu905, FP_TYPE_DEVICE);
@@ -53,6 +51,7 @@ typedef void (*SynCmdMsgCallback) (FpDevice *device,
 typedef struct egis_etu905_command_data
 {
   SynCmdMsgCallback callback;
+  FpiUsbTransfer   *cmd_transfer;
   guchar           *buffer_in;
   gsize             length_in;
 } CommandData;
@@ -60,6 +59,7 @@ typedef struct egis_etu905_command_data
 static void
 egis_etu905_command_data_free (CommandData *data)
 {
+  g_clear_pointer (&data->cmd_transfer, fpi_usb_transfer_unref);
   g_free (data->buffer_in);
   g_free (data);
 }
@@ -253,15 +253,16 @@ egis_etu905_cmd_run_state (FpiSsm   *ssm,
                            FpDevice *device)
 {
   g_autoptr(FpiUsbTransfer) transfer = NULL;
-  FpiDeviceEgisEtu905 *self = FPI_DEVICE_EGIS_ETU905 (device);
+  CommandData *data = fpi_ssm_get_data (ssm);
 
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case CMD_SEND:
-      if (self->cmd_transfer)
+      if (data->cmd_transfer)
         {
-          self->cmd_transfer->ssm = ssm;
-          fpi_usb_transfer_submit (g_steal_pointer (&self->cmd_transfer),
+          transfer = g_steal_pointer (&data->cmd_transfer);
+          transfer->ssm = ssm;
+          fpi_usb_transfer_submit (g_steal_pointer (&transfer),
                                    EGIS_ETU905_USB_SEND_TIMEOUT,
                                    fpi_device_get_cancellable (device),
                                    fpi_ssm_usb_transfer_cb,
@@ -296,14 +297,7 @@ egis_etu905_cmd_ssm_done (FpiSsm   *ssm,
                           GError   *error)
 {
   g_autoptr(GError) local_error = error;
-  FpiDeviceEgisEtu905 *self = FPI_DEVICE_EGIS_ETU905 (device);
   CommandData *data = fpi_ssm_get_data (ssm);
-
-  g_assert (self->cmd_ssm == ssm);
-  g_assert (!self->cmd_transfer || self->cmd_transfer->ssm == ssm);
-
-  self->cmd_ssm = NULL;
-  self->cmd_transfer = NULL;
 
   if (data && data->callback)
     {
@@ -343,8 +337,8 @@ egis_etu905_exec_cmd (FpDevice         *device,
 {
   g_auto(FpiByteWriter) writer = {0};
   g_autoptr(FpiUsbTransfer) transfer = NULL;
-  FpiDeviceEgisEtu905 *self = FPI_DEVICE_EGIS_ETU905 (device);
   g_autofree CommandData *data = NULL;
+  FpiSsm *ssm = NULL;
   gsize buffer_out_length = 0;
   gboolean written = TRUE;
   guint16 check_value;
@@ -387,37 +381,35 @@ egis_etu905_exec_cmd (FpDevice         *device,
   if (cmd_destroy)
     g_clear_pointer (&cmd, cmd_destroy);
 
-  g_assert (self->cmd_ssm == NULL);
-  self->cmd_ssm = fpi_ssm_new (device,
-                               egis_etu905_cmd_run_state,
-                               CMD_STATES);
-
+  /* The command runs on its own dedicated SSM, carrying all its state (the
+   * outgoing transfer and the response buffer) via the SSM data. Nothing is
+   * shared on the device instance, so commands issued from different contexts
+   * (e.g. an in-progress operation and a cancellation) cannot collide. */
   data = g_new0 (CommandData, 1);
   data->callback = callback;
-  fpi_ssm_set_data (self->cmd_ssm, g_steal_pointer (&data),
-                    (GDestroyNotify) egis_etu905_command_data_free);
 
-  if (!written)
+  if (written)
     {
-      fpi_ssm_start (self->cmd_ssm, egis_etu905_cmd_ssm_done);
-      fpi_ssm_mark_failed (self->cmd_ssm,
-                           fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
-      return;
+      transfer = fpi_usb_transfer_new (device);
+      fpi_usb_transfer_set_short_error (transfer, TRUE);
+
+      fpi_usb_transfer_fill_bulk_full (transfer,
+                                       EGIS_ETU905_EP_CMD_OUT,
+                                       fpi_byte_writer_reset_and_get_data (&writer),
+                                       buffer_out_length,
+                                       g_free);
+
+      data->cmd_transfer = g_steal_pointer (&transfer);
     }
 
-  transfer = fpi_usb_transfer_new (device);
-  fpi_usb_transfer_set_short_error (transfer, TRUE);
-  transfer->ssm = self->cmd_ssm;
+  ssm = fpi_ssm_new (device, egis_etu905_cmd_run_state, CMD_STATES);
+  fpi_ssm_set_data (ssm, g_steal_pointer (&data),
+                    (GDestroyNotify) egis_etu905_command_data_free);
 
-  fpi_usb_transfer_fill_bulk_full (transfer,
-                                   EGIS_ETU905_EP_CMD_OUT,
-                                   fpi_byte_writer_reset_and_get_data (&writer),
-                                   buffer_out_length,
-                                   g_free);
+  fpi_ssm_start (ssm, egis_etu905_cmd_ssm_done);
 
-  g_assert (self->cmd_transfer == NULL);
-  self->cmd_transfer = g_steal_pointer (&transfer);
-  fpi_ssm_start (self->cmd_ssm, egis_etu905_cmd_ssm_done);
+  if (!written)
+    fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
 }
 
 static void
