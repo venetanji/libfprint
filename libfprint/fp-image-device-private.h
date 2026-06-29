@@ -27,6 +27,7 @@ typedef struct
 {
   FpiImageDeviceState state;
   gboolean            active;
+  gulong              cancellation_id;
 
   gboolean            finger_present;
 
