@@ -297,6 +297,8 @@ fpi_device_fake_cancel (FpDevice *device)
   debug_action (device);
   fake_dev->last_called_function = fpi_device_fake_cancel;
   g_assert_cmpuint (fpi_device_get_current_action (device), !=, FPI_DEVICE_ACTION_NONE);
+
+  fpi_device_cancel_complete (device, NULL);
 }
 
 static void

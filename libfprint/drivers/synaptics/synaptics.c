@@ -1467,6 +1467,8 @@ cancel (FpDevice *dev)
   g_cancellable_cancel (self->interrupt_cancellable);
   g_clear_object (&self->interrupt_cancellable);
   self->interrupt_cancellable = g_cancellable_new ();
+
+  fpi_device_cancel_complete (dev, NULL);
 }
 
 static void

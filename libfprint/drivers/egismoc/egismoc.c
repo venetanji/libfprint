@@ -1561,14 +1561,21 @@ egismoc_open (FpDevice *device)
 }
 
 static void
+egismoc_cancel_cancellable (FpiDeviceEgisMoc *self)
+{
+  g_cancellable_cancel (self->interrupt_cancellable);
+  g_clear_object (&self->interrupt_cancellable);
+  self->interrupt_cancellable = g_cancellable_new ();
+}
+
+static void
 egismoc_cancel (FpDevice *device)
 {
   fp_dbg ("Cancel");
   FpiDeviceEgisMoc *self = FPI_DEVICE_EGISMOC (device);
 
-  g_cancellable_cancel (self->interrupt_cancellable);
-  g_clear_object (&self->interrupt_cancellable);
-  self->interrupt_cancellable = g_cancellable_new ();
+  egismoc_cancel_cancellable (self);
+  fpi_device_cancel_complete (device, NULL);
 }
 
 static void
@@ -1576,7 +1583,7 @@ egismoc_suspend (FpDevice *device)
 {
   fp_dbg ("Suspend");
 
-  egismoc_cancel (device);
+  egismoc_cancel_cancellable (FPI_DEVICE_EGISMOC (device));
   g_cancellable_cancel (fpi_device_get_cancellable (device));
   fpi_device_suspend_complete (device, NULL);
 }
@@ -1588,7 +1595,7 @@ egismoc_close (FpDevice *device)
   FpiDeviceEgisMoc *self = FPI_DEVICE_EGISMOC (device);
   GError *error = NULL;
 
-  egismoc_cancel (device);
+  g_cancellable_cancel (self->interrupt_cancellable);
   g_clear_object (&self->interrupt_cancellable);
 
   g_usb_device_release_interface (fpi_device_get_usb_device (device),

@@ -84,20 +84,9 @@ static gboolean
 fp_device_cancel_in_idle_cb (gpointer user_data)
 {
   FpDevice *self = user_data;
-  FpDeviceClass *cls = FP_DEVICE_GET_CLASS (self);
   FpDevicePrivate *priv = fp_device_get_instance_private (self);
 
-  g_assert (cls->cancel);
-  g_assert (priv->current_action != FPI_DEVICE_ACTION_NONE);
-
-  g_debug ("Idle cancelling on ongoing operation!");
-
   priv->current_idle_cancel_source = NULL;
-
-  if (priv->critical_section)
-    priv->cancel_queued = TRUE;
-  else
-    cls->cancel (self);
 
   fpi_device_report_finger_status (self, FP_FINGER_STATUS_NONE);
 
@@ -111,6 +100,13 @@ static void
 fp_device_cancelled_cb (GCancellable *cancellable, FpDevice *self)
 {
   FpDevicePrivate *priv = fp_device_get_instance_private (self);
+
+  g_debug ("Cancelling on ongoing operation!");
+
+  if (priv->critical_section)
+    priv->cancel_queued = TRUE;
+  else
+    g_atomic_int_set (&priv->cancel_requested, TRUE);
 
   priv->current_idle_cancel_source = g_idle_source_new ();
   g_source_set_callback (priv->current_idle_cancel_source,

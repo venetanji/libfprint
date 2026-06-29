@@ -2000,6 +2000,8 @@ fpc_dev_cancel (FpDevice *device)
 
   fp_dbg ("%s enter -->", G_STRFUNC);
   g_cancellable_cancel (self->interrupt_cancellable);
+
+  fpi_device_cancel_complete (device, NULL);
 }
 
 static void

@@ -91,6 +91,10 @@ typedef struct
   GTask  *suspend_resume_task;
   GError *suspend_error;
 
+  /* Cancellation handling */
+  gboolean cancel_requested;
+  gboolean deferred_cancel;
+
   /* Device temperature model information and state */
   GSource      *temp_timeout;
   FpTemperature temp_current;

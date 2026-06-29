@@ -50,6 +50,68 @@ G_DEFINE_TYPE (FpDeviceVirtualDevice, fpi_device_virtual_device, FP_TYPE_DEVICE)
 #define LIST_CMD "LIST"
 #define UNPLUG_CMD "UNPLUG"
 
+static gboolean sleep_timeout_cb (gpointer data);
+
+static void
+action_cancelled_cb (GCancellable          *cancellable,
+                     FpDeviceVirtualDevice *self)
+{
+  /* The cancel vfunc is only invoked once the current action completes, so
+   * monitor the action cancellable to interrupt a long sleep: drop the sleep
+   * and resume command processing right away. process_cmds() will then notice
+   * the cancellation and let the action complete promptly. Do NOT disconnect
+   * from here, we are inside the "cancelled" emission and
+   * g_cancellable_disconnect() would deadlock. */
+  if (self->sleep_timeout_id)
+    {
+      g_source_remove (self->sleep_timeout_id);
+      self->sleep_timeout_id = g_idle_add (sleep_timeout_cb, self);
+    }
+}
+
+static void
+connect_cancellable (FpDeviceVirtualDevice *self)
+{
+  GCancellable *cancellable;
+
+  if (self->cancelled_id != 0)
+    {
+      g_signal_handler_disconnect (self->current_cancellable,
+                                   self->cancelled_id);
+      self->cancelled_id = 0;
+    }
+  g_clear_object (&self->current_cancellable);
+
+  if (fpi_device_get_current_action (FP_DEVICE (self)) == FPI_DEVICE_ACTION_NONE)
+    return;
+
+  cancellable = fpi_device_get_cancellable (FP_DEVICE (self));
+  if (!cancellable)
+    return;
+
+  self->cancelled_id = g_cancellable_connect (cancellable,
+                                              G_CALLBACK (action_cancelled_cb),
+                                              self, NULL);
+
+  if (self->cancelled_id == 0)
+    return;
+
+  self->current_cancellable = g_object_ref (cancellable);
+}
+
+static void
+disconnect_cancellable (FpDeviceVirtualDevice *self)
+{
+  if (self->cancelled_id != 0)
+    {
+      g_cancellable_disconnect (self->current_cancellable,
+                                self->cancelled_id);
+      self->cancelled_id = 0;
+    }
+
+  g_clear_object (&self->current_cancellable);
+}
+
 static void
 maybe_continue_current_action (FpDeviceVirtualDevice *self)
 {
@@ -108,12 +170,38 @@ sleep_timeout_cb (gpointer data)
 {
   FpDeviceVirtualDevice *self = data;
 
+  disconnect_cancellable (self);
+
   self->sleep_timeout_id = 0;
 
   if (g_cancellable_is_cancelled (self->cancellable))
     return FALSE;
 
   g_debug ("Sleeping completed");
+
+  /* If cancellation is pending, complete it now and drop any queued command */
+  if (self->cancel_pending)
+    {
+      self->cancel_pending = FALSE;
+      fpi_device_cancel_complete (FP_DEVICE (self), NULL);
+      return FALSE;
+    }
+
+  /* If the ongoing action got cancelled while we were sleeping, drop the
+   * synthetic command that should_wait_to_sleep() injected to replay the scan
+   * result after the sleep. Otherwise it would leak into the next action,
+   * since start_scan_command() clears injected_synthetic_cmd before the
+   * (deferred) cancel vfunc gets a chance to remove it. Explicitly queued
+   * commands are left untouched and handled as usual. */
+  if (self->injected_synthetic_cmd &&
+      fpi_device_get_current_action (FP_DEVICE (self)) != FPI_DEVICE_ACTION_NONE &&
+      fpi_device_action_is_cancelled (FP_DEVICE (self)))
+    {
+      g_debug ("Sleep interrupted by cancellation, dropping injected command");
+      self->injected_synthetic_cmd = FALSE;
+      g_ptr_array_remove_index (self->pending_commands, 0);
+    }
+
   maybe_continue_current_action (self);
 
   return FALSE;
@@ -127,6 +215,13 @@ wait_for_command_timeout (gpointer data)
   GError *error = NULL;
 
   self->wait_command_id = 0;
+
+  if (self->cancel_pending)
+    {
+      self->cancel_pending = FALSE;
+      fpi_device_cancel_complete (FP_DEVICE (self), NULL);
+      return FALSE;
+    }
 
   action = fpi_device_get_current_action (FP_DEVICE (self));
   if (action == FPI_DEVICE_ACTION_LIST || action == FPI_DEVICE_ACTION_DELETE)
@@ -150,11 +245,9 @@ process_cmds (FpDeviceVirtualDevice * self,
               char                  **scan_id,
               GError                **error)
 {
-  gboolean removed;
-
   if (g_cancellable_is_cancelled (self->cancellable) ||
       (fpi_device_get_current_action (FP_DEVICE (self)) != FPI_DEVICE_ACTION_NONE &&
-       g_cancellable_is_cancelled (fpi_device_get_cancellable (FP_DEVICE (self)))))
+       fpi_device_action_is_cancelled (FP_DEVICE (self))))
     {
       g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_CANCELLED,
                            "Operation was cancelled");
@@ -192,6 +285,7 @@ process_cmds (FpDeviceVirtualDevice * self,
 
           g_debug ("Sleeping %" G_GUINT64_FORMAT "ms", sleep_ms);
           self->sleep_timeout_id = g_timeout_add (sleep_ms, sleep_timeout_cb, self);
+          connect_cancellable (self);
 
           return FALSE;
         }
@@ -248,11 +342,8 @@ process_cmds (FpDeviceVirtualDevice * self,
   if (self->ignore_wait)
     return TRUE;
 
-  g_object_get (self, "removed", &removed, NULL);
-
   g_assert (self->wait_command_id == 0);
-  if (!scan || removed)
-    self->wait_command_id = g_timeout_add (500, wait_for_command_timeout, self);
+  self->wait_command_id = g_timeout_add (500, wait_for_command_timeout, self);
   return FALSE;
 }
 
@@ -304,8 +395,11 @@ recv_instruction_cb (GObject      *source_object,
         }
       else if (g_str_has_prefix (cmd, UNPLUG_CMD))
         {
+          g_clear_handle_id (&self->wait_command_id, g_source_remove);
           fpi_device_remove (FP_DEVICE (self));
-          maybe_continue_current_action (self);
+
+          if (fpi_device_get_current_action (FP_DEVICE (self)) != FPI_DEVICE_ACTION_NONE)
+            process_cmds (self, FALSE, NULL, NULL);
         }
       else if (g_str_has_prefix (cmd, SET_ENROLL_STAGES_PREFIX))
         {
@@ -687,6 +781,8 @@ dev_cancel (FpDevice *dev)
 {
   FpDeviceVirtualDevice *self = FP_DEVICE_VIRTUAL_DEVICE (dev);
 
+  disconnect_cancellable (self);
+
   if (self->injected_synthetic_cmd)
     {
       self->injected_synthetic_cmd = FALSE;
@@ -694,18 +790,29 @@ dev_cancel (FpDevice *dev)
     }
 
   if (!self->supports_cancellation)
-    return;
+    {
+      fpi_device_cancel_complete (dev, NULL);
+      return;
+    }
 
   g_debug ("Got cancellation!");
-  g_clear_handle_id (&self->sleep_timeout_id, g_source_remove);
-  g_clear_handle_id (&self->wait_command_id, g_source_remove);
 
-  maybe_continue_current_action (self);
+  /* If a sleep or wait is in progress, let it finish naturally and call
+   * fpi_device_cancel_complete() from the callback instead. Any pending
+   * commands still in the queue after that will be dropped. */
+  if (self->sleep_timeout_id || self->wait_command_id)
+    {
+      self->cancel_pending = TRUE;
+      return;
+    }
+
+  fpi_device_cancel_complete (dev, NULL);
 }
 
 static void
 stop_listener (FpDeviceVirtualDevice *self)
 {
+  g_clear_handle_id (&self->wait_command_id, g_source_remove);
   g_cancellable_cancel (self->cancellable);
   g_clear_object (&self->cancellable);
   g_clear_object (&self->listener);
@@ -716,6 +823,8 @@ dev_deinit (FpDevice *dev)
 {
   g_autoptr(GError) error = NULL;
   FpDeviceVirtualDevice *self = FP_DEVICE_VIRTUAL_DEVICE (dev);
+
+  disconnect_cancellable (self);
 
   self->ignore_wait = TRUE;
   if (!process_cmds (self, FALSE, NULL, &error))
@@ -749,6 +858,7 @@ fpi_device_virtual_device_finalize (GObject *object)
   FpDeviceVirtualDevice *self = FP_DEVICE_VIRTUAL_DEVICE (object);
 
   G_DEBUG_HERE ();
+  disconnect_cancellable (self);
   stop_listener (self);
   g_clear_pointer (&self->pending_commands, g_ptr_array_unref);
   G_OBJECT_CLASS (fpi_device_virtual_device_parent_class)->finalize (object);

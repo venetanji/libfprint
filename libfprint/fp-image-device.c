@@ -92,6 +92,8 @@ fp_image_device_cancel_action (FpDevice *device)
       action == FPI_DEVICE_ACTION_IDENTIFY ||
       action == FPI_DEVICE_ACTION_CAPTURE)
     fpi_image_device_deactivate (self, TRUE);
+
+  fpi_device_cancel_complete (device, NULL);
 }
 
 static void

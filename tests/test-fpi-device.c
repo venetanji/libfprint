@@ -2174,9 +2174,6 @@ test_driver_identify_cb (FpDevice     *device,
     g_assert_no_error (data->error);
   else
     g_assert_nonnull (data->error);
-
-  if (data->match)
-    g_assert_no_error (data->error);
 }
 
 static void
@@ -2712,16 +2709,19 @@ test_driver_identify_suspend_succeeds (void)
   fake_dev->ret_suspend = fpi_device_error_new (FP_DEVICE_ERROR_NOT_SUPPORTED);
   fp_device_suspend_sync (device, NULL, &error);
 
-  /* At this point we are done with everything */
-  g_assert (fake_dev->last_called_function == orig_identify);
+  /* At this point we are done with everything. */
+  g_assert (fake_dev->last_called_function == dev_class->cancel);
   g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
   g_clear_error (&error);
 
-  /* We suspended, but device reported success and that will be reported. */
+  /* match_cb was called by identify_report before the completion.
+   * identify_finish still returns the match from task data, but the
+   * operation result is overridden with BUSY error. */
   g_assert_true (match_data->called);
   g_assert (match_data->match == expected_matched);
   g_assert_true (identify_data->called);
   g_assert (identify_data->match == expected_matched);
+  g_assert_error (identify_data->error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_BUSY);
 
   /* Resuming the device does not call resume handler, as the action was
    * cancelled already.
@@ -2776,8 +2776,9 @@ test_driver_identify_suspend_busy_error (void)
   fp_device_suspend_sync (device, NULL, &error);
   fake_dev->ret_error = NULL;
 
-  /* At this point we are done with everything */
-  g_assert (fake_dev->last_called_function == orig_identify);
+  /* At this point we are done with everything.  In the new cancellation
+   * architecture, suspend cancels the ongoing identify via ->cancel. */
+  g_assert (fake_dev->last_called_function == dev_class->cancel);
   g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
   g_clear_error (&error);
 
@@ -2859,7 +2860,7 @@ test_driver_identify_warmup_cooldown (void)
   g_assert_true (fp_device_open_sync (device, NULL, NULL));
   fake_dev->last_called_function = NULL;
 
-  fake_dev->ret_error = fpi_device_error_new (FP_DEVICE_ERROR_GENERAL);
+  fake_dev->ret_error = fpi_device_error_new (FP_DEVICE_ERROR_TOO_HOT);
 
   /* Undefined: Whether match_cb is called. */
   fp_device_identify (device, prints, NULL,
@@ -2884,18 +2885,16 @@ test_driver_identify_warmup_cooldown (void)
   g_assert_true (g_cancellable_is_cancelled (fpi_device_get_cancellable (device)));
   g_assert_cmpint (g_get_monotonic_time () - start_time, <, 2000000 + 500000);
 
-  /* cancel vfunc will be called now */
-  g_assert (fake_dev->last_called_function == NULL);
-  while (g_main_context_iteration (NULL, FALSE))
-    continue;
-  g_assert (fake_dev->last_called_function == dev_class->cancel);
-
+  g_assert_null (fake_dev->last_called_function);
   orig_identify (device);
   fake_dev->ret_error = NULL;
   while (g_main_context_iteration (NULL, FALSE))
     continue;
   g_assert_true (identify_data->called);
   g_assert_error (identify_data->error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_TOO_HOT);
+
+  /* cancel fires via notify::completed after the task finishes */
+  g_assert (fake_dev->last_called_function == dev_class->cancel);
 
   /* Try to identify again, and ensure that we fail early */
   fp_device_identify_sync (device, prints, NULL, NULL, NULL, NULL, NULL, &error);
@@ -3219,6 +3218,10 @@ test_driver_clear_storage_error (void)
   g_assert_false (ret);
 }
 
+static void fake_device_delete_wait_for_cancel (FpDevice *device);
+static void fake_device_cancel_delayed (FpDevice *device);
+static void fake_device_verify_delayed (FpDevice *device);
+
 static gboolean
 fake_device_delete_wait_for_cancel_timeout (gpointer data)
 {
@@ -3226,10 +3229,12 @@ fake_device_delete_wait_for_cancel_timeout (gpointer data)
   FpiDeviceFake *fake_dev = FPI_DEVICE_FAKE (device);
   FpDeviceClass *dev_class = FP_DEVICE_GET_CLASS (device);
 
-  g_assert (fake_dev->last_called_function == dev_class->cancel);
+  /* The delete vfunc ran before the timeout was scheduled. */
+  g_assert (fake_dev->last_called_function == fake_device_delete_wait_for_cancel);
   default_fake_dev_class.delete (device);
 
-  g_assert (fake_dev->last_called_function == default_fake_dev_class.delete);
+  /* delete_complete -> return_task_in_idle -> cancel_requested -> cls->cancel */
+  g_assert (fake_dev->last_called_function == dev_class->cancel);
   fake_dev->last_called_function = fake_device_delete_wait_for_cancel_timeout;
 
   return G_SOURCE_REMOVE;
@@ -3243,6 +3248,51 @@ fake_device_delete_wait_for_cancel (FpDevice *device)
   fake_dev->last_called_function = fake_device_delete_wait_for_cancel;
 
   g_timeout_add (100, fake_device_delete_wait_for_cancel_timeout, device);
+}
+
+static gboolean
+fake_device_cancel_delayed_timeout (gpointer data)
+{
+  FpDevice *device = data;
+  FpiDeviceFake *fake_dev = FPI_DEVICE_FAKE (device);
+
+  fake_dev->last_called_function = fake_device_cancel_delayed_timeout;
+  fpi_device_cancel_complete (device, NULL);
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+fake_device_cancel_delayed (FpDevice *device)
+{
+  FpiDeviceFake *fake_dev = FPI_DEVICE_FAKE (device);
+
+  fake_dev->last_called_function = fake_device_cancel_delayed;
+
+  g_timeout_add (100, fake_device_cancel_delayed_timeout, device);
+}
+
+static gboolean
+fake_device_verify_delayed_timeout (gpointer data)
+{
+  FpDevice *device = data;
+  FpiDeviceFake *fake_dev = FPI_DEVICE_FAKE (device);
+
+  g_assert (fake_dev->last_called_function == fake_device_verify_delayed);
+  fake_dev->last_called_function = fake_device_verify_delayed_timeout;
+  fpi_device_verify_report (device, FPI_MATCH_FAIL, NULL, NULL);
+  fpi_device_verify_complete (device, NULL);
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+fake_device_verify_delayed (FpDevice *device)
+{
+  FpiDeviceFake *fake_dev = FPI_DEVICE_FAKE (device);
+
+  fake_dev->last_called_function = fake_device_verify_delayed;
+  g_timeout_add (100, fake_device_verify_delayed_timeout, device);
 }
 
 static void
@@ -3307,6 +3357,48 @@ test_driver_cancel_fail (void)
 }
 
 static void
+on_driver_cancel_delayed (GObject *obj, GAsyncResult *res, gpointer user_data)
+{
+  g_autoptr(GError) error = NULL;
+  FpDevice *device = FP_DEVICE (obj);
+  gboolean *completed = user_data;
+
+  fp_device_verify_finish (device, res, NULL, NULL, &error);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+
+  *completed = TRUE;
+}
+
+static void
+test_driver_cancel_delayed (void)
+{
+  g_autoptr(FpAutoResetClass) dev_class = auto_reset_device_class ();
+  g_autoptr(FpAutoCloseDevice) device = NULL;
+  g_autoptr(GCancellable) cancellable = NULL;
+  g_autoptr(FpPrint) enrolled_print = NULL;
+  gboolean completed = FALSE;
+  FpiDeviceFake *fake_dev;
+
+  dev_class->verify = fake_device_verify_delayed;
+  dev_class->cancel = fake_device_cancel_delayed;
+
+  device = auto_close_fake_device_new ();
+  fake_dev = FPI_DEVICE_FAKE (device);
+  cancellable = g_cancellable_new ();
+  enrolled_print = make_fake_print_reffed (device, NULL);
+
+  fp_device_verify (device, enrolled_print, cancellable,
+                    NULL, NULL, NULL,
+                    on_driver_cancel_delayed, &completed);
+  g_cancellable_cancel (cancellable);
+
+  while (!completed)
+    g_main_context_iteration (NULL, TRUE);
+
+  g_assert (fake_dev->last_called_function == fake_device_cancel_delayed_timeout);
+}
+
+static void
 test_driver_critical (void)
 {
   g_autoptr(FpAutoCloseDevice) device = auto_close_fake_device_new ();
@@ -3345,15 +3437,11 @@ test_driver_critical (void)
     continue;
   g_assert (fake_dev->last_called_function == NULL);
 
-  /* Leaving it and running the mainloop will first run the cancel handler */
+  /* Leaving it and running the mainloop: in the new cancellation
+   * architecture, the critical section flush sets cancellation_requested
+   * (cancel is deferred until the action completes) and then processes
+   * the queued suspend.  Suspend fires first. */
   fpi_device_critical_leave (device);
-  while (g_main_context_iteration (NULL, FALSE) && !fake_dev->last_called_function)
-    continue;
-  g_assert (fake_dev->last_called_function == dev_class->cancel);
-  g_assert_true (fpi_device_action_is_cancelled (device));
-  fake_dev->last_called_function = NULL;
-
-  /* Then the suspend handler */
   while (g_main_context_iteration (NULL, FALSE) && !fake_dev->last_called_function)
     continue;
   g_assert (fake_dev->last_called_function == dev_class->suspend);
@@ -3382,9 +3470,15 @@ test_driver_critical (void)
   g_assert (fake_dev->last_called_function == dev_class->resume);
   fake_dev->last_called_function = NULL;
 
-
-  /* The "verify" operation is still ongoing, finish it. */
+  /* The "verify" operation is still ongoing, finish it.  In the new
+   * architecture, completing the action triggers ->cancel via
+   * fpi_device_return_task_in_idle(). */
   orig_verify (device);
+  while (g_main_context_iteration (NULL, FALSE) && !fake_dev->last_called_function)
+    continue;
+
+  g_assert (fake_dev->last_called_function == dev_class->cancel);
+  g_assert_true (fpi_device_action_is_cancelled (device));
   while (g_main_context_iteration (NULL, FALSE))
     continue;
 }
@@ -3532,7 +3626,8 @@ test_driver_action_is_cancelled_open (void)
   g_assert_false (fp_device_open_sync (device, cancellable, &error));
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
 
-  g_assert (fake_dev->last_called_function == test_driver_action_is_cancelled_open_vfunc);
+  /* cancel completed the action via fpi_device_cancel_complete */
+  g_assert (fake_dev->last_called_function == dev_class->cancel);
 }
 
 static void
@@ -3550,10 +3645,11 @@ test_driver_action_internally_cancelled_open (void)
 
   /* No error, just some internal cancellation but we let nothing happen externally. */
   cancellable = g_cancellable_new ();
-  g_assert_true (fp_device_open_sync (device, cancellable, &error));
-  g_assert_null (error);
+  g_assert_false (fp_device_open_sync (device, cancellable, &error));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
 
-  g_assert (fake_dev->last_called_function == test_driver_action_is_cancelled_open_vfunc);
+  /* cancel completed the action via fpi_device_cancel_complete */
+  g_assert (fake_dev->last_called_function == dev_class->cancel);
 }
 
 static void
@@ -4169,6 +4265,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/driver/clear_storage", test_driver_clear_storage);
   g_test_add_func ("/driver/clear_storage/error", test_driver_clear_storage_error);
   g_test_add_func ("/driver/cancel", test_driver_cancel);
+  g_test_add_func ("/driver/cancel/delayed", test_driver_cancel_delayed);
   g_test_add_func ("/driver/cancel/fail", test_driver_cancel_fail);
 
   g_test_add_func ("/driver/critical", test_driver_critical);

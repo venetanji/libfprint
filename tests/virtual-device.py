@@ -824,6 +824,7 @@ class VirtualDevice(VirtualDeviceBase):
             self.assertIsNone(notified_spec)
 
     def test_device_sleep(self):
+        self.send_command('SET_CANCELLATION_ENABLED', int(False))
         self.send_sleep(1500)
 
         self.start_verify(FPrint.Print.new(self.dev),
@@ -833,12 +834,44 @@ class VirtualDevice(VirtualDeviceBase):
         self.assertFalse(self._verify_completed)
 
         self._cancellable.cancel()
-        self.wait_timeout(200)
-
-        self.assertTrue(self._verify_completed)
         self.cancel_verify()
 
     def test_device_sleep_on_cancellation(self):
+        self.send_sleep(1500)
+
+        self.start_verify(FPrint.Print.new(self.dev),
+            identify=self.dev.supports_identify())
+
+        self.wait_timeout(300)
+        self.assertFalse(self._verify_completed)
+
+        self.cancel_verify()
+
+    def test_device_sleep_on_cancellation_enabled(self):
+        self.send_command('SET_CANCELLATION_ENABLED', int(True))
+        self.send_sleep(1500)
+        self.send_command('SCAN', 'foo-print')
+
+        self.start_verify(FPrint.Print.new(self.dev),
+            identify=self.dev.supports_identify())
+        self.wait_timeout(300)
+
+        self.assertFalse(self._verify_completed)
+
+        self._cancellable.cancel()
+        # cancel() only schedules the cancellation; it is processed on the next
+        # main loop iteration, so the verify has not completed yet here.
+        self.assertFalse(self._verify_completed)
+        self.cancel_verify()
+
+        # The explicitly queued SCAN was never consumed by the cancelled verify,
+        # so it is rejected later when the device is closed (released).
+        self._close_on_teardown = False
+        with GLibErrorMessage('libfprint-virtual_device',
+            GLib.LogLevelFlags.LEVEL_WARNING, 'Could not process command: SCAN *'):
+            self.dev.close_sync()
+
+    def test_device_sleep_on_cancellation_disabled(self):
         self.send_command('SET_CANCELLATION_ENABLED', int(False))
         self.send_sleep(1500)
         self.send_command('SCAN', 'foo-print')
@@ -850,12 +883,10 @@ class VirtualDevice(VirtualDeviceBase):
         self.assertFalse(self._verify_completed)
 
         self._cancellable.cancel()
-        self.wait_timeout(300)
-
-        self.assertFalse(self._verify_completed)
         self.cancel_verify()
 
-        # Since we don't really cancel here, next command will be passed to release
+        # The explicitly queued SCAN was never consumed by the cancelled verify,
+        # so it is rejected later when the device is closed (released).
         self._close_on_teardown = False
         with GLibErrorMessage('libfprint-virtual_device',
             GLib.LogLevelFlags.LEVEL_WARNING, 'Could not process command: SCAN *'):
