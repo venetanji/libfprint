@@ -2480,12 +2480,6 @@ mafp_template_delete_all (FpDevice *device)
   fpi_ssm_start (self->task_ssm, fp_delete_all_ssm_done);
 }
 
-static void
-mafp_cancel (FpDevice *device)
-{
-  fp_dbg ("mafp_cancel");
-}
-
 static gboolean
 mafp_release_interface (FpiDeviceMafpmoc *self,
                         GError          **error)
@@ -2541,7 +2535,6 @@ fpi_device_mafpmoc_class_init (FpiDeviceMafpmocClass *klass)
   dev_class->close  = mafp_exit;
   dev_class->probe  = mafp_probe;
   dev_class->enroll = mafp_enroll;
-  dev_class->cancel = mafp_cancel;
   dev_class->identify = mafp_identify;
   dev_class->delete = mafp_template_delete;
   dev_class->clear_storage = mafp_template_delete_all;
