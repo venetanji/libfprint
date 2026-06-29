@@ -180,32 +180,6 @@ egis_etu905_task_ssm_done (FpiSsm   *ssm,
 
   g_clear_pointer (&self->enrolled_ids, g_ptr_array_unref);
 
-  /* On cancellation we need to send the device-side cancel command before
-   * reporting the error, as the idle ->cancel vfunc may not be called due
-   * to the operation already being completed by the cancellable abort. */
-  if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-    {
-      FpiDeviceAction action = fpi_device_get_current_action (device);
-
-      if (action == FPI_DEVICE_ACTION_ENROLL)
-        {
-          egis_etu905_exec_cmd_full (device,
-                                     cmd_enroll_discard,
-                                     G_N_ELEMENTS (cmd_enroll_discard),
-                                     NULL,
-                                     NULL);
-        }
-      else if (action == FPI_DEVICE_ACTION_IDENTIFY ||
-               action == FPI_DEVICE_ACTION_VERIFY)
-        {
-          egis_etu905_exec_cmd_full (device,
-                                     cmd_identify_cancel,
-                                     G_N_ELEMENTS (cmd_identify_cancel),
-                                     NULL,
-                                     NULL);
-        }
-    }
-
   if (error)
     fpi_device_action_error (device, error);
 }
@@ -1670,6 +1644,49 @@ egis_etu905_close (FpDevice *device)
 }
 
 static void
+egis_etu905_cancel_done_cb (FpDevice *device,
+                            guchar   *buffer_in,
+                            gsize     length_in,
+                            GError   *error)
+{
+  fpi_device_cancel_complete (device, error);
+}
+
+static void
+egis_etu905_cancel (FpDevice *device)
+{
+  FpiDeviceAction action = fpi_device_get_current_action (device);
+
+  fp_dbg ("Cancelling action %d", action);
+
+  /* Tell the device to abort the sensor operation. The cleanup command
+   * uses no cancellable so it actually reaches the device; fpi_device_
+   * cancel_complete() is called from the callback once it finishes. */
+  if (action == FPI_DEVICE_ACTION_ENROLL)
+    {
+      egis_etu905_exec_cmd_full (device,
+                                 cmd_enroll_discard,
+                                 G_N_ELEMENTS (cmd_enroll_discard),
+                                 egis_etu905_cancel_done_cb,
+                                 NULL);
+    }
+  else if (action == FPI_DEVICE_ACTION_IDENTIFY ||
+           action == FPI_DEVICE_ACTION_VERIFY)
+    {
+      egis_etu905_exec_cmd_full (device,
+                                 cmd_identify_cancel,
+                                 G_N_ELEMENTS (cmd_identify_cancel),
+                                 egis_etu905_cancel_done_cb,
+                                 NULL);
+    }
+  else
+    {
+      /* No cleanup command needed for this action. */
+      fpi_device_cancel_complete (device, NULL);
+    }
+}
+
+static void
 fpi_device_egis_etu905_init (FpiDeviceEgisEtu905 *self)
 {
   G_DEBUG_HERE ();
@@ -1692,6 +1709,7 @@ fpi_device_egis_etu905_class_init (FpiDeviceEgisEtu905Class *klass)
   dev_class->probe = egis_etu905_probe;
   dev_class->open = egis_etu905_open;
   dev_class->close = egis_etu905_close;
+  dev_class->cancel = egis_etu905_cancel;
   dev_class->identify = egis_etu905_identify;
   dev_class->enroll = egis_etu905_enroll;
   dev_class->delete = egis_etu905_delete;
