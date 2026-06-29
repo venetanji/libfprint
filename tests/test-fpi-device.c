@@ -3227,14 +3227,14 @@ fake_device_delete_wait_for_cancel_timeout (gpointer data)
 {
   FpDevice *device = data;
   FpiDeviceFake *fake_dev = FPI_DEVICE_FAKE (device);
-  FpDeviceClass *dev_class = FP_DEVICE_GET_CLASS (device);
 
   /* The delete vfunc ran before the timeout was scheduled. */
   g_assert (fake_dev->last_called_function == fake_device_delete_wait_for_cancel);
   default_fake_dev_class.delete (device);
 
-  /* delete_complete -> return_task_in_idle -> cancel_requested -> cls->cancel */
-  g_assert (fake_dev->last_called_function == dev_class->cancel);
+  /* delete_complete -> return_task_in_idle schedules cancel via idle.
+   * Cancel vfunc has not been called yet at this point. */
+  g_assert (fake_dev->last_called_function == default_fake_dev_class.delete);
   fake_dev->last_called_function = fake_device_delete_wait_for_cancel_timeout;
 
   return G_SOURCE_REMOVE;
@@ -3332,7 +3332,7 @@ test_driver_cancel (void)
   while (!completed)
     g_main_context_iteration (NULL, TRUE);
 
-  g_assert (fake_dev->last_called_function == fake_device_delete_wait_for_cancel_timeout);
+  g_assert (fake_dev->last_called_function == dev_class->cancel);
 }
 
 static void
@@ -3477,7 +3477,7 @@ test_driver_critical (void)
   while (g_main_context_iteration (NULL, FALSE) && !fake_dev->last_called_function)
     continue;
 
-  g_assert (fake_dev->last_called_function == dev_class->cancel);
+  g_assert (fake_dev->last_called_function == orig_verify);
   g_assert_true (fpi_device_action_is_cancelled (device));
   while (g_main_context_iteration (NULL, FALSE))
     continue;

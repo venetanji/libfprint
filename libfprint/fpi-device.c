@@ -1201,6 +1201,26 @@ fpi_device_task_return_data_free (gpointer p)
   g_free (data);
 }
 
+static gboolean
+fp_device_cancel_in_idle_cb (gpointer user_data)
+{
+  FpDeviceTaskReturnData *data = user_data;
+  FpDevice *device = data->device;
+  FpDevicePrivate *priv = fp_device_get_instance_private (device);
+  FpDeviceClass *cls = FP_DEVICE_GET_CLASS (device);
+
+  g_assert (g_atomic_int_get (&priv->deferred_cancel));
+  g_assert (priv->current_action != FPI_DEVICE_ACTION_NONE);
+  g_assert (cls->cancel != NULL);
+
+  g_debug ("Cancelling on ongoing operation in idle");
+
+  priv->current_task_idle_return_source = NULL;
+  cls->cancel (device);
+
+  return G_SOURCE_REMOVE;
+}
+
 /**
  * fpi_device_return_task_in_idle:
  * @device: The #FpDevice
@@ -1216,14 +1236,16 @@ fpi_device_return_task_in_idle (FpDevice              *device,
                                 gpointer               return_data)
 {
   FpDevicePrivate *priv = fp_device_get_instance_private (device);
-  FpDeviceClass *cls = FP_DEVICE_GET_CLASS (device);
   FpDeviceTaskReturnData *data;
+  GSourceFunc idle_cb;
 
   g_assert (priv->current_task_idle_return_source == NULL);
   data = g_new0 (FpDeviceTaskReturnData, 1);
   data->device = g_object_ref (device);
   data->type = return_type;
   data->result = return_data;
+
+  idle_cb = fp_device_task_return_in_idle_cb;
 
   /* If cancellation was requested, defer the completion, first call cancel()
    * vfunc synchronously.
@@ -1236,19 +1258,14 @@ fpi_device_return_task_in_idle (FpDevice              *device,
       deferred_cancel = g_atomic_int_exchange (&priv->deferred_cancel, TRUE);
       g_assert (!deferred_cancel);
 
-      fpi_device_task_return_data_free (data);
-
-      g_assert (cls->cancel != NULL);
-      cls->cancel (device);
-
-      return;
+      idle_cb = fp_device_cancel_in_idle_cb;
     }
 
   priv->current_task_idle_return_source = g_idle_source_new ();
   g_source_set_priority (priv->current_task_idle_return_source,
                          g_task_get_priority (priv->current_task));
   g_source_set_callback (priv->current_task_idle_return_source,
-                         fp_device_task_return_in_idle_cb,
+                         idle_cb,
                          data,
                          (GDestroyNotify) fpi_device_task_return_data_free);
 
