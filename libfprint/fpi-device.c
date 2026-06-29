@@ -1071,7 +1071,8 @@ fp_device_task_return_in_idle_cb (gpointer user_data)
   g_autoptr(GTask) task = NULL;
   g_autoptr(GError) cancellation_reason = NULL;
   FpDeviceTaskReturnData *data = user_data;
-  FpDevicePrivate *priv = fp_device_get_instance_private (data->device);
+  FpDevice *device = data->device;
+  FpDevicePrivate *priv = fp_device_get_instance_private (device);
   FpiDeviceAction action;
 
   if (!g_log_writer_default_would_drop (G_LOG_LEVEL_DEBUG, G_LOG_DOMAIN))
@@ -1088,13 +1089,13 @@ fp_device_task_return_in_idle_cb (gpointer user_data)
   g_clear_object (&priv->current_cancellable);
   cancellation_reason = g_steal_pointer (&priv->current_cancellation_reason);
 
-  fpi_device_update_temp (data->device, FALSE);
+  fpi_device_update_temp (device, FALSE);
 
   if (action == FPI_DEVICE_ACTION_OPEN &&
       data->type != FP_DEVICE_TASK_RETURN_ERROR)
     {
       priv->is_open = TRUE;
-      g_object_notify (G_OBJECT (data->device), "open");
+      g_object_notify (G_OBJECT (device), "open");
     }
   else if (action == FPI_DEVICE_ACTION_CLOSE)
     {
@@ -1102,7 +1103,7 @@ fp_device_task_return_in_idle_cb (gpointer user_data)
        * device. Generally, e.g. cancellations should be ignored.
        */
       priv->is_open = FALSE;
-      g_object_notify (G_OBJECT (data->device), "open");
+      g_object_notify (G_OBJECT (device), "open");
     }
 
   /* TODO: Port/use the cancellation mechanism for device removal! */
