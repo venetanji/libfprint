@@ -124,7 +124,7 @@ egis_etu905_validate_response_prefix (const guchar *buffer_in,
 
   fpi_byte_reader_init (&reader, buffer_in, buffer_in_len);
 
-  if (!fpi_byte_reader_set_pos (&reader, egis_etu905_read_prefix_len +
+  if (!fpi_byte_reader_set_pos (&reader, G_N_ELEMENTS (egis_etu905_read_prefix) +
                                 EGIS_ETU905_CHECK_BYTES_LENGTH) ||
       !fpi_byte_reader_get_data (&reader, valid_prefix_len, &data))
     {
@@ -191,7 +191,7 @@ egis_etu905_task_ssm_done (FpiSsm   *ssm,
         {
           egis_etu905_exec_cmd_full (device,
                                      cmd_enroll_discard,
-                                     cmd_enroll_discard_len,
+                                     G_N_ELEMENTS (cmd_enroll_discard),
                                      NULL,
                                      NULL);
         }
@@ -200,7 +200,7 @@ egis_etu905_task_ssm_done (FpiSsm   *ssm,
         {
           egis_etu905_exec_cmd_full (device,
                                      cmd_identify_cancel,
-                                     cmd_identify_cancel_len,
+                                     G_N_ELEMENTS (cmd_identify_cancel),
                                      NULL,
                                      NULL);
         }
@@ -261,7 +261,7 @@ egis_etu905_cmd_receive_cb (FpiUsbTransfer *transfer,
       return;
     }
 
-  if (transfer->actual_length < egis_etu905_read_prefix_len)
+  if (transfer->actual_length < G_N_ELEMENTS (egis_etu905_read_prefix))
     {
       fpi_ssm_mark_failed (transfer->ssm,
                            fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
@@ -382,7 +382,7 @@ egis_etu905_exec_cmd_full (FpDevice         *device,
    * egis_etu905_get_check_bytes() method and payload is what is passed via the cmd
    * parameter
    */
-  buffer_out_length = egis_etu905_write_prefix_len
+  buffer_out_length = G_N_ELEMENTS (egis_etu905_write_prefix)
                       + EGIS_ETU905_CHECK_BYTES_LENGTH
                       + cmd_length;
 
@@ -391,7 +391,7 @@ egis_etu905_exec_cmd_full (FpDevice         *device,
 
   /* Prefix */
   written &= fpi_byte_writer_put_data (&writer, egis_etu905_write_prefix,
-                                       egis_etu905_write_prefix_len);
+                                       G_N_ELEMENTS (egis_etu905_write_prefix));
 
   /* Check Bytes - leave them as 00 for now then later generate and copy over
    * the real ones */
@@ -403,7 +403,7 @@ egis_etu905_exec_cmd_full (FpDevice         *device,
   /* Now fetch and set the "real" check bytes based on the currently
    * assembled payload */
   check_value = egis_etu905_get_check_bytes (FPI_BYTE_READER (&writer));
-  fpi_byte_writer_set_pos (&writer, egis_etu905_write_prefix_len);
+  fpi_byte_writer_set_pos (&writer, G_N_ELEMENTS (egis_etu905_write_prefix));
   written &= fpi_byte_writer_put_uint16_be (&writer, check_value);
 
   /* The command runs on its own dedicated SSM, carrying all its state (the
@@ -556,7 +556,7 @@ egis_etu905_list_run_state (FpiSsm   *ssm,
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case LIST_GET_ENROLLED_IDS:
-      egis_etu905_exec_cmd (device, cmd_list, cmd_list_len,
+      egis_etu905_exec_cmd (device, cmd_list, G_N_ELEMENTS (cmd_list),
                             egis_etu905_list_fill_enrolled_ids_cb);
       break;
 
@@ -619,7 +619,7 @@ egis_etu905_get_delete_cmd (FpDevice *device,
   const gsize body_length = sizeof (guchar) * EGIS_ETU905_FINGERPRINT_DATA_SIZE *
                             num_to_delete;
   /* total_length is the 6 various bytes plus prefix and body payload */
-  const gsize total_length = (sizeof (guchar) * 6) + cmd_delete_prefix_len +
+  const gsize total_length = (sizeof (guchar) * 6) + G_N_ELEMENTS (cmd_delete_prefix) +
                              body_length;
 
   /* pre-fill entire payload with 00s */
@@ -647,7 +647,7 @@ egis_etu905_get_delete_cmd (FpDevice *device,
 
   /* command prefix */
   written &= fpi_byte_writer_put_data (&writer, cmd_delete_prefix,
-                                       cmd_delete_prefix_len);
+                                       G_N_ELEMENTS (cmd_delete_prefix));
 
   /* 2-bytes size logic for counter again */
   if (num_to_delete > 7)
@@ -738,7 +738,7 @@ egis_etu905_delete_cb (FpDevice *device,
   if (egis_etu905_validate_response_prefix (buffer_in,
                                             length_in,
                                             rsp_delete_success_prefix,
-                                            rsp_delete_success_prefix_len))
+                                            G_N_ELEMENTS (rsp_delete_success_prefix)))
     {
       if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_CLEAR_STORAGE)
         {
@@ -776,7 +776,7 @@ egis_etu905_delete_run_state (FpiSsm   *ssm,
     {
     case DELETE_GET_ENROLLED_IDS:
       /* get enrolled_ids from device for use building delete payload below */
-      egis_etu905_exec_cmd (device, cmd_list, cmd_list_len,
+      egis_etu905_exec_cmd (device, cmd_list, G_N_ELEMENTS (cmd_list),
                             egis_etu905_list_fill_enrolled_ids_cb);
       break;
 
@@ -890,11 +890,11 @@ egis_etu905_read_capture_cb (FpDevice *device,
   if (egis_etu905_validate_response_prefix (buffer_in,
                                             length_in,
                                             rsp_read_success_prefix,
-                                            rsp_read_success_prefix_len) &&
+                                            G_N_ELEMENTS (rsp_read_success_prefix)) &&
       egis_etu905_validate_response_suffix (buffer_in,
                                             length_in,
                                             rsp_read_success_suffix,
-                                            rsp_read_success_suffix_len))
+                                            G_N_ELEMENTS (rsp_read_success_suffix)))
     {
       egis_etu905_enroll_status_report (device, enroll_print,
                                         ENROLL_STATUS_PARTIAL_OK, NULL);
@@ -907,18 +907,18 @@ egis_etu905_read_capture_cb (FpDevice *device,
       if (egis_etu905_validate_response_prefix (buffer_in,
                                                 length_in,
                                                 rsp_read_offcenter_prefix,
-                                                rsp_read_offcenter_prefix_len) &&
+                                                G_N_ELEMENTS (rsp_read_offcenter_prefix)) &&
           egis_etu905_validate_response_suffix (buffer_in,
                                                 length_in,
                                                 rsp_read_offcenter_suffix,
-                                                rsp_read_offcenter_suffix_len))
+                                                G_N_ELEMENTS (rsp_read_offcenter_suffix)))
         error = fpi_device_retry_new (FP_DEVICE_RETRY_CENTER_FINGER);
 
       /* "Sensor is dirty" */
       else if (egis_etu905_validate_response_prefix (buffer_in,
                                                      length_in,
                                                      rsp_read_dirty_prefix,
-                                                     rsp_read_dirty_prefix_len))
+                                                     G_N_ELEMENTS (rsp_read_dirty_prefix)))
         error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_REMOVE_FINGER,
                                           "Your device is having trouble recognizing you. "
                                           "Make sure your sensor is clean.");
@@ -956,7 +956,7 @@ egis_etu905_enroll_duplicate_check_cb (FpDevice *device,
   if (egis_etu905_validate_response_suffix (buffer_in,
                                             length_in,
                                             rsp_check_not_yet_enrolled_suffix,
-                                            rsp_check_not_yet_enrolled_suffix_len))
+                                            G_N_ELEMENTS (rsp_check_not_yet_enrolled_suffix)))
     fpi_ssm_jump_to_state (self->task_ssm, ENROLL_COMMIT_START);
   else
     egis_etu905_enroll_status_report (device, NULL, ENROLL_STATUS_DUPLICATE,
@@ -1018,8 +1018,8 @@ egis_etu905_get_check_cmd (FpDevice *device,
   /* prefix length can depend on the type */
   const gsize check_prefix_length = (fpi_device_get_driver_data (device) &
                                      EGIS_ETU905_DRIVER_CHECK_PREFIX_TYPE2) ?
-                                    cmd_check_prefix_type2_len :
-                                    cmd_check_prefix_type1_len;
+                                    G_N_ELEMENTS (cmd_check_prefix_type2) :
+                                    G_N_ELEMENTS (cmd_check_prefix_type1);
 
   /* total_length is the 6 various bytes plus all other prefixes/suffixes and
    * the body payload */
@@ -1027,7 +1027,7 @@ egis_etu905_get_check_cmd (FpDevice *device,
                              + check_prefix_length
                              + EGIS_ETU905_CMD_CHECK_SEPARATOR_LENGTH
                              + body_length
-                             + cmd_check_suffix_len;
+                             + G_N_ELEMENTS (cmd_check_suffix);
 
   /* pre-fill entire payload with 00s */
   fpi_byte_writer_init_with_size (&writer, total_length, TRUE);
@@ -1059,10 +1059,10 @@ egis_etu905_get_check_cmd (FpDevice *device,
   /* command prefix */
   if (fpi_device_get_driver_data (device) & EGIS_ETU905_DRIVER_CHECK_PREFIX_TYPE2)
     written &= fpi_byte_writer_put_data (&writer, cmd_check_prefix_type2,
-                                         cmd_check_prefix_type2_len);
+                                         G_N_ELEMENTS (cmd_check_prefix_type2));
   else
     written &= fpi_byte_writer_put_data (&writer, cmd_check_prefix_type1,
-                                         cmd_check_prefix_type1_len);
+                                         G_N_ELEMENTS (cmd_check_prefix_type1));
 
   /* 2-bytes size logic for counter again */
   if (self->enrolled_ids->len > 6)
@@ -1092,7 +1092,7 @@ egis_etu905_get_check_cmd (FpDevice *device,
 
   /* command suffix */
   written &= fpi_byte_writer_put_data (&writer, cmd_check_suffix,
-                                       cmd_check_suffix_len);
+                                       G_N_ELEMENTS (cmd_check_suffix));
   g_assert (written);
 
   if (length_out)
@@ -1115,17 +1115,17 @@ egis_etu905_enroll_run_state (FpiSsm   *ssm,
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case ENROLL_START:
-      egis_etu905_exec_cmd (device, cmd_enroll_starting, cmd_enroll_starting_len,
+      egis_etu905_exec_cmd (device, cmd_enroll_starting, G_N_ELEMENTS (cmd_enroll_starting),
                             egis_etu905_enroll_begin_cb);
       break;
 
     case ENROLL_CAPTURE_SENSOR_RESET:
-      egis_etu905_exec_cmd (device, cmd_sensor_reset, cmd_sensor_reset_len,
+      egis_etu905_exec_cmd (device, cmd_sensor_reset, G_N_ELEMENTS (cmd_sensor_reset),
                             egis_etu905_task_ssm_next_state_cb);
       break;
 
     case ENROLL_CAPTURE_SENSOR_START_CAPTURE:
-      egis_etu905_exec_cmd (device, cmd_sensor_start_capture, cmd_sensor_start_capture_len,
+      egis_etu905_exec_cmd (device, cmd_sensor_start_capture, G_N_ELEMENTS (cmd_sensor_start_capture),
                             egis_etu905_task_ssm_next_state_cb);
       break;
 
@@ -1134,17 +1134,17 @@ egis_etu905_enroll_run_state (FpiSsm   *ssm,
       break;
 
     case ENROLL_CAPTURE_READ_RESPONSE:
-      egis_etu905_exec_cmd (device, cmd_read_capture, cmd_read_capture_len,
+      egis_etu905_exec_cmd (device, cmd_read_capture, G_N_ELEMENTS (cmd_read_capture),
                             egis_etu905_read_capture_cb);
       break;
 
     case ENROLL_DUPLICATE_CHECK:
-      egis_etu905_exec_cmd (device, cmd_duplicate_check, cmd_duplicate_check_len,
+      egis_etu905_exec_cmd (device, cmd_duplicate_check, G_N_ELEMENTS (cmd_duplicate_check),
                             egis_etu905_enroll_duplicate_check_cb);
       break;
 
     case ENROLL_COMMIT_START:
-      egis_etu905_exec_cmd (device, cmd_commit_starting, cmd_commit_starting_len,
+      egis_etu905_exec_cmd (device, cmd_commit_starting, G_N_ELEMENTS (cmd_commit_starting),
                             egis_etu905_commit_start_cb);
       break;
 
@@ -1158,7 +1158,7 @@ egis_etu905_enroll_run_state (FpiSsm   *ssm,
       egis_etu905_set_print_data (enroll_print->print, device_print_id, user_id);
 
       fpi_byte_writer_init_with_size (&writer,
-                                      cmd_new_print_prefix_type2_len +
+                                      G_N_ELEMENTS (cmd_new_print_prefix_type2) +
                                       1 + 2 + 2 + EGIS_ETU905_PARA_4_SIZE,
                                       TRUE);
       if (!fpi_byte_writer_put_data_static (&writer, cmd_new_print_prefix_type2) ||
@@ -1179,7 +1179,7 @@ egis_etu905_enroll_run_state (FpiSsm   *ssm,
       break;
 
     case ENROLL_COMMIT_SENSOR_RESET:
-      egis_etu905_exec_cmd (device, cmd_sensor_reset, cmd_sensor_reset_len,
+      egis_etu905_exec_cmd (device, cmd_sensor_reset, G_N_ELEMENTS (cmd_sensor_reset),
                             egis_etu905_task_ssm_next_state_cb);
       break;
 
@@ -1232,7 +1232,7 @@ egis_etu905_identify_check_cb (FpDevice *device,
   if (egis_etu905_validate_response_suffix (buffer_in,
                                             length_in,
                                             rsp_identify_match_suffix,
-                                            rsp_identify_match_suffix_len))
+                                            G_N_ELEMENTS (rsp_identify_match_suffix)))
     {
       gboolean id_known = FALSE;
       FpiByteReader reader;
@@ -1306,7 +1306,7 @@ egis_etu905_identify_check_cb (FpDevice *device,
   else if (egis_etu905_validate_response_suffix (buffer_in,
                                                  length_in,
                                                  rsp_identify_notmatch_suffix,
-                                                 rsp_identify_notmatch_suffix_len))
+                                                 G_N_ELEMENTS (rsp_identify_notmatch_suffix)))
     {
       fp_info ("Print was not identified by the device");
 
@@ -1353,7 +1353,7 @@ egis_etu905_identify_run_state (FpiSsm   *ssm,
     {
     case IDENTIFY_GET_ENROLLED_IDS:
       /* get enrolled_ids from device for use in check stages below */
-      egis_etu905_exec_cmd (device, cmd_list, cmd_list_len,
+      egis_etu905_exec_cmd (device, cmd_list, G_N_ELEMENTS (cmd_list),
                             egis_etu905_list_fill_enrolled_ids_cb);
       break;
 
@@ -1368,12 +1368,12 @@ egis_etu905_identify_run_state (FpiSsm   *ssm,
       break;
 
     case IDENTIFY_SENSOR_RESET:
-      egis_etu905_exec_cmd (device, cmd_sensor_reset, cmd_sensor_reset_len,
+      egis_etu905_exec_cmd (device, cmd_sensor_reset, G_N_ELEMENTS (cmd_sensor_reset),
                             egis_etu905_task_ssm_next_state_cb);
       break;
 
     case IDENTIFY_SENSOR_IDENTIFY:
-      egis_etu905_exec_cmd (device, cmd_sensor_identify, cmd_sensor_identify_len,
+      egis_etu905_exec_cmd (device, cmd_sensor_identify, G_N_ELEMENTS (cmd_sensor_identify),
                             egis_etu905_task_ssm_next_state_cb);
       break;
 
@@ -1382,7 +1382,7 @@ egis_etu905_identify_run_state (FpiSsm   *ssm,
       break;
 
     case IDENTIFY_SENSOR_CHECK:
-      egis_etu905_exec_cmd (device, cmd_sensor_check, cmd_sensor_check_len,
+      egis_etu905_exec_cmd (device, cmd_sensor_check, G_N_ELEMENTS (cmd_sensor_check),
                             egis_etu905_task_ssm_next_state_cb);
       break;
 
@@ -1394,12 +1394,12 @@ egis_etu905_identify_run_state (FpiSsm   *ssm,
 
     case IDENTIFY_SEND_CANCEL_RESULT:
       egis_etu905_exec_cmd (device, cmd_identify_cancel_result,
-                            cmd_identify_cancel_result_len,
+                            G_N_ELEMENTS (cmd_identify_cancel_result),
                             egis_etu905_identify_send_cancel_result_cb);
       break;
 
     case IDENTIFY_COMPLETE_SENSOR_RESET:
-      egis_etu905_exec_cmd (device, cmd_sensor_reset, cmd_sensor_reset_len,
+      egis_etu905_exec_cmd (device, cmd_sensor_reset, G_N_ELEMENTS (cmd_sensor_reset),
                             egis_etu905_task_ssm_next_state_cb);
       break;
 
@@ -1440,7 +1440,7 @@ egis_etu905_fw_version_cb (FpDevice *device,
   FpiDeviceEgisEtu905 *self = FPI_DEVICE_EGIS_ETU905 (device);
   FpiByteReader reader;
   const guint8 *fw_version_data = NULL;
-  const guint prefix_length = egis_etu905_read_prefix_len + 2 + 3 + 1;
+  const guint prefix_length = G_N_ELEMENTS (egis_etu905_read_prefix) + 2 + 3 + 1;
   gsize fw_version_length;
   g_autofree gchar *fw_version = NULL;
 
@@ -1456,7 +1456,7 @@ egis_etu905_fw_version_cb (FpDevice *device,
   if (!egis_etu905_validate_response_suffix (buffer_in,
                                              length_in,
                                              rsp_fw_version_suffix,
-                                             rsp_fw_version_suffix_len))
+                                             G_N_ELEMENTS (rsp_fw_version_suffix)))
     {
       fpi_ssm_mark_failed (self->task_ssm,
                            fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
@@ -1482,7 +1482,7 @@ egis_etu905_fw_version_cb (FpDevice *device,
       return;
     }
 
-  fw_version_length = fpi_byte_reader_get_remaining (&reader) - rsp_fw_version_suffix_len;
+  fw_version_length = fpi_byte_reader_get_remaining (&reader) - G_N_ELEMENTS (rsp_fw_version_suffix);
 
   if (!fpi_byte_reader_get_data (&reader, fw_version_length, &fw_version_data))
     {
@@ -1519,7 +1519,7 @@ egis_etu905_cmd_init_cb (FpDevice *device,
   if (!egis_etu905_validate_response_suffix (buffer_in,
                                              length_in,
                                              rsp_fw_version_suffix,
-                                             rsp_fw_version_suffix_len))
+                                             G_N_ELEMENTS (rsp_fw_version_suffix)))
     {
       fpi_ssm_mark_failed (self->task_ssm,
                            fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
@@ -1554,12 +1554,12 @@ egis_etu905_dev_init_handler (FpiSsm   *ssm,
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case DEV_GET_FW_VERSION:
-      egis_etu905_exec_cmd (device, cmd_fw_version, cmd_fw_version_len,
+      egis_etu905_exec_cmd (device, cmd_fw_version, G_N_ELEMENTS (cmd_fw_version),
                             egis_etu905_fw_version_cb);
       return;
 
     case DEV_INIT_CONTROL:
-      egis_etu905_exec_cmd (device, cmd_init, cmd_init_len,
+      egis_etu905_exec_cmd (device, cmd_init, G_N_ELEMENTS (cmd_init),
                             egis_etu905_cmd_init_cb);
       return;
 
