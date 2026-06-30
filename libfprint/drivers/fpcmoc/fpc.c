@@ -72,6 +72,7 @@ static const FpIdEntry id_table[] = {
   { .vid = 0x10A5,  .pid = 0x9524,  },
   { .vid = 0x10A5,  .pid = 0x9544,  },
   { .vid = 0x10A5,  .pid = 0xC844,  },
+  { .vid = 0x10A5,  .pid = 0x9924,  },
   { .vid = 0x10A5,  .pid = 0x9B24,  },
   /* terminating entry */
   { .vid = 0,  .pid = 0,  .driver_data = 0 },
@@ -1215,9 +1216,15 @@ fpc_verify_cb (FpiDeviceFpcMoc *self,
   presp = (FPC_IDENTIFY *) data;
   current_action = fpi_device_get_current_action (device);
 
+  fp_dbg ("IDENTIFY response: status=%d, subfactor=0x%x, identity_type=0x%x, "
+           "identity_size=%u, identity_offset=%u",
+           presp->status, presp->subfactor, presp->identity_type,
+           presp->identity_size, presp->identity_offset);
+
   g_assert (current_action == FPI_DEVICE_ACTION_VERIFY ||
             current_action == FPI_DEVICE_ACTION_IDENTIFY);
 
+  /* Check for a match using standard identity format */
   if ((presp->status == 0) && (presp->subfactor == FPC_SUBTYPE_RESERVED) &&
       (presp->identity_type == FPC_IDENTITY_TYPE_RESERVED) &&
       (presp->identity_size <= SECURITY_MAX_SID_SIZE))
@@ -1265,6 +1272,22 @@ fpc_verify_cb (FpiDeviceFpcMoc *self,
           else
             fpi_device_identify_report (device, print, match, error);
 
+          fpi_ssm_mark_completed (self->task_ssm);
+          return;
+        }
+    }
+
+  /* Some sensors (e.g. FPC L:2407) return status=0 with zero identity fields.
+   * In verify mode, trust the sensor's match result directly. */
+  else if (presp->status == 0 && current_action == FPI_DEVICE_ACTION_VERIFY)
+    {
+      FpPrint *print = NULL;
+      fp_dbg ("Sensor reported match with non-standard identity format, "
+               "trusting sensor match result");
+      fpi_device_get_verify_data (device, &print);
+      if (print)
+        {
+          fpi_device_verify_report (device, FPI_MATCH_SUCCESS, print, error);
           fpi_ssm_mark_completed (self->task_ssm);
           return;
         }
@@ -1649,6 +1672,7 @@ fpc_dev_probe (FpDevice *device)
     case 0x9524:
     case 0x9544:
     case 0xC844:
+    case 0x9924:
       self->max_enroll_stage = MAX_ENROLL_SAMPLES;
       break;
 
