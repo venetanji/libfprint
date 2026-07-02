@@ -366,6 +366,18 @@ sync_udev_udb = custom_target('sync-udev-hwdb',
 
 alias_target('sync-udev-hwdb', sync_udev_udb)
 
+sync_unsupported_devices = custom_target('sync-unsupported-devices',
+    output: 'sync-unsupported-devices',
+    install: false,
+    command: [
+        find_program('python3'),
+        files('..' / 'scripts' / 'sync-unsupported-devices.py'),
+        meson.current_source_dir() / 'fprint-list-udev-hwdb.c',
+    ]
+)
+
+alias_target('sync-unsupported-devices', sync_unsupported_devices)
+
 supported_devices = executable('fprint-list-supported-devices',
     'fprint-list-supported-devices.c',
     dependencies: libfprint_private_dep,
