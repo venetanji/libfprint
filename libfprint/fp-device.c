@@ -295,24 +295,39 @@ fp_device_get_property (GObject    *object,
       break;
 
     case PROP_FPI_UDEV_DATA_SPIDEV:
-      if (cls->type == FP_DEVICE_TYPE_UDEV)
-        g_value_set_string (value, priv->udev_data.spidev_path);
-      else
-        g_value_set_string (value, NULL);
+      if (cls->type == FP_DEVICE_TYPE_UDEV &&
+          cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_SPIDEV)
+        {
+          g_value_set_string (value, priv->udev_data.spidev_path);
+          break;
+        }
+
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      g_value_set_string (value, NULL);
       break;
 
     case PROP_FPI_UDEV_DATA_HIDRAW:
-      if (cls->type == FP_DEVICE_TYPE_UDEV)
-        g_value_set_string (value, priv->udev_data.hidraw_path);
-      else
-        g_value_set_string (value, NULL);
+      if (cls->type == FP_DEVICE_TYPE_UDEV &&
+          cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_HIDRAW)
+        {
+          g_value_set_string (value, priv->udev_data.hidraw_path);
+          break;
+        }
+
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      g_value_set_string (value, NULL);
       break;
 
     case PROP_FPI_UDEV_DATA_MISC:
-      if (cls->type == FP_DEVICE_TYPE_UDEV)
-        g_value_set_string (value, priv->udev_data.misc_path);
-      else
-        g_value_set_string (value, NULL);
+      if (cls->type == FP_DEVICE_TYPE_UDEV &&
+          cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_MISC)
+        {
+          g_value_set_string (value, priv->udev_data.misc_path);
+          break;
+        }
+
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      g_value_set_string (value, NULL);
       break;
 
     default:
@@ -348,21 +363,24 @@ fp_device_set_property (GObject      *object,
       break;
 
     case PROP_FPI_UDEV_DATA_SPIDEV:
-      if (cls->type == FP_DEVICE_TYPE_UDEV)
+      if (cls->type == FP_DEVICE_TYPE_UDEV &&
+          cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_SPIDEV)
         priv->udev_data.spidev_path = g_value_dup_string (value);
       else
         g_assert (g_value_get_string (value) == NULL);
       break;
 
     case PROP_FPI_UDEV_DATA_HIDRAW:
-      if (cls->type == FP_DEVICE_TYPE_UDEV)
+      if (cls->type == FP_DEVICE_TYPE_UDEV &&
+          cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_HIDRAW)
         priv->udev_data.hidraw_path = g_value_dup_string (value);
       else
         g_assert (g_value_get_string (value) == NULL);
       break;
 
     case PROP_FPI_UDEV_DATA_MISC:
-      if (cls->type == FP_DEVICE_TYPE_UDEV)
+      if (cls->type == FP_DEVICE_TYPE_UDEV &&
+          cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_MISC)
         priv->udev_data.misc_path = g_value_dup_string (value);
       else
         g_assert (g_value_get_string (value) == NULL);
