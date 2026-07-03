@@ -298,6 +298,8 @@ fp_device_get_property (GObject    *object,
       if (cls->type == FP_DEVICE_TYPE_UDEV &&
           cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_SPIDEV)
         {
+          g_assert (!priv->udev_data.spidev_path ||
+                    strstr (priv->udev_data.spidev_path, "..") == NULL);
           g_value_set_string (value, priv->udev_data.spidev_path);
           break;
         }
@@ -310,6 +312,8 @@ fp_device_get_property (GObject    *object,
       if (cls->type == FP_DEVICE_TYPE_UDEV &&
           cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_HIDRAW)
         {
+          g_assert (!priv->udev_data.hidraw_path ||
+                    strstr (priv->udev_data.hidraw_path, "..") == NULL);
           g_value_set_string (value, priv->udev_data.hidraw_path);
           break;
         }
@@ -322,6 +326,8 @@ fp_device_get_property (GObject    *object,
       if (cls->type == FP_DEVICE_TYPE_UDEV &&
           cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_MISC)
         {
+          g_assert (!priv->udev_data.misc_path ||
+                    strstr (priv->udev_data.misc_path, "..") == NULL);
           g_value_set_string (value, priv->udev_data.misc_path);
           break;
         }
