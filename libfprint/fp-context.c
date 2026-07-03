@@ -471,15 +471,18 @@ fp_context_enumerate (FpContext *context)
 #ifdef HAVE_UDEV
   {
     g_autoptr(GUdevClient) udev_client = g_udev_client_new (NULL);
+    g_autolist(GUdevDevice) spidev_devices = NULL;
+    g_autolist(GUdevDevice) hidraw_devices = NULL;
+    g_autolist(GUdevDevice) misc_devices = NULL;
 
     /* This uses a very simple algorithm to allocate devices to drivers and assumes that no two drivers will want the same device. Future improvements
      * could add a usb_discover style udev_discover that returns a score, however for internal devices the potential overlap should be very low between
      * separate drivers.
      */
 
-    g_autoptr(GList) spidev_devices = g_udev_client_query_by_subsystem (udev_client, "spidev");
-    g_autoptr(GList) hidraw_devices = g_udev_client_query_by_subsystem (udev_client, "hidraw");
-    g_autoptr(GList) misc_devices = g_udev_client_query_by_subsystem (udev_client, "misc");
+    spidev_devices = g_udev_client_query_by_subsystem (udev_client, "spidev");
+    hidraw_devices = g_udev_client_query_by_subsystem (udev_client, "hidraw");
+    misc_devices = g_udev_client_query_by_subsystem (udev_client, "misc");
 
     /* for each potential driver, try to match all requested resources. */
     for (i = 0; i < priv->drivers->len; i++)
@@ -505,10 +508,12 @@ fp_context_enumerate (FpContext *context)
                     if (strstr (sysfs, entry->spi_acpi_id))
                       break;
                   }
+
                 /* If match was not found exit */
                 if (matched_spidev == NULL)
                   continue;
               }
+
             if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_HIDRAW)
               {
                 for (matched_hidraw = hidraw_devices; matched_hidraw; matched_hidraw = matched_hidraw->next)
@@ -527,10 +532,12 @@ fp_context_enumerate (FpContext *context)
                     if (vendor == entry->hid_id.vid && product == entry->hid_id.pid)
                       break;
                   }
+
                 /* If match was not found exit */
                 if (matched_hidraw == NULL)
                   continue;
               }
+
             if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_MISC)
               {
                 for (matched_misc = misc_devices; matched_misc; matched_misc = matched_misc->next)
@@ -548,6 +555,7 @@ fp_context_enumerate (FpContext *context)
                 if (matched_misc == NULL)
                   continue;
               }
+
             priv->pending_devices++;
             g_async_initable_new_async (driver,
                                         G_PRIORITY_LOW,
@@ -555,33 +563,31 @@ fp_context_enumerate (FpContext *context)
                                         async_device_init_done_cb,
                                         context,
                                         "fpi-driver-data", entry->driver_data,
-                                        "fpi-udev-data-spidev", (matched_spidev ? g_udev_device_get_device_file (matched_spidev->data) : NULL),
-                                        "fpi-udev-data-hidraw", (matched_hidraw ? g_udev_device_get_device_file (matched_hidraw->data) : NULL),
-                                        "fpi-udev-data-misc", (matched_misc ? g_udev_device_get_device_file (matched_misc->data) : NULL),
+                                        "fpi-udev-data-spidev", (matched_spidev ?
+                                                                 g_udev_device_get_device_file (matched_spidev->data) : NULL),
+                                        "fpi-udev-data-hidraw", (matched_hidraw ?
+                                                                 g_udev_device_get_device_file (matched_hidraw->data) : NULL),
+                                        "fpi-udev-data-misc", (matched_misc ?
+                                                               g_udev_device_get_device_file (matched_misc->data) : NULL),
                                         NULL);
             /* remove entries from list to avoid conflicts */
             if (matched_spidev)
               {
-                g_object_unref (matched_spidev->data);
+                g_clear_object (&matched_spidev->data);
                 spidev_devices = g_list_delete_link (spidev_devices, matched_spidev);
               }
             if (matched_hidraw)
               {
-                g_object_unref (matched_hidraw->data);
+                g_clear_object (&matched_hidraw->data);
                 hidraw_devices = g_list_delete_link (hidraw_devices, matched_hidraw);
               }
             if (matched_misc)
               {
-                g_object_unref (matched_misc->data);
+                g_clear_object (&matched_misc->data);
                 misc_devices = g_list_delete_link (misc_devices, matched_misc);
               }
           }
       }
-
-    /* free all unused elemnts in both lists */
-    g_list_foreach (spidev_devices, (GFunc) g_object_unref, NULL);
-    g_list_foreach (hidraw_devices, (GFunc) g_object_unref, NULL);
-    g_list_foreach (misc_devices, (GFunc) g_object_unref, NULL);
   }
 #endif
 
