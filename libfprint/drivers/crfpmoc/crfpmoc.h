@@ -75,6 +75,11 @@ G_DECLARE_FINAL_TYPE (FpiDeviceCrfpMoc, fpi_device_crfpmoc, FPI, DEVICE_CRFPMOC,
 
 #define CRFPMOC_EC_CMD_FP_FRAME 0x0404
 
+/* Load a template into the MCU */
+#define CRFPMOC_EC_CMD_FP_TEMPLATE 0x0405
+/* Flag in the 'size' field indicating that the full template has been sent */
+#define CRFPMOC_FP_TEMPLATE_COMMIT 0x80000000
+
 /* constants defining the 'offset' field which also contains the frame index */
 #define CRFPMOC_FP_FRAME_INDEX_SHIFT 28
 /* Frame buffer where the captured image is stored */
@@ -103,6 +108,13 @@ struct crfpmoc_ec_params_fp_frame
   guint32 size;
 } __attribute__((packed));
 
+struct crfpmoc_ec_params_fp_template
+{
+  guint32 offset;
+  guint32 size;
+  guint8  data[];
+} __attribute__((packed));
+
 struct crfpmoc_ec_response_get_protocol_info
 {
   /* Fields which exist if at least protocol version 3 supported */
@@ -112,6 +124,7 @@ struct crfpmoc_ec_response_get_protocol_info
   guint32 flags;
 } __attribute__((packed));
 
+/* crfpmoc_ec_host_response and crfpmoc_ec_host_request are only here for the size of the struct */
 struct crfpmoc_ec_host_response
 {
   guint8  struct_version;
@@ -119,6 +132,16 @@ struct crfpmoc_ec_host_response
   guint16 result;
   guint16 data_len;
   guint16 reserved;
+} __attribute__((packed));
+
+struct crfpmoc_ec_host_request
+{
+  guint8  struct_version;
+  guint8  checksum;
+  guint16 command;
+  guint8  command_version;
+  guint8  reserved;
+  guint16 data_len;
 } __attribute__((packed));
 
 struct crfpmoc_ec_response_fp_encryption_status
@@ -303,6 +326,7 @@ typedef enum {
   VERIFY_SENSOR_MATCH,
   VERIFY_WAIT_FINGER,
   VERIFY_SENSOR_CHECK,
+  VERIFY_CHECK,
   VERIFY_STATES,
 } VerifyStates;
 
