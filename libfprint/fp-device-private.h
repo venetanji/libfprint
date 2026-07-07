@@ -58,6 +58,7 @@ typedef struct
   gboolean        is_removed;
   gboolean        is_open;
   gboolean        is_suspended;
+  gboolean        is_closing;
 
   gchar          *device_id;
   gchar          *device_name;
