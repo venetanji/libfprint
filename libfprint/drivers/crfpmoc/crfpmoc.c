@@ -316,7 +316,8 @@ crfpmoc_fp_set_context (FpiDeviceCrfpMoc *self,
                         GError          **error)
 {
   struct crfpmoc_ec_params_fp_context_v1 p = {0};
-  gint tries = 20; /* Wait at most 2 seconds (20 * 100ms) */
+  gint tries = 40;
+  const guint base_sleep_us = 80000; /* 80ms */
 
   fp_dbg ("Setting context to '%s'", context);
 
@@ -343,8 +344,28 @@ crfpmoc_fp_set_context (FpiDeviceCrfpMoc *self,
   for (int i = 0; i < tries; i++)
     {
       g_autoptr(GError) local_error = NULL;
+      guint sleep_us;
 
-      g_usleep (80000); /* Sleep for 80ms */
+      if (i < 10)
+        {
+          sleep_us = base_sleep_us;
+        }
+      else if (i < 20)
+        {
+          /* Linear increase from 80ms to 800ms */
+          double factor = 1.0 + 9.0 * (i - 10) / 9.0;
+          sleep_us = (guint) (base_sleep_us * factor);
+        }
+      else
+        {
+          sleep_us = base_sleep_us * 10;
+        }
+
+      if (i >= 10)
+        fp_warn ("Context setting is taking longer than expected. Attempt %d of %d",
+                 (i + 1), tries);
+
+      g_usleep (sleep_us);
 
       p.action = CRFPMOC_FP_CONTEXT_GET_RESULT;
       if (crfpmoc_ec_command (self, CRFPMOC_EC_CMD_FP_CONTEXT, 1,
@@ -759,7 +780,6 @@ handle_enroll_sensor_check (FpiSsm *ssm)
         {
           FpPrint *print;
 
-          fpi_device_report_finger_status (device, FP_FINGER_STATUS_PRESENT);
           fpi_device_get_enroll_data (device, &print);
 
           enroll_data->stage++;
@@ -795,6 +815,7 @@ handle_enroll_commit (FpiSsm *ssm)
   FpDevice *device = fpi_ssm_get_device (ssm);
   FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
   guint16 enrolled_templates = 0;
+  guint16 ec_max_outsize = 0;
   g_autofree guint8 *template = NULL;
   g_autofree gchar *user_id = NULL;
   struct crfpmoc_ec_response_fp_info info;
@@ -811,6 +832,15 @@ handle_enroll_commit (FpiSsm *ssm)
 
   template_index = enrolled_templates - 1;
   fpi_device_get_enroll_data (device, &print);
+
+  if (!crfpmoc_ec_max_outsize (self, &ec_max_outsize, &error))
+    {
+      fp_err ("Failed to get max outsize");
+      fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                                          "Failed to get max outsize: %s",
+                                                          error->message));
+      return;
+    }
 
   if (!crfpmoc_fp_download_template (self, &info, template_index, &template, &error))
     {
@@ -931,6 +961,20 @@ handle_verify_upload_template (FpiSsm *ssm)
               return;
             }
 
+          if (!ec_max_outsize)
+            {
+              /*  TODO: If this issue can't be fixed, we should only get the max
+               * outsize once and use it for all templates.
+               */
+              fp_warn ("Max outsize is not set, getting it from the device");
+
+              if (!crfpmoc_ec_max_outsize (self, &ec_max_outsize, &error))
+                {
+                  fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+                  return;
+                }
+            }
+
           if (!crfpmoc_fp_upload_template (self, template, template_size,
                                            ec_max_outsize, &error))
             {
@@ -949,6 +993,16 @@ handle_verify_upload_template (FpiSsm *ssm)
         {
           fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
           return;
+        }
+
+      if (!ec_max_outsize)
+        {
+          fp_warn ("Max outsize is not set, getting it from the device");
+          if (!crfpmoc_ec_max_outsize (self, &ec_max_outsize, &error))
+            {
+              fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+              return;
+            }
         }
 
       if (!crfpmoc_fp_upload_template (self, template, template_size,
