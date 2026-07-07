@@ -80,6 +80,10 @@ G_DECLARE_FINAL_TYPE (FpiDeviceCrfpMoc, fpi_device_crfpmoc, FPI, DEVICE_CRFPMOC,
 /* Flag in the 'size' field indicating that the full template has been sent */
 #define CRFPMOC_FP_TEMPLATE_COMMIT 0x80000000
 
+/* Should be made dynamic */
+#define CRFPMOC_DEFAULT_SEED "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define CRFPMOC_DEFAULT_CONTEXT "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 /* constants defining the 'offset' field which also contains the frame index */
 #define CRFPMOC_FP_FRAME_INDEX_SHIFT 28
 /* Frame buffer where the captured image is stored */
@@ -188,6 +192,21 @@ struct crfpmoc_ec_params_fp_seed
   guint8  seed[CRFPMOC_FP_CONTEXT_TPM_BYTES];
 } __attribute__((packed));
 
+/* Clear the current fingerprint user context and set a new one */
+#define CRFPMOC_EC_CMD_FP_CONTEXT 0x0406
+
+enum crfpmoc_fp_context_action {
+  CRFPMOC_FP_CONTEXT_ASYNC = 0,
+  CRFPMOC_FP_CONTEXT_GET_RESULT = 1,
+};
+
+/* Version 1 of the command is "asynchronous". */
+struct crfpmoc_ec_params_fp_context_v1
+{
+  guint8  action;      /**< enum fp_context_action */
+  guint8  reserved[3]; /**< padding for alignment */
+  guint32 userid[CRFPMOC_FP_CONTEXT_USERID_WORDS];
+} __attribute__((packed));
 
 struct crfpmoc_ec_response_fp_info
 {
@@ -315,6 +334,7 @@ enum crfpmoc_ec_status {
 /* SSM task states and various status enums */
 
 typedef enum {
+  ENROLL_ENSURE_KEYS,
   ENROLL_SENSOR_ENROLL,
   ENROLL_WAIT_FINGER,
   ENROLL_SENSOR_CHECK,
@@ -323,6 +343,8 @@ typedef enum {
 } EnrollStates;
 
 typedef enum {
+  VERIFY_ENSURE_KEYS,
+  VERIFY_UPLOAD_TEMPLATE,
   VERIFY_SENSOR_MATCH,
   VERIFY_WAIT_FINGER,
   VERIFY_SENSOR_CHECK,
