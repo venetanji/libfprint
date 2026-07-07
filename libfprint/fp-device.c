@@ -696,6 +696,97 @@ fp_device_open_udev_fd (const gchar *path,
   return TRUE;
 }
 
+static void
+open_device_thread (GTask        *task,
+                    gpointer      source_object,
+                    gpointer      task_data,
+                    GCancellable *cancellable)
+{
+  g_autoptr(GError) error = NULL;
+  FpDevice *device = FP_DEVICE (source_object);
+  FpDevicePrivate *priv = fp_device_get_instance_private (device);
+  FpDeviceClass *cls = FP_DEVICE_GET_CLASS (device);
+
+  /*
+   * It is safe to read and write priv here because:
+   *  - current_task has been set, so no other action can be started
+   *  - the transport task is the only code referencing this device
+   */
+  switch (priv->type)
+    {
+    case FP_DEVICE_TYPE_USB:
+      if (!g_usb_device_open (priv->usb_device, &error))
+        g_task_return_error (task, g_steal_pointer (&error));
+      else
+        g_task_return_boolean (task, TRUE);
+      return;
+
+    case FP_DEVICE_TYPE_VIRTUAL:
+      g_task_return_boolean (task, TRUE);
+      return;
+
+    case FP_DEVICE_TYPE_UDEV:
+      {
+        g_autofd int spidev_fd = -1;
+        g_autofd int hidraw_fd = -1;
+        g_autofd int misc_fd = -1;
+
+        if ((cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_SPIDEV) &&
+            !fp_device_open_udev_fd (priv->udev_data.spidev_path,
+                                     &spidev_fd, &error))
+          {
+            g_task_return_error (task, g_steal_pointer (&error));
+            return;
+          }
+
+        if ((cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_HIDRAW) &&
+            !fp_device_open_udev_fd (priv->udev_data.hidraw_path,
+                                     &hidraw_fd, &error))
+          {
+            g_task_return_error (task, g_steal_pointer (&error));
+            return;
+          }
+
+        if ((cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_MISC) &&
+            !fp_device_open_udev_fd (priv->udev_data.misc_path,
+                                     &misc_fd, &error))
+          {
+            g_task_return_error (task, g_steal_pointer (&error));
+            return;
+          }
+
+        priv->udev_data.spidev_fd = g_steal_fd (&spidev_fd);
+        priv->udev_data.hidraw_fd = g_steal_fd (&hidraw_fd);
+        priv->udev_data.misc_fd   = g_steal_fd (&misc_fd);
+
+        g_task_return_boolean (task, TRUE);
+      }
+      return;
+
+    default:
+      g_assert_not_reached ();
+    }
+}
+
+static void
+open_task_done (GObject      *source_object,
+                GAsyncResult *result,
+                gpointer      user_data)
+{
+  FpDevice *device = FP_DEVICE (source_object);
+  GError *error = NULL;
+
+  if (!g_task_propagate_boolean (G_TASK (result), &error))
+    {
+      fpi_device_open_complete (device, error);
+      return;
+    }
+
+  fpi_device_report_finger_status (device, FP_FINGER_STATUS_NONE);
+
+  FP_DEVICE_GET_CLASS (device)->open (device);
+}
+
 /**
  * fp_device_get_driver:
  * @device: A #FpDevice
@@ -911,9 +1002,8 @@ fp_device_open (FpDevice           *device,
                 gpointer            user_data)
 {
   g_autoptr(GTask) task = NULL;
-  FpDeviceClass *cls = FP_DEVICE_GET_CLASS (device);
+  g_autoptr(GTask) open_task = NULL;
   FpDevicePrivate *priv = fp_device_get_instance_private (device);
-  GError *error = NULL;
 
   task = g_task_new (device, cancellable, callback, user_data);
   if (g_task_return_error_if_cancelled (task))
@@ -933,70 +1023,13 @@ fp_device_open (FpDevice           *device,
       return;
     }
 
-  switch (priv->type)
-    {
-    case FP_DEVICE_TYPE_USB:
-      if (!g_usb_device_open (priv->usb_device, &error))
-        {
-          g_task_return_error (task, error);
-          return;
-        }
-      break;
-
-    case FP_DEVICE_TYPE_VIRTUAL:
-      break;
-
-    case FP_DEVICE_TYPE_UDEV:
-      {
-        g_autofd int spidev_fd = -1;
-        g_autofd int hidraw_fd = -1;
-        g_autofd int misc_fd = -1;
-
-        if ((cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_SPIDEV) &&
-            !fp_device_open_udev_fd (priv->udev_data.spidev_path,
-                                     &spidev_fd,
-                                     &error))
-          {
-            g_task_return_error (task, error);
-            return;
-          }
-
-        if ((cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_HIDRAW) &&
-            !fp_device_open_udev_fd (priv->udev_data.hidraw_path,
-                                     &hidraw_fd,
-                                     &error))
-          {
-            g_task_return_error (task, error);
-            return;
-          }
-
-        if ((cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_MISC) &&
-            !fp_device_open_udev_fd (priv->udev_data.misc_path,
-                                     &misc_fd,
-                                     &error))
-          {
-            g_task_return_error (task, error);
-            return;
-          }
-
-        priv->udev_data.spidev_fd = g_steal_fd (&spidev_fd);
-        priv->udev_data.hidraw_fd = g_steal_fd (&hidraw_fd);
-        priv->udev_data.misc_fd = g_steal_fd (&misc_fd);
-      }
-      break;
-
-    default:
-      g_assert_not_reached ();
-      g_task_return_error (task, fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
-      return;
-    }
-
   priv->current_action = FPI_DEVICE_ACTION_OPEN;
   priv->current_task = g_steal_pointer (&task);
   setup_task_cancellable (device);
-  fpi_device_report_finger_status (device, FP_FINGER_STATUS_NONE);
 
-  FP_DEVICE_GET_CLASS (device)->open (device);
+  open_task = g_task_new (device, NULL, open_task_done, NULL);
+  g_task_set_source_tag (open_task, fp_device_open);
+  g_task_run_in_thread (open_task, open_device_thread);
 }
 
 /**
