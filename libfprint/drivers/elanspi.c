@@ -101,11 +101,11 @@ elanspi_do_hwreset (FpiDeviceElanSpi *self, GError **err)
    * TODO: Make this also work with the non-HID cases
    */
 
-  int fd = open ((char *) fpi_device_get_udev_data (FP_DEVICE (self), FPI_DEVICE_UDEV_SUBTYPE_HIDRAW), O_RDWR);
+  int fd = fpi_device_get_udev_fd (FP_DEVICE (self), FPI_DEVICE_UDEV_SUBTYPE_HIDRAW);
 
   if (fd < 0)
     {
-      g_set_error (err, G_IO_ERROR, g_io_error_from_errno (errno), "unable to open hid");
+      g_set_error (err, G_IO_ERROR, G_IO_ERROR_FAILED, "unable to access hid fd");
       return;
     }
 
@@ -116,11 +116,8 @@ elanspi_do_hwreset (FpiDeviceElanSpi *self, GError **err)
   if (ioctl (fd, HIDIOCSFEATURE (5), &buf) != 5)
     {
       g_set_error (err, G_IO_ERROR, g_io_error_from_errno (errno), "unable to reset via hid");
-      goto out;
+      return;
     }
-
-out:
-  close (fd);
 }
 
 /*
@@ -1558,20 +1555,10 @@ static void
 elanspi_open (FpImageDevice *dev)
 {
   FpiDeviceElanSpi *self = FPI_DEVICE_ELANSPI (dev);
-  GError *err = NULL;
 
   G_DEBUG_HERE ();
 
-  int spi_fd = open (fpi_device_get_udev_data (FP_DEVICE (dev), FPI_DEVICE_UDEV_SUBTYPE_SPIDEV), O_RDWR);
-
-  if (spi_fd < 0)
-    {
-      g_set_error (&err, G_IO_ERROR, g_io_error_from_errno (errno), "unable to open spi");
-      fpi_image_device_open_complete (dev, err);
-      return;
-    }
-
-  self->spi_fd = spi_fd;
+  self->spi_fd = fpi_device_get_udev_fd (FP_DEVICE (dev), FPI_DEVICE_UDEV_SUBTYPE_SPIDEV);
 
   fpi_image_device_open_complete (dev, NULL);
 }
@@ -1581,11 +1568,7 @@ elanspi_close (FpImageDevice *dev)
 {
   FpiDeviceElanSpi *self = FPI_DEVICE_ELANSPI (dev);
 
-  if (self->spi_fd >= 0)
-    {
-      close (self->spi_fd);
-      self->spi_fd = -1;
-    }
+  self->spi_fd = -1;
   fpi_image_device_close_complete (dev, NULL);
 }
 
