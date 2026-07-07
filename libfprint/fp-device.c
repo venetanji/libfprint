@@ -784,6 +784,7 @@ open_task_done (GObject      *source_object,
 
   fpi_device_report_finger_status (device, FP_FINGER_STATUS_NONE);
 
+  g_assert (FP_DEVICE_GET_CLASS (device)->open);
   FP_DEVICE_GET_CLASS (device)->open (device);
 }
 
@@ -1093,6 +1094,7 @@ fp_device_close (FpDevice           *device,
   priv->current_task = g_steal_pointer (&task);
   setup_task_cancellable (device);
 
+  g_assert (FP_DEVICE_GET_CLASS (device)->close);
   FP_DEVICE_GET_CLASS (device)->close (device);
 }
 
