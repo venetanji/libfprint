@@ -30,7 +30,7 @@ if libfprint_sanitizers == ['none']
   libfprint_sanitizers = []
 endif
 
-glib_min_version = '2.68'
+glib_min_version = '2.76'
 
 glib_version_def = 'GLIB_VERSION_@0@_@1@'.format(
     glib_min_version.split('.')[0], glib_min_version.split('.')[1])

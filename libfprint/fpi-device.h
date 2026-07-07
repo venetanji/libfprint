@@ -236,6 +236,8 @@ GUsbDevice  *fpi_device_get_usb_device (FpDevice *device);
 const gchar *fpi_device_get_virtual_env (FpDevice *device);
 gpointer     fpi_device_get_udev_data (FpDevice                 *device,
                                        FpiDeviceUdevSubtypeFlags subtype);
+gint         fpi_device_get_udev_fd (FpDevice                 *device,
+                                     FpiDeviceUdevSubtypeFlags subtype);
 
 
 FpiDeviceAction fpi_device_get_current_action (FpDevice *device);

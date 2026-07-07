@@ -48,8 +48,11 @@ typedef struct
   struct
   {
     gchar *spidev_path;
+    gint   spidev_fd;
     gchar *hidraw_path;
+    gint   hidraw_fd;
     gchar *misc_path;
+    gint   misc_fd;
   } udev_data;
 
   gboolean        is_removed;

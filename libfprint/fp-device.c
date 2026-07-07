@@ -23,6 +23,11 @@
 
 #include "fp-device-private.h"
 
+#include <fcntl.h>
+#include <glib-unix.h>
+#include <glib/gstdio.h>
+#include <unistd.h>
+
 /**
  * SECTION: fp-device
  * @title: FpDevice
@@ -238,6 +243,10 @@ fp_device_finalize (GObject *object)
   g_clear_pointer (&priv->virtual_env, g_free);
   g_clear_pointer (&priv->udev_data.spidev_path, g_free);
   g_clear_pointer (&priv->udev_data.hidraw_path, g_free);
+
+  g_clear_fd (&priv->udev_data.spidev_fd, NULL);
+  g_clear_fd (&priv->udev_data.hidraw_fd, NULL);
+  g_clear_fd (&priv->udev_data.misc_fd, NULL);
 
   G_OBJECT_CLASS (fp_device_parent_class)->finalize (object);
 }
@@ -658,6 +667,33 @@ fp_device_class_init (FpDeviceClass *klass)
 static void
 fp_device_init (FpDevice *self)
 {
+  FpDevicePrivate *priv = fp_device_get_instance_private (self);
+
+  priv->udev_data.spidev_fd = -1;
+  priv->udev_data.hidraw_fd = -1;
+  priv->udev_data.misc_fd = -1;
+}
+
+static gboolean
+fp_device_open_udev_fd (const gchar *path,
+                        gint        *fd,
+                        GError     **error)
+{
+  g_return_val_if_fail (path != NULL, FALSE);
+  g_return_val_if_fail (fd != NULL, FALSE);
+
+  *fd = g_open (path, O_RDWR, 0);
+  if (*fd < 0)
+    {
+      g_set_error (error,
+                   G_IO_ERROR,
+                   g_io_error_from_errno (errno),
+                   "Failed to open udev path %s",
+                   path);
+      return FALSE;
+    }
+
+  return TRUE;
 }
 
 /**
@@ -875,6 +911,7 @@ fp_device_open (FpDevice           *device,
                 gpointer            user_data)
 {
   g_autoptr(GTask) task = NULL;
+  FpDeviceClass *cls = FP_DEVICE_GET_CLASS (device);
   FpDevicePrivate *priv = fp_device_get_instance_private (device);
   GError *error = NULL;
 
@@ -907,7 +944,45 @@ fp_device_open (FpDevice           *device,
       break;
 
     case FP_DEVICE_TYPE_VIRTUAL:
+      break;
+
     case FP_DEVICE_TYPE_UDEV:
+      {
+        g_autofd int spidev_fd = -1;
+        g_autofd int hidraw_fd = -1;
+        g_autofd int misc_fd = -1;
+
+        if ((cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_SPIDEV) &&
+            !fp_device_open_udev_fd (priv->udev_data.spidev_path,
+                                     &spidev_fd,
+                                     &error))
+          {
+            g_task_return_error (task, error);
+            return;
+          }
+
+        if ((cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_HIDRAW) &&
+            !fp_device_open_udev_fd (priv->udev_data.hidraw_path,
+                                     &hidraw_fd,
+                                     &error))
+          {
+            g_task_return_error (task, error);
+            return;
+          }
+
+        if ((cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_MISC) &&
+            !fp_device_open_udev_fd (priv->udev_data.misc_path,
+                                     &misc_fd,
+                                     &error))
+          {
+            g_task_return_error (task, error);
+            return;
+          }
+
+        priv->udev_data.spidev_fd = g_steal_fd (&spidev_fd);
+        priv->udev_data.hidraw_fd = g_steal_fd (&hidraw_fd);
+        priv->udev_data.misc_fd = g_steal_fd (&misc_fd);
+      }
       break;
 
     default:

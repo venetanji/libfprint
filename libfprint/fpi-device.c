@@ -22,7 +22,12 @@
 #include <math.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <unistd.h>
 #include <gmodule.h>
+
+#include <glib-unix.h>
+
+#include <glib/gstdio.h>
 
 #include "fpi-log.h"
 
@@ -524,6 +529,45 @@ fpi_device_get_udev_data (FpDevice *device, FpiDeviceUdevSubtypeFlags subtype)
       g_return_val_if_reached (NULL);
       return NULL;
     }
+}
+
+/**
+ * fpi_device_get_udev_fd:
+ * @device: The #FpDevice
+ * @subtype: Which subtype to get a file descriptor for
+ *
+ * Get an open subtype-specific file descriptor for this #FpDevice. Only
+ * permissible to call if the #FpDevice is opened and of type
+ * %FP_DEVICE_TYPE_UDEV.
+ *
+ * Returns: A file descriptor or -1 if not available for @subtype.
+ */
+gint
+fpi_device_get_udev_fd (FpDevice *device, FpiDeviceUdevSubtypeFlags subtype)
+{
+  FpDevicePrivate *priv = fp_device_get_instance_private (device);
+
+  g_return_val_if_fail (FP_IS_DEVICE (device), -1);
+  g_return_val_if_fail (priv->is_open ||
+                        priv->current_action == FPI_DEVICE_ACTION_OPEN, -1);
+  g_return_val_if_fail (priv->type == FP_DEVICE_TYPE_UDEV, -1);
+
+  switch (subtype)
+    {
+    case FPI_DEVICE_UDEV_SUBTYPE_HIDRAW:
+      g_return_val_if_fail (priv->udev_data.hidraw_fd >= 0, -1);
+      return priv->udev_data.hidraw_fd;
+
+    case FPI_DEVICE_UDEV_SUBTYPE_SPIDEV:
+      g_return_val_if_fail (priv->udev_data.spidev_fd >= 0, -1);
+      return priv->udev_data.spidev_fd;
+
+    case FPI_DEVICE_UDEV_SUBTYPE_MISC:
+      g_return_val_if_fail (priv->udev_data.misc_fd >= 0, -1);
+      return priv->udev_data.misc_fd;
+    }
+
+  g_return_val_if_reached (-1);
 }
 
 /**
@@ -1318,7 +1362,38 @@ fpi_device_close_complete (FpDevice *device, GError *error)
       break;
 
     case FP_DEVICE_TYPE_VIRTUAL:
+      break;
+
     case FP_DEVICE_TYPE_UDEV:
+      {
+        g_autofd int spidev_fd = g_steal_fd (&priv->udev_data.spidev_fd);
+        g_autofd int hidraw_fd = g_steal_fd (&priv->udev_data.hidraw_fd);
+        g_autofd int misc_fd = g_steal_fd (&priv->udev_data.misc_fd);
+
+        if (!g_clear_fd (&spidev_fd, &nested_error))
+          {
+            if (error == NULL)
+              g_propagate_prefixed_error (&error, nested_error, "Failed to close spidev fd: ");
+            else
+              g_warning ("Failed to close spidev fd: %s", nested_error->message);
+          }
+
+        if (!g_clear_fd (&hidraw_fd, &nested_error))
+          {
+            if (error == NULL)
+              g_propagate_prefixed_error (&error, nested_error, "Failed to close hidraw fd: ");
+            else
+              g_warning ("Failed to close hidraw fd: %s", nested_error->message);
+          }
+
+        if (!g_clear_fd (&misc_fd, &nested_error))
+          {
+            if (error == NULL)
+              g_propagate_prefixed_error (&error, nested_error, "Failed to close misc fd: ");
+            else
+              g_warning ("Failed to close misc fd: %s", nested_error->message);
+          }
+      }
       break;
 
     default:
