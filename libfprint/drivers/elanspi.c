@@ -82,9 +82,6 @@ struct _FpiDeviceElanSpi
   gint     finger_wait_debounce;
 
   gboolean deactivating, capturing;
-
-  /* active SPI status info */
-  int spi_fd;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceElanSpi, fpi_device_elanspi, FPI, DEVICE_ELANSPI, FpImageDevice);
@@ -236,7 +233,8 @@ enum elanspi_fp_capture_state {
 static FpiSpiTransfer *
 elanspi_do_swreset (FpiDeviceElanSpi *self)
 {
-  FpiSpiTransfer * xfer = fpi_spi_transfer_new (FP_DEVICE (self), self->spi_fd);
+  int spi_fd = fpi_device_get_udev_fd (FP_DEVICE (self), FPI_DEVICE_UDEV_SUBTYPE_SPIDEV);
+  FpiSpiTransfer * xfer = fpi_spi_transfer_new (FP_DEVICE (self), spi_fd);
 
   fpi_spi_transfer_write (xfer, 1);
   xfer->buffer_wr[0] = 0x31;
@@ -245,7 +243,8 @@ elanspi_do_swreset (FpiDeviceElanSpi *self)
 static FpiSpiTransfer *
 elanspi_do_startcalib (FpiDeviceElanSpi *self)
 {
-  FpiSpiTransfer * xfer = fpi_spi_transfer_new (FP_DEVICE (self), self->spi_fd);
+  int spi_fd = fpi_device_get_udev_fd (FP_DEVICE (self), FPI_DEVICE_UDEV_SUBTYPE_SPIDEV);
+  FpiSpiTransfer * xfer = fpi_spi_transfer_new (FP_DEVICE (self), spi_fd);
 
   fpi_spi_transfer_write (xfer, 1);
   xfer->buffer_wr[0] = 0x4;
@@ -254,7 +253,8 @@ elanspi_do_startcalib (FpiDeviceElanSpi *self)
 static FpiSpiTransfer *
 elanspi_do_capture (FpiDeviceElanSpi *self)
 {
-  FpiSpiTransfer * xfer = fpi_spi_transfer_new (FP_DEVICE (self), self->spi_fd);
+  int spi_fd = fpi_device_get_udev_fd (FP_DEVICE (self), FPI_DEVICE_UDEV_SUBTYPE_SPIDEV);
+  FpiSpiTransfer * xfer = fpi_spi_transfer_new (FP_DEVICE (self), spi_fd);
 
   fpi_spi_transfer_write (xfer, 1);
   xfer->buffer_wr[0] = 0x1;
@@ -263,7 +263,8 @@ elanspi_do_capture (FpiDeviceElanSpi *self)
 static FpiSpiTransfer *
 elanspi_do_selectpage (FpiDeviceElanSpi *self, guint8 page)
 {
-  FpiSpiTransfer * xfer = fpi_spi_transfer_new (FP_DEVICE (self), self->spi_fd);
+  int spi_fd = fpi_device_get_udev_fd (FP_DEVICE (self), FPI_DEVICE_UDEV_SUBTYPE_SPIDEV);
+  FpiSpiTransfer * xfer = fpi_spi_transfer_new (FP_DEVICE (self), spi_fd);
 
   fpi_spi_transfer_write (xfer, 2);
   xfer->buffer_wr[0] = 0x7;
@@ -274,7 +275,8 @@ elanspi_do_selectpage (FpiDeviceElanSpi *self, guint8 page)
 static FpiSpiTransfer *
 elanspi_single_read_cmd (FpiDeviceElanSpi *self, guint8 cmd_id, guint8 *data_out)
 {
-  FpiSpiTransfer * xfer = fpi_spi_transfer_new (FP_DEVICE (self), self->spi_fd);
+  int spi_fd = fpi_device_get_udev_fd (FP_DEVICE (self), FPI_DEVICE_UDEV_SUBTYPE_SPIDEV);
+  FpiSpiTransfer * xfer = fpi_spi_transfer_new (FP_DEVICE (self), spi_fd);
 
   fpi_spi_transfer_write (xfer, 2);
   xfer->buffer_wr[0] = cmd_id;
@@ -307,7 +309,8 @@ elanspi_read_version (FpiDeviceElanSpi *self, guint8 *data_out)
 static FpiSpiTransfer *
 elanspi_read_register (FpiDeviceElanSpi *self, guint8 reg_id, guint8 *data_out)
 {
-  FpiSpiTransfer * xfer = fpi_spi_transfer_new (FP_DEVICE (self), self->spi_fd);
+  int spi_fdi = fpi_device_get_udev_fd (FP_DEVICE (self), FPI_DEVICE_UDEV_SUBTYPE_SPIDEV);
+  FpiSpiTransfer * xfer = fpi_spi_transfer_new (FP_DEVICE (self), spi_fdi);
 
   fpi_spi_transfer_write (xfer, 1);
   xfer->buffer_wr[0] = reg_id | 0x40;
@@ -318,7 +321,8 @@ elanspi_read_register (FpiDeviceElanSpi *self, guint8 reg_id, guint8 *data_out)
 static FpiSpiTransfer *
 elanspi_write_register (FpiDeviceElanSpi *self, guint8 reg_id, guint8 data_in)
 {
-  FpiSpiTransfer * xfer = fpi_spi_transfer_new (FP_DEVICE (self), self->spi_fd);
+  int spi_fdi = fpi_device_get_udev_fd (FP_DEVICE (self), FPI_DEVICE_UDEV_SUBTYPE_SPIDEV);
+  FpiSpiTransfer * xfer = fpi_spi_transfer_new (FP_DEVICE (self), spi_fdi);
 
   fpi_spi_transfer_write (xfer, 2);
   xfer->buffer_wr[0] = reg_id | 0x80;
@@ -459,6 +463,7 @@ elanspi_capture_old_handler (FpiSsm *ssm, FpDevice *dev)
 {
   FpiDeviceElanSpi *self = FPI_DEVICE_ELANSPI (dev);
   FpiSpiTransfer *xfer = NULL;
+  int spi_fd;
 
   switch (fpi_ssm_get_cur_state (ssm))
     {
@@ -494,7 +499,8 @@ elanspi_capture_old_handler (FpiSsm *ssm, FpDevice *dev)
           return;
         }
       /* otherwise, perform a read */
-      xfer = fpi_spi_transfer_new (dev, self->spi_fd);
+      spi_fd = fpi_device_get_udev_fd (FP_DEVICE (self), FPI_DEVICE_UDEV_SUBTYPE_SPIDEV);
+      xfer = fpi_spi_transfer_new (dev, spi_fd);
       xfer->ssm = ssm;
       fpi_spi_transfer_write (xfer, 2);
       xfer->buffer_wr[0] = 0x10;                   /* receieve line */
@@ -736,6 +742,7 @@ elanspi_capture_hv_handler (FpiSsm *ssm, FpDevice *dev)
 {
   FpiDeviceElanSpi *self = FPI_DEVICE_ELANSPI (dev);
   FpiSpiTransfer *xfer = NULL;
+  int spi_fd;
 
   switch (fpi_ssm_get_cur_state (ssm))
     {
@@ -773,7 +780,8 @@ elanspi_capture_hv_handler (FpiSsm *ssm, FpDevice *dev)
         }
       /* otherwise, read the image
        * the hv sensors seem to  use 128 bytes of padding(?) this is only tested on the 0xe sensors */
-      xfer = fpi_spi_transfer_new (dev, self->spi_fd);
+      spi_fd = fpi_device_get_udev_fd (FP_DEVICE (self), FPI_DEVICE_UDEV_SUBTYPE_SPIDEV);
+      xfer = fpi_spi_transfer_new (dev, spi_fd);
       xfer->ssm = ssm;
       fpi_spi_transfer_write (xfer, 2);
       xfer->buffer_wr[0] = 0x10;                   /* receieve line */
@@ -1554,11 +1562,7 @@ elanspi_fp_capture_ssm_handler (FpiSsm *ssm, FpDevice *dev)
 static void
 elanspi_open (FpImageDevice *dev)
 {
-  FpiDeviceElanSpi *self = FPI_DEVICE_ELANSPI (dev);
-
   G_DEBUG_HERE ();
-
-  self->spi_fd = fpi_device_get_udev_fd (FP_DEVICE (dev), FPI_DEVICE_UDEV_SUBTYPE_SPIDEV);
 
   fpi_image_device_open_complete (dev, NULL);
 }
@@ -1566,9 +1570,8 @@ elanspi_open (FpImageDevice *dev)
 static void
 elanspi_close (FpImageDevice *dev)
 {
-  FpiDeviceElanSpi *self = FPI_DEVICE_ELANSPI (dev);
+  G_DEBUG_HERE ();
 
-  self->spi_fd = -1;
   fpi_image_device_close_complete (dev, NULL);
 }
 
@@ -1655,7 +1658,6 @@ elanspi_change_state (FpImageDevice *dev, FpiImageDeviceState state)
 static void
 fpi_device_elanspi_init (FpiDeviceElanSpi *self)
 {
-  self->spi_fd = -1;
   self->sensor_id = 0xff;
 }
 
