@@ -25,6 +25,7 @@
 #include <fcntl.h>
 
 #include <glib-unix.h>
+#include <gio/gunixinputstream.h>
 
 #include "crfpmoc.h"
 
@@ -48,10 +49,12 @@ static void crfpmoc_clear_storage_run_state (FpiSsm   *ssm,
  */
 typedef struct
 {
-  FpiSsm  *parent_ssm;
-  GSource *timeout;
-  int      timeout_state;
-  int      poll_source;
+  FpiSsm       *parent_ssm;
+  GSource      *timeout;
+  GInputStream *poll_input_stream;
+
+  int           timeout_state;
+  int           poll_source;
 } SubSsmData;
 
 /* Data for the enroll state machine */
@@ -74,6 +77,8 @@ subssm_data_free (void *arg)
   /* Cancel any poll source */
   fp_dbg ("crfpmoc_ssm_data_free: remove poll source %d", data->poll_source);
   g_clear_handle_id (&data->poll_source, g_source_remove);
+
+  g_clear_object (&data->poll_input_stream);
 
   /* Cancel any timeout source */
   g_clear_pointer (&data->timeout, g_source_destroy);
@@ -379,21 +384,35 @@ crfpmoc_ec_command (FpiDeviceCrfpMoc *self,
  * to see if a timeout is active.
  */
 static gboolean
-crfpmoc_read_bytes (gint fd, GIOCondition condition, gpointer user_data)
+crfpmoc_read_bytes (gpointer user_data)
 {
-  FpiSsm *ssm = user_data;
+  g_autoptr(GError) error = NULL;
+  FpiSsm *ssm = (FpiSsm *) user_data;
+  FpDevice *device = fpi_ssm_get_device (ssm);
   SubSsmData *data = fpi_ssm_get_data (ssm);
   struct crfpmoc_ec_response_get_next_event_v1 buffer = {0};
-  int rv;
+  gssize rv;
 
   fp_dbg ("crfpmoc_read_bytes: called");
 
   /* If there is an active timeout on this state machine remove it */
   g_clear_pointer (&data->timeout, g_source_destroy);
 
-  rv = read (fd, &buffer, sizeof (buffer));
-  fp_dbg ("crfpmoc_read_bytes: read %d bytes", rv);
+  rv = g_pollable_input_stream_read_nonblocking (G_POLLABLE_INPUT_STREAM (data->poll_input_stream),
+                                                 &buffer,
+                                                 sizeof (buffer),
+                                                 fpi_device_get_cancellable (device),
+                                                 &error);
+
+  if (rv < 0 && g_error_matches (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK))
+    {
+      fp_dbg ("crfpmoc_read_bytes: no data available yet");
+      return G_SOURCE_CONTINUE;
+    }
+
+  fp_dbg ("crfpmoc_read_bytes: read %zd bytes", rv);
   data->poll_source = 0;
+  g_clear_object (&data->poll_input_stream);
 
   if (rv == 0)
     {
@@ -404,9 +423,16 @@ crfpmoc_read_bytes (gint fd, GIOCondition condition, gpointer user_data)
     }
   else if (rv < 0)
     {
+      if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        {
+          fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+          return G_SOURCE_REMOVE;
+        }
+
       fpi_ssm_mark_failed (ssm,
                            fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
-                                                     "Error polling for MKBP event"));
+                                                     "Error polling for MKBP event: %s",
+                                                     error->message));
       return G_SOURCE_REMOVE;
     }
 
@@ -525,31 +551,10 @@ crfpmoc_read_bytes (gint fd, GIOCondition condition, gpointer user_data)
 
   return G_SOURCE_REMOVE;
 }
-
-static gboolean
-crfpmoc_poll_cancelled_cb (gpointer user_data)
-{
-  FpiSsm *ssm = user_data;
-  SubSsmData *data = fpi_ssm_get_data (ssm);
-
-  if (data->poll_source == 0)
-    return G_SOURCE_REMOVE;
-
-  fp_dbg ("crfpmoc_poll_cancelled_cb: poll cancelled");
-  data->poll_source = 0;
-  fpi_ssm_mark_failed (ssm,
-                       g_error_new_literal (G_IO_ERROR,
-                                            G_IO_ERROR_CANCELLED,
-                                            "Cancelled"));
-
-  return G_SOURCE_REMOVE;
-}
-
 static void
 crfpmoc_ec_pollevent (FpiSsm *ssm, unsigned long mask)
 {
   g_autoptr(GSource) poll_source = NULL;
-  g_autoptr(GSource) cancellable_source = NULL;
   SubSsmData *data = fpi_ssm_get_data (ssm);
   FpDevice *device = fpi_ssm_get_device (ssm);
   int fd;
@@ -564,18 +569,13 @@ crfpmoc_ec_pollevent (FpiSsm *ssm, unsigned long mask)
       return;
     }
 
-  poll_source = g_unix_fd_source_new (fd, G_IO_IN);
+  data->poll_input_stream = g_unix_input_stream_new (fd, FALSE);
+  poll_source = g_pollable_input_stream_create_source (G_POLLABLE_INPUT_STREAM (data->poll_input_stream),
+                                                       fpi_device_get_cancellable (device));
   g_source_set_callback (poll_source,
-                         G_SOURCE_FUNC (crfpmoc_read_bytes),
+                         crfpmoc_read_bytes,
                          ssm,
                          NULL);
-
-  cancellable_source = g_cancellable_source_new (fpi_device_get_cancellable (device));
-  g_source_set_callback (cancellable_source,
-                         crfpmoc_poll_cancelled_cb,
-                         ssm,
-                         NULL);
-  g_source_add_child_source (poll_source, cancellable_source);
 
   data->poll_source = g_source_attach (poll_source, NULL);
   fp_dbg ("crfpmoc_ec_pollevent: created poll source %d", data->poll_source);
@@ -1230,6 +1230,7 @@ crfpmoc_ssm_timeout (FpDevice *device, gpointer user_data)
   /* If there is an active poller on this state machine remove it */
   fp_dbg ("crfpmoc_ssm_timeout: remove poll source %d", data->poll_source);
   g_clear_handle_id (&data->poll_source, g_source_remove);
+  g_clear_object (&data->poll_input_stream);
 
   /* Is it ok to call the state machine from here ? If not make sure we exit first */
   fpi_ssm_jump_to_state_delayed (data->parent_ssm, data->timeout_state, 1);
