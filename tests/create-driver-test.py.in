@@ -60,13 +60,6 @@ if os.geteuid() != 0:
     print(f'{sys.argv[0]} is expected to be run as root')
     sys.exit(1)
 
-# Check that tshark is available
-
-tshark = shutil.which('tshark')
-if not tshark:
-    print("The 'tshark' WireShark command-line tool must be installed to capture USB traffic")
-    sys.exit(1)
-
 # Find the fingerprint reader
 ctx = FPrint.Context()
 ctx.enumerate()
@@ -81,11 +74,24 @@ elif len(devices) > 1:
 test_name = driver_name
 if test_variant:
     test_name = driver_name + '-' + test_variant
-usb_device = devices[0].get_property('fpi-usb-device')
-bus_num = usb_device.get_bus()
-device_num = usb_device.get_address()
 
-print(f'### Detected USB device /dev/bus/usb/{bus_num:03d}/{device_num:03d}')
+misc_device = devices[0].get_property('fpi-udev-data-misc')
+if misc_device:
+    device = misc_device
+    usb_device = None
+    print(f'### Detected misc device {device}')
+else:
+    usb_device = devices[0].get_property('fpi-usb-device')
+    bus_num = usb_device.get_bus()
+    device_num = usb_device.get_address()
+    device = f'/dev/bus/usb/{bus_num:03d}/{device_num:03d}'
+
+    print(f'### Detected USB device {device}')
+
+    tshark = shutil.which('tshark')
+    if not tshark:
+        print("The 'tshark' WireShark command-line tool must be installed to capture USB traffic")
+        sys.exit(1)
 
 # Make directory
 
@@ -97,41 +103,55 @@ if options.test == 'custom' and not os.path.exists(custom_script):
 
 # Capture device info
 
-args = ['umockdev-record', f'/dev/bus/usb/{bus_num:03d}/{device_num:03d}']
+args = ['umockdev-record', device]
 device_out = open(test_dir + '/device', 'w')
 process = subprocess.Popen(args, stdout=device_out)
 process.wait()
 
-# Run capture
-# https://osqa-ask.wireshark.org/questions/53919/how-can-i-precisely-specify-a-usb-device-to-capture-with-tshark/
+if usb_device:
+    # Run capture
+    # https://osqa-ask.wireshark.org/questions/53919/how-can-i-precisely-specify-a-usb-device-to-capture-with-tshark/
 
-print(f'### Reseting USB port (as descriptors could be missing in the dump otherwise)')
-usb_device.open()
-usb_device.reset()
-usb_device.close()
+    print(f'### Reseting USB port (as descriptors could be missing in the dump otherwise)')
+    usb_device.open()
+    usb_device.reset()
+    usb_device.close()
 
-def capture_test(cmd, capture_file, prompt):
-    print(f'### Starting USB capture on usbmon{bus_num}')
-    capture_pid = os.fork()
-    assert(capture_pid >= 0)
+def capture_test(cmd, capture_file, prompt, ioctl_file=None):
+    capture_pid = None
 
-    unfiltered_cap_path = os.path.join(tempfile.gettempdir(),
-                                       f'{capture_file}-unfiltered.pcapng')
-    if capture_pid == 0:
-        os.setpgrp()
-        args = ['tshark', '-q', '-i', f'usbmon{bus_num}', '-w', unfiltered_cap_path]
-        os.execv(tshark, args)
+    if usb_device:
+        print(f'### Starting USB capture on usbmon{bus_num}')
+        capture_pid = os.fork()
+        assert(capture_pid >= 0)
 
-    # Wait 1 sec to settle (we can assume setpgrp happened)
-    time.sleep(1)
+        unfiltered_cap_path = os.path.join(tempfile.gettempdir(),
+                                           f'{capture_file}-unfiltered.pcapng')
+        if capture_pid == 0:
+            os.setpgrp()
+            args = ['tshark', '-q', '-i', f'usbmon{bus_num}', '-w', unfiltered_cap_path]
+            os.execv(tshark, args)
+
+        # Wait 1 sec to settle (we can assume setpgrp happened)
+        time.sleep(1)
+
+    if ioctl_file:
+        args = ['umockdev-record', '--ioctl', f'{misc_device}={ioctl_file}',
+                sys.executable] + cmd
+    else:
+        args = [sys.executable] + cmd
 
     print(prompt)
-    with subprocess.Popen([sys.executable] + cmd) as capture_process:
+    with subprocess.Popen(args) as capture_process:
         capture_process.wait()
         if capture_process.returncode != 0:
             print('Failed to capture fingerprint')
-            os.killpg(capture_pid, signal.SIGKILL)
+            if capture_pid:
+                os.killpg(capture_pid, signal.SIGKILL)
             sys.exit(1)
+
+    if not capture_pid:
+        return
 
     os.kill(capture_pid, signal.SIGTERM)
     try:
@@ -174,7 +194,9 @@ if options.test in (None, 'capture'):
                  '### Capturing fingerprint, please swipe or press your finger on the reader')
 
 if options.test in (None, 'custom') and os.path.exists(custom_script):
-    capture_test([custom_script], 'custom.pcapng',
-                 '### Running the custom fingerprint capture')
+    ioctl_file = os.path.join(test_dir, 'custom.ioctl') if misc_device else None
+    capture_file = 'custom.ioctl' if misc_device else 'custom.pcapng'
+    capture_test([custom_script], capture_file,
+                 '### Running the custom fingerprint capture', ioctl_file)
 
 print(f"\nDone! Don't forget to add {test_name} to tests/meson.build")
