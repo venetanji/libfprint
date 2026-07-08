@@ -80,58 +80,42 @@ crfpmoc_strresult (int i)
   return crfpmoc_meanings[i];
 }
 
-static char *
-get_print_data_descriptor (FpPrint *print, gint8 template)
-{
-  const char *driver;
-  const char *dev_id;
-
-  driver = fp_print_get_driver (print);
-  dev_id = fp_print_get_device_id (print);
-
-  return g_strdup_printf ("%s/%s/%d", driver, dev_id, template);
-}
-
 static void
 crfpmoc_set_print_data (FpPrint *print,
-                        gint8    template,
-                        guint8  *frame,
-                        size_t   frame_size)
+                        guint8  *template,
+                        size_t   template_size)
 {
-  g_autofree gchar *descr = NULL;
-  GVariant *print_id_var = NULL;
   GVariant *fpi_data = NULL;
-  GVariant *frame_var = NULL;
 
   fp_dbg ("Setting print data");
 
-  descr = get_print_data_descriptor (print, template);
-  print_id_var = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
-                                            descr, strlen (descr),
-                                            sizeof (guint8));
+  if (template == NULL || template_size == 0)
+    {
+      fp_warn ("Template is NULL or size is 0, setting empty template");
+      template = NULL;
+      template_size = 0;
+    }
 
-  frame_var = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
-                                         frame, frame_size,
-                                         sizeof (guint8));
-
-  fpi_data = g_variant_new ("(@ay@ay)", print_id_var, frame_var);
+  fpi_data = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
+                                        template, template_size,
+                                        sizeof (guint8));
   g_object_set (print, "fpi-data", fpi_data, NULL);
 }
 
 static gboolean
 crfpmoc_get_print_data (FpPrint *print,
-                        guint8 **frame, size_t *frame_size,
+                        guint8 **template,
+                        size_t  *template_size,
                         GError **error)
 {
   g_autoptr(GVariant) fpi_data = NULL;
-  g_autoptr(GVariant) frame_var = NULL;
-  const guint8 *frame_data = NULL;
-  gsize frame_data_size = 0;
+  const guint8 *template_data = NULL;
+  gsize template_data_size = 0;
 
-  if (frame)
-    *frame = NULL;
-  if (frame_size)
-    *frame_size = 0;
+  if (template)
+    *template = NULL;
+  if (template_size)
+    *template_size = 0;
 
   g_object_get (print, "fpi-data", &fpi_data, NULL);
 
@@ -142,29 +126,22 @@ crfpmoc_get_print_data (FpPrint *print,
       return FALSE;
     }
 
-  g_variant_get (fpi_data, "(@ay@ay)", NULL, &frame_var);
+  template_data = g_variant_get_fixed_array (fpi_data,
+                                             &template_data_size,
+                                             sizeof (guint8));
 
-  if (!frame_var)
+  if (!template_data || template_data_size == 0)
     {
       g_set_error (error, FP_DEVICE_ERROR_GENERAL, FP_DEVICE_ERROR_GENERAL,
-                   "No frame data found in the print object.");
+                   "Template data is empty in the print object.");
       return FALSE;
     }
 
-  frame_data = g_variant_get_fixed_array (frame_var, &frame_data_size, sizeof (guint8));
+  if (template)
+    *template = g_memdup2 (template_data, template_data_size);
 
-  if (!frame_data || frame_data_size == 0)
-    {
-      g_set_error (error, FP_DEVICE_ERROR_GENERAL, FP_DEVICE_ERROR_GENERAL,
-                   "Frame data is empty in the print object.");
-      return FALSE;
-    }
-
-  if (frame)
-    *frame = g_memdup2 (frame_data, frame_data_size);
-
-  if (frame_size)
-    *frame_size = frame_data_size;
+  if (template_size)
+    *template_size = template_data_size;
 
   return TRUE;
 }
@@ -794,11 +771,11 @@ crfpmoc_enroll_run_state (FpiSsm *ssm, FpDevice *device)
       if (!crfpmoc_fp_download_frame (self, &info,  enrolled_templates - 1, &frame, &error))
         {
           g_warning ("Failed to download frame: %s", error->message);
-          crfpmoc_set_print_data (print, enrolled_templates - 1, NULL, 0);
+          crfpmoc_set_print_data (print, NULL, 0);
         }
       else
         {
-          crfpmoc_set_print_data (print, enrolled_templates - 1, frame, info.template_size);
+          crfpmoc_set_print_data (print, frame, info.template_size);
         }
 
       fp_info ("Enrollment was successful!");
@@ -942,7 +919,6 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
             {
               print = fp_print_new (device);
               fpi_print_set_type (print, FPI_PRINT_RAW);
-              crfpmoc_set_print_data (print, template, NULL, 0);
 
               fp_info ("Identify successful for template ID %d", template);
 
@@ -965,8 +941,7 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
                           return;
                         }
 
-                      crfpmoc_set_print_data (print, template,
-                                              matched_frame, matched_frame_size);
+                      crfpmoc_set_print_data (print, matched_frame, matched_frame_size);
                       fpi_device_identify_report (device, matched_print, print, NULL);
                     }
                   else
@@ -974,7 +949,7 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
                       fpi_device_identify_report (device, NULL, print, NULL);
                     }
                 }
-              else
+              else if (template == 0)
                 {
                   FpPrint *verify_print = NULL;
                   g_autofree guint8 *matched_frame = NULL;
@@ -991,8 +966,7 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
                       return;
                     }
 
-                  crfpmoc_set_print_data (print, template,
-                                          matched_frame, matched_frame_size);
+                  crfpmoc_set_print_data (print, matched_frame, matched_frame_size);
 
                   fpi_device_verify_report (device, FPI_MATCH_SUCCESS, print, NULL);
                 }
