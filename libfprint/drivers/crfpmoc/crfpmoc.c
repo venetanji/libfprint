@@ -118,8 +118,10 @@ crfpmoc_set_print_data (FpPrint *print,
   g_object_set (print, "fpi-data", fpi_data, NULL);
 }
 
-static void
-crfpmoc_get_print_data (FpPrint *print, guint8 **frame, size_t *frame_size)
+static gboolean
+crfpmoc_get_print_data (FpPrint *print,
+                        guint8 **frame, size_t *frame_size,
+                        GError **error)
 {
   g_autoptr(GVariant) fpi_data = NULL;
   g_autoptr(GVariant) frame_var = NULL;
@@ -135,76 +137,36 @@ crfpmoc_get_print_data (FpPrint *print, guint8 **frame, size_t *frame_size)
 
   if (!fpi_data)
     {
-      g_warning ("No fpi-data found in the print object.");
-      return;
+      g_set_error (error, FP_DEVICE_ERROR_GENERAL, FP_DEVICE_ERROR_GENERAL,
+                   "No fpi-data found in the print object.");
+      return FALSE;
     }
 
   g_variant_get (fpi_data, "(@ay@ay)", NULL, &frame_var);
 
-  if (frame_var)
+  if (!frame_var)
     {
-      frame_data = g_variant_get_fixed_array (frame_var, &frame_data_size, sizeof (guint8));
-      if (frame_data && frame_data_size > 0)
-        {
-          if (frame)
-            *frame = g_memdup2 (frame_data, frame_data_size);
-          if (frame_size)
-            *frame_size = frame_data_size;
-        }
+      g_set_error (error, FP_DEVICE_ERROR_GENERAL, FP_DEVICE_ERROR_GENERAL,
+                   "No frame data found in the print object.");
+      return FALSE;
     }
-}
 
-static FpPrint *
-crfpmoc_create_empty_frame_print (FpDevice *self, FpPrint *in_print)
-{
-  g_autoptr(FpPrint) out_print = NULL;
-  g_autofree gchar *descr = NULL;
-  GVariant *print_id_var = NULL;
-  GVariant *fpi_data = NULL;
-  GVariant *frame_var = NULL;
+  frame_data = g_variant_get_fixed_array (frame_var, &frame_data_size, sizeof (guint8));
 
-  g_return_val_if_fail (in_print != NULL, NULL);
+  if (!frame_data || frame_data_size == 0)
+    {
+      g_set_error (error, FP_DEVICE_ERROR_GENERAL, FP_DEVICE_ERROR_GENERAL,
+                   "Frame data is empty in the print object.");
+      return FALSE;
+    }
 
-  /* Get the print data descriptor from the input print object.
-   * Assuming template is 0 for simplicity.
-   */
-  descr = get_print_data_descriptor (in_print, 0);
-  if (!descr)
-    return NULL;
+  if (frame)
+    *frame = g_memdup2 (frame_data, frame_data_size);
 
-  /* Create a GVariant for the print ID */
-  print_id_var = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
-                                            descr, strlen (descr), sizeof (guint8));
+  if (frame_size)
+    *frame_size = frame_data_size;
 
-  /* Create an empty array for the frame */
-  frame_var = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
-                                         NULL, 0, sizeof (guint8));
-
-  /* Combine the print ID and empty frame into a GVariant */
-  fpi_data = g_variant_new ("(@ay@ay)", print_id_var, frame_var);
-
-  /* Set the properties of the new print object */
-  out_print = fp_print_new (self);
-  fpi_print_set_type (out_print, FPI_PRINT_RAW);
-  g_object_set (out_print, "fpi-data", fpi_data, NULL);
-
-  return g_steal_pointer (&out_print);
-}
-
-/* required since the downloaded frame data is encrypted and 2 downloads are
- * not the same so a compare function, that ignores frame_var is required and
- * only compares on the print_id_var
- */
-static gboolean
-crfpmoc_print_equal (FpPrint *self, FpPrint *other, FpDevice *device)
-{
-  g_autoptr(FpPrint) print1 = NULL;
-  g_autoptr(FpPrint) print2 = NULL;
-
-  print1 = crfpmoc_create_empty_frame_print (device, self);
-  print2 = crfpmoc_create_empty_frame_print (device, other);
-
-  return fp_print_equal (print1, print2);
+  return TRUE;
 }
 
 static gboolean
@@ -633,7 +595,8 @@ crfpmoc_fp_upload_template (FpiDeviceCrfpMoc *self,
       if (!crfpmoc_ec_command (self, CRFPMOC_EC_CMD_FP_TEMPLATE, 0,
                                p, struct_size, NULL, 0, error))
         {
-          g_prefix_error (error, "Failed to upload template chunk at offset %u: ", offset);
+          g_prefix_error (error, "Failed to upload template chunk at offset %u: ",
+                          offset);
           return FALSE;
         }
 
@@ -642,6 +605,7 @@ crfpmoc_fp_upload_template (FpiDeviceCrfpMoc *self,
 
   return TRUE;
 }
+
 
 static void
 crfpmoc_cmd_wait_event_fingerprint (FpiDeviceCrfpMoc *self)
@@ -866,10 +830,7 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
   g_autoptr(GError) error = NULL;
   FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
   FpPrint *print = NULL;
-  FpPrint *verify_print = NULL;
   GPtrArray *prints;
-  gboolean found = FALSE;
-  guint index;
   guint32 mode;
   gint8 template = -1;
 
@@ -886,25 +847,43 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
       if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_IDENTIFY)
         {
           fpi_device_get_identify_data (device, &prints);
-          if (prints->len != 0)
+          for (guint i = 0; i < prints->len; i++)
             {
-              FpPrint *test = g_ptr_array_index (prints, 0);
-              guint8 *frame;
+              g_autofree guint8 *frame = NULL;
               size_t frame_size;
-              crfpmoc_get_print_data (test, &frame, &frame_size);
 
-              crfpmoc_fp_upload_template (self, frame, frame_size, &error);
-              g_free (frame);
+              print = g_ptr_array_index (prints, i);
+              if (!crfpmoc_get_print_data (print, &frame, &frame_size, &error))
+                {
+                  fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+                  return;
+                }
+
+              if (!crfpmoc_fp_upload_template (self, frame, frame_size, &error))
+                {
+                  fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+                  return;
+                }
             }
         }
       else
         {
-          fpi_device_get_verify_data (device, &verify_print);
-          guint8 *frame;
+          g_autofree guint8 *frame = NULL;
           size_t frame_size;
-          crfpmoc_get_print_data (verify_print, &frame, &frame_size);
-          crfpmoc_fp_upload_template (self, frame, frame_size, &error);
-          g_free (frame);
+
+          fpi_device_get_verify_data (device, &print);
+
+          if (!crfpmoc_get_print_data (print, &frame, &frame_size, &error))
+            {
+              fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+              return;
+            }
+
+          if (!crfpmoc_fp_upload_template (self, frame, frame_size, &error))
+            {
+              fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+              return;
+            }
         }
 
       if (!crfpmoc_cmd_fp_mode (self, CRFPMOC_FP_MODE_MATCH, &mode, &error))
@@ -950,7 +929,7 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
         }
       else
         {
-          if (template == -1)
+          if (template < 0)
             {
               fp_info ("Print was not identified by the device");
 
@@ -965,33 +944,29 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
               fpi_print_set_type (print, FPI_PRINT_RAW);
               crfpmoc_set_print_data (print, template, NULL, 0);
 
-              fp_info ("Identify successful for template %d", template);
+              fp_info ("Identify successful for template ID %d", template);
 
               if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_IDENTIFY)
                 {
                   fpi_device_get_identify_data (device, &prints);
 
-                  for (index = 0; index < prints->len; index++)
+                  if ((guint) template < prints->len)
                     {
-                      FpPrint *p = g_ptr_array_index (prints, index);
-                      if (crfpmoc_print_equal (p, print, device))
-                        {
-                          found = TRUE;
-                          break;
-                        }
-                    }
-
-                  if (found)
-                    {
-                      FpPrint *matched_print = g_ptr_array_index (prints, index);
-                      guint8 *matched_frame = NULL;
+                      FpPrint *matched_print = g_ptr_array_index (prints, template);
+                      g_autofree guint8 *matched_frame = NULL;
                       size_t matched_frame_size = 0;
-                      crfpmoc_get_print_data (matched_print,
-                                              &matched_frame, &matched_frame_size);
-                      if (matched_frame_size > 0)
-                        crfpmoc_set_print_data (print, template,
-                                                matched_frame, matched_frame_size);
-                      g_free (matched_frame);
+
+                      if (!crfpmoc_get_print_data (matched_print,
+                                                   &matched_frame,
+                                                   &matched_frame_size,
+                                                   &error))
+                        {
+                          fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+                          return;
+                        }
+
+                      crfpmoc_set_print_data (print, template,
+                                              matched_frame, matched_frame_size);
                       fpi_device_identify_report (device, matched_print, print, NULL);
                     }
                   else
@@ -1001,13 +976,25 @@ crfpmoc_verify_run_state (FpiSsm *ssm, FpDevice *device)
                 }
               else
                 {
-                  fpi_device_get_verify_data (device, &verify_print);
-                  fp_info ("Verifying against: %s", fp_print_get_description (verify_print));
+                  FpPrint *verify_print = NULL;
+                  g_autofree guint8 *matched_frame = NULL;
+                  size_t matched_frame_size = 0;
 
-                  if (crfpmoc_print_equal (verify_print, print, device))
-                    fpi_device_verify_report (device, FPI_MATCH_SUCCESS, print, NULL);
-                  else
-                    fpi_device_verify_report (device, FPI_MATCH_FAIL, print, NULL);
+                  fpi_device_get_verify_data (device, &verify_print);
+                  fp_info ("Verifying against: %s",
+                           fp_print_get_description (verify_print));
+
+                  if (!crfpmoc_get_print_data (verify_print,
+                                               &matched_frame, &matched_frame_size, &error))
+                    {
+                      fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+                      return;
+                    }
+
+                  crfpmoc_set_print_data (print, template,
+                                          matched_frame, matched_frame_size);
+
+                  fpi_device_verify_report (device, FPI_MATCH_SUCCESS, print, NULL);
                 }
             }
 
