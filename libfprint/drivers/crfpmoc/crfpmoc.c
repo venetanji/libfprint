@@ -526,9 +526,30 @@ crfpmoc_read_bytes (gint fd, GIOCondition condition, gpointer user_data)
   return G_SOURCE_REMOVE;
 }
 
+static gboolean
+crfpmoc_poll_cancelled_cb (gpointer user_data)
+{
+  FpiSsm *ssm = user_data;
+  SubSsmData *data = fpi_ssm_get_data (ssm);
+
+  if (data->poll_source == 0)
+    return G_SOURCE_REMOVE;
+
+  fp_dbg ("crfpmoc_poll_cancelled_cb: poll cancelled");
+  data->poll_source = 0;
+  fpi_ssm_mark_failed (ssm,
+                       g_error_new_literal (G_IO_ERROR,
+                                            G_IO_ERROR_CANCELLED,
+                                            "Cancelled"));
+
+  return G_SOURCE_REMOVE;
+}
+
 static void
 crfpmoc_ec_pollevent (FpiSsm *ssm, unsigned long mask)
 {
+  g_autoptr(GSource) poll_source = NULL;
+  g_autoptr(GSource) cancellable_source = NULL;
   SubSsmData *data = fpi_ssm_get_data (ssm);
   FpDevice *device = fpi_ssm_get_device (ssm);
   int fd;
@@ -543,7 +564,20 @@ crfpmoc_ec_pollevent (FpiSsm *ssm, unsigned long mask)
       return;
     }
 
-  data->poll_source = g_unix_fd_add (fd, G_IO_IN, crfpmoc_read_bytes, ssm);
+  poll_source = g_unix_fd_source_new (fd, G_IO_IN);
+  g_source_set_callback (poll_source,
+                         G_SOURCE_FUNC (crfpmoc_read_bytes),
+                         ssm,
+                         NULL);
+
+  cancellable_source = g_cancellable_source_new (fpi_device_get_cancellable (device));
+  g_source_set_callback (cancellable_source,
+                         crfpmoc_poll_cancelled_cb,
+                         ssm,
+                         NULL);
+  g_source_add_child_source (poll_source, cancellable_source);
+
+  data->poll_source = g_source_attach (poll_source, NULL);
   fp_dbg ("crfpmoc_ec_pollevent: created poll source %d", data->poll_source);
 }
 
