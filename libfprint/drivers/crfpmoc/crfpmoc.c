@@ -1639,14 +1639,47 @@ handle_verify_sensor_check (FpiSsm *ssm)
 }
 
 static void
+complete_verification (FpiSsm  *ssm,
+                       FpPrint *matched_print,
+                       FpPrint *scanned_print)
+{
+  FpDevice *device = fpi_ssm_get_device (ssm);
+  FpiDeviceAction action = fpi_device_get_current_action (device);
+
+  if (action == FPI_DEVICE_ACTION_IDENTIFY)
+    {
+      fp_dbg ("complete_verification: identify_complete");
+      fpi_device_identify_report (device, matched_print, scanned_print, NULL);
+      fpi_device_identify_complete (device, NULL);
+    }
+  else if (action == FPI_DEVICE_ACTION_VERIFY)
+    {
+      fp_dbg ("complete_verification: verify_complete");
+      fpi_device_verify_report (device,
+                                matched_print ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL,
+                                scanned_print, NULL);
+      fpi_device_verify_complete (device, NULL);
+    }
+  else
+    {
+      g_assert_not_reached ();
+    }
+
+  fpi_ssm_mark_completed (ssm);
+}
+
+static void
 handle_verify_check (FpiSsm *ssm)
 {
   g_autoptr(GError) error = NULL;
+  g_autoptr(GPtrArray) prints = NULL;
+  g_autoptr(FpPrint) scanned_print = NULL;
+  FpPrint *matched_print;
   FpDevice *device = fpi_ssm_get_device (ssm);
   FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
   gint8 template_idx = -1;
-  GPtrArray *prints = NULL;
-  FpPrint *print = NULL;
+  g_autofree guint8 *matched_template = NULL;
+  size_t matched_template_size = 0;
   guint16 enrolled_templates = 0;
 
   if (!crfpmoc_cmd_fp_info (self, &enrolled_templates, NULL, NULL, &error))
@@ -1657,6 +1690,13 @@ handle_verify_check (FpiSsm *ssm)
     }
 
   fp_dbg ("handle_verify_check: enrolled templates: %d", enrolled_templates);
+
+  if (!enrolled_templates)
+    {
+      fp_info ("No enrolled templates on device");
+      complete_verification (ssm, NULL, NULL);
+      return;
+    }
 
   if (!crfpmoc_cmd_fp_stats (self, &template_idx, &error))
     {
@@ -1669,83 +1709,57 @@ handle_verify_check (FpiSsm *ssm)
     {
       fp_info ("Print was not identified by the device");
 
-      if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_IDENTIFY)
-        fpi_device_identify_report (device, NULL, NULL, NULL);
-      else
-        fpi_device_verify_report (device, FPI_MATCH_FAIL, NULL, NULL);
-    }
-  else
-    {
-      fp_info ("Identify successful for template %d", template_idx);
-
-      print = fp_print_new (device);
-      fpi_print_set_type (print, FPI_PRINT_RAW);
-
-      if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_IDENTIFY)
-        {
-          fpi_device_get_identify_data (device, &prints);
-          if (prints && template_idx < (gint) prints->len)
-            {
-              FpPrint *matched_print = g_ptr_array_index (prints, template_idx);
-              g_autofree guint8 *matched_template = NULL;
-              size_t matched_template_size = 0;
-
-              if (!crfpmoc_get_print_data (matched_print,
-                                           &matched_template, &matched_template_size,
-                                           &error))
-                {
-                  fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
-                  return;
-                }
-
-              crfpmoc_set_print_data (print, matched_template, matched_template_size);
-              fpi_device_identify_report (device, matched_print, print, NULL);
-            }
-          else
-            {
-              /* This should not occur as we can only match prints
-               * from the gallery
-               */
-              fp_warn ("Template index %d is out of range", template_idx);
-              fpi_device_identify_report (device, NULL, print, NULL);
-            }
-        }
-      else if (template_idx == 0)
-        {
-          FpPrint *verify_print = NULL;
-
-          fpi_device_get_verify_data (device, &verify_print);
-          fp_info ("Verifying against: %s",
-                   fp_print_get_description (verify_print));
-
-          g_autofree guint8 *matched_template = NULL;
-          size_t matched_template_size = 0;
-
-          if (!crfpmoc_get_print_data (verify_print,
-                                       &matched_template, &matched_template_size,
-                                       &error))
-            {
-              fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
-              return;
-            }
-
-          crfpmoc_set_print_data (print, matched_template, matched_template_size);
-          fpi_device_verify_report (device, FPI_MATCH_SUCCESS, print, NULL);
-        }
+      complete_verification (ssm, NULL, NULL);
+      return;
     }
 
   if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_IDENTIFY)
     {
-      fp_dbg ("handle_verify_check: identify_complete");
-      fpi_device_identify_complete (device, NULL);
+      GPtrArray *gallery = NULL;
+
+      fpi_device_get_identify_data (device, &gallery);
+      prints = g_ptr_array_ref (gallery);
     }
   else
     {
-      fp_dbg ("handle_verify_check: verify_complete");
-      fpi_device_verify_complete (device, NULL);
+      FpPrint *verify_print = NULL;
+
+      fpi_device_get_verify_data (device, &verify_print);
+      prints = g_ptr_array_new_with_free_func (g_object_unref);
+      g_ptr_array_add (prints, g_object_ref (verify_print));
     }
 
-  fpi_ssm_mark_completed (ssm);
+  if (!prints || prints->len == 0)
+    {
+      fp_info ("No prints available for verification");
+      complete_verification (ssm, NULL, NULL);
+      return;
+    }
+
+  if (template_idx >= prints->len)
+    {
+      fp_info ("Matched template not in index %d, gallery size %d",
+               template_idx, prints->len);
+      complete_verification (ssm, NULL, NULL);
+      return;
+    }
+
+  fp_info ("Identify successful for template %d", template_idx);
+
+  matched_print = g_ptr_array_index (prints, template_idx);
+
+  if (!crfpmoc_get_print_data (matched_print,
+                               &matched_template, &matched_template_size,
+                               &error))
+    {
+      fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+      return;
+    }
+
+  scanned_print = fp_print_new (device);
+  fpi_print_set_type (scanned_print, FPI_PRINT_RAW);
+  crfpmoc_set_print_data (scanned_print, matched_template, matched_template_size);
+  complete_verification (ssm, matched_print, g_steal_pointer (&scanned_print));
 }
 
 static void
