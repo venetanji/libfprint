@@ -40,9 +40,6 @@ G_DECLARE_FINAL_TYPE (FpiDeviceCrfpMoc, fpi_device_crfpmoc, FPI, DEVICE_CRFPMOC,
 
 #define CRFPMOC_NR_ENROLL_STAGES 5
 
-/* crfpmoc_ec_command return value for non-success result from EC */
-#define CRFPMOC_EECRESULT 1000
-
 /* Resend last response (not supported on LPC). */
 #define CRFPMOC_EC_CMD_RESEND_RESPONSE 0x00DB
 /* Configure the Fingerprint MCU behavior */
@@ -441,17 +438,27 @@ enum crfpmoc_ec_status {
 
 /* SSM task states and various status enums */
 
+/* Open state machine states
+ */
+enum {
+  OPEN_GET_PROTO_INFO, /* Query protocol info (max in/out sizes) */
+  OPEN_GET_FP_INFO,    /* Query fingerprint sensor info */
+  OPEN_STATES,
+};
+
 /* Enroll state machine states
  */
 enum {
   ENROLL_ENSURE_KEYS,          /* Setup the seed and context */
-  ENROLL_SENSOR_ENROLL,        /* Enter enroll mode */
+  ENROLL_SENSOR_ENROLL_SUBMIT, /* Enter enroll mode (async submit) */
+  ENROLL_SENSOR_ENROLL_DONE,   /* Enroll mode set */
   ENROLL_WAIT_ENROLL_COMPLETE, /* Wait for command completion event */
   ENROLL_SENSOR_CHECK,         /* Verify mode has indicated completion */
 #ifdef WAIT_ON_ENROLL
   ENROLL_WAIT_FINGER_UP,       /* Wait for finger to be removed */
 #endif
   ENROLL_COMMIT,               /* Download template and return print  */
+  ENROLL_RESET,                /* Reset sensor to idle */
   ENROLL_STATES,
 };
 
@@ -462,10 +469,12 @@ enum {
   VERIFY_FINGER_UP,           /* Make sure the finger is not on the sensor */
   VERIFY_ENSURE_KEYS,         /* Setup the seed and context */
   VERIFY_UPLOAD_TEMPLATE,     /* Upload all gallery templates */
-  VERIFY_SENSOR_MATCH,        /* Enter match mode */
+  VERIFY_SENSOR_MATCH_SUBMIT, /* Enter match mode (async submit) */
+  VERIFY_SENSOR_MATCH_DONE,   /* Match mode set */
   VERIFY_WAIT_MATCH_COMPLETE, /* Wait for match complete event */
   VERIFY_SENSOR_CHECK,        /* Verify mode has indicated completion */
   VERIFY_CHECK,               /* Get the match completion status */
+  VERIFY_RESET,               /* Reset sensor to idle */
   VERIFY_STATES,
 };
 
@@ -486,3 +495,14 @@ enum {
   FINGER_UP_TIMEOUT,
   FINGER_UP_STATES,
 };
+
+gboolean crfpmoc_umockdev_recording_enabled (FpiDeviceCrfpMoc *self);
+
+/* Umockdev recording, called from the ec-transfer module */
+void crfpmoc_umockdev_record (FpiDeviceCrfpMoc *self,
+                              int               res,
+                              int               cmd,
+                              void             *arg);
+
+/* EC result code to string, called from the ec-transfer module */
+const gchar *crfpmoc_strresult (int i);
