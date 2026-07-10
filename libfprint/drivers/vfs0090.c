@@ -24,12 +24,10 @@
 
 #include <errno.h>
 #include <ctype.h>
-#include <nss.h>
-#include <pk11pub.h>
-#include <sechash.h>
 #include <openssl/err.h>
 #include <openssl/ec.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/ssl.h>
 
 #include "vfs0090.h"
@@ -619,44 +617,13 @@ usb_operation_perform (const char *op, gboolean ret, FpDevice *dev, GError **err
    }
  */
 
-static PK11Context *
-hmac_make_context (const unsigned char *key_bytes, int key_len)
-{
-  PK11SymKey *pkKey;
-  CK_MECHANISM_TYPE hmacMech = CKM_SHA256_HMAC;
-  PK11SlotInfo *slot = PK11_GetBestSlot (hmacMech, NULL);
-
-  SECItem key;
-
-  key.type = siBuffer;
-  key.data = (unsigned char *) key_bytes;
-  key.len = key_len;
-
-  pkKey = PK11_ImportSymKey (slot, hmacMech, PK11_OriginUnwrap, CKA_SIGN, &key, NULL);
-
-  SECItem param = { .type = siBuffer, .data = NULL, .len = 0 };
-
-  PK11Context * context = PK11_CreateContextBySymKey (hmacMech, CKA_SIGN, pkKey, &param);
-  PK11_DigestBegin (context);
-  PK11_FreeSlot (slot);
-  PK11_FreeSymKey (pkKey);
-
-  return context;
-}
-
 static unsigned char *
 hmac_compute (const unsigned char *key, int key_len, unsigned char * data, int data_len)
 {
-  // XXX: REUSE CONTEXT HERE, don't create it all the times
-  PK11Context * context = hmac_make_context (key, key_len);
-
-  PK11_DigestOp (context, data, data_len);
-
   unsigned int len = 0x20;
   unsigned char *res = g_malloc (len);
-  PK11_DigestFinal (context, res, &len, len);
-  PK11_DestroyContext (context, PR_TRUE);
 
+  HMAC (EVP_sha256 (), key, key_len, data, data_len, res, &len);
   return res;
 }
 
@@ -1073,8 +1040,7 @@ sign2 (EC_KEY * key, unsigned char *data, int data_len)
 typedef struct _VfsTlsHandshake
 {
   VfsInit       *vinit;
-  HASHContext   *tls_hash_context;
-  HASHContext   *tls_hash_context2;
+  GByteArray    *tls_hash_data;
   unsigned char  read_buffer[VFS_USB_BUFFER_SIZE];
   unsigned char  client_random[0x20];
   unsigned char  master_secret[0x30];
@@ -1084,8 +1050,7 @@ typedef struct _VfsTlsHandshake
 static void
 tls_handshake_free (VfsTlsHandshake *tlshd)
 {
-  HASH_Destroy (tlshd->tls_hash_context);
-  HASH_Destroy (tlshd->tls_hash_context2);
+  g_byte_array_free (tlshd->tls_hash_data, TRUE);
   g_clear_pointer (&tlshd->client_hello, g_free);
   g_free (tlshd);
 }
@@ -1105,11 +1070,7 @@ handshake_ssm (FpiSsm *ssm, FpDevice *dev)
         time_t current_time;
         unsigned char *client_hello;
 
-        tlshd->tls_hash_context = HASH_Create (HASH_AlgSHA256);
-        tlshd->tls_hash_context2 = HASH_Create (HASH_AlgSHA256);
-
-        HASH_Begin (tlshd->tls_hash_context);
-        HASH_Begin (tlshd->tls_hash_context2);
+        tlshd->tls_hash_data = g_byte_array_new ();
 
         client_hello = g_malloc (G_N_ELEMENTS (TLS_CLIENT_HELLO));
         tlshd->client_hello = client_hello;
@@ -1120,8 +1081,7 @@ handshake_ssm (FpiSsm *ssm, FpDevice *dev)
 
         memcpy (client_hello, TLS_CLIENT_HELLO, G_N_ELEMENTS (TLS_CLIENT_HELLO));
         memcpy (client_hello + 0xf, tlshd->client_random, G_N_ELEMENTS (tlshd->client_random));
-        HASH_Update (tlshd->tls_hash_context, client_hello + 0x09, 0x43);
-        HASH_Update (tlshd->tls_hash_context2, client_hello + 0x09, 0x43);
+        g_byte_array_append (tlshd->tls_hash_data, client_hello + 0x09, 0x43);
 
         async_data_exchange (dev, DATA_EXCHANGE_PLAIN,
                              client_hello, G_N_ELEMENTS (TLS_CLIENT_HELLO),
@@ -1144,8 +1104,7 @@ handshake_ssm (FpiSsm *ssm, FpDevice *dev)
         g_autoptr(EVP_PKEY) pub = NULL;
 
         memcpy (server_random, tlshd->read_buffer + 0xb, G_N_ELEMENTS (server_random));
-        HASH_Update (tlshd->tls_hash_context, tlshd->read_buffer + 0x05, 0x3d);
-        HASH_Update (tlshd->tls_hash_context2, tlshd->read_buffer + 0x05, 0x3d);
+        g_byte_array_append (tlshd->tls_hash_data, tlshd->read_buffer + 0x05, 0x3d);
 
         if (!(priv_key = load_key (PRIVKEY, TRUE)))
           {
@@ -1209,15 +1168,13 @@ handshake_ssm (FpiSsm *ssm, FpDevice *dev)
         unsigned char test[0x20];
         g_autofree unsigned char *cert_verify_signature = NULL;
         g_autofree unsigned char *final = NULL;
-        unsigned int test_len;
         int len;
 
         memcpy (vinit->tls_certificate + 0xce + 4, PRIVKEY, 0x40);
 
-        HASH_Update (tlshd->tls_hash_context, vinit->tls_certificate + 0x09, 0x109);
-        HASH_Update (tlshd->tls_hash_context2, vinit->tls_certificate + 0x09, 0x109);
+        g_byte_array_append (tlshd->tls_hash_data, vinit->tls_certificate + 0x09, 0x109);
 
-        HASH_End (tlshd->tls_hash_context, test, &test_len, G_N_ELEMENTS (test));
+        SHA256 (tlshd->tls_hash_data->data, tlshd->tls_hash_data->len, test);
 
         ecdsa_key = load_key (vinit->ecdsa_private_key, TRUE);
         cert_verify_signature = sign2 (ecdsa_key, test, 0x20);
@@ -1225,9 +1182,8 @@ handshake_ssm (FpiSsm *ssm, FpDevice *dev)
 
         // encrypted finished
         unsigned char handshake_messages[0x20];
-        unsigned int len3 = 0x20;
-        HASH_Update (tlshd->tls_hash_context2, vinit->tls_certificate + 0x09 + 0x109, 0x4c);
-        HASH_End (tlshd->tls_hash_context2, handshake_messages, &len3, 0x20);
+        g_byte_array_append (tlshd->tls_hash_data, vinit->tls_certificate + 0x09 + 0x109, 0x4c);
+        SHA256 (tlshd->tls_hash_data->data, tlshd->tls_hash_data->len, handshake_messages);
 
         unsigned char finished_message[0x10] = { 0x14, 0x00, 0x00, 0x0c, 0 };
         unsigned char client_finished[0x0c];
@@ -1564,7 +1520,6 @@ vfs0090_init (FpiDeviceVfs0090 *vdev)
   FpDevice *dev = FP_DEVICE (vdev);
   GUsbDevice *udev;
   GError *error = NULL;
-  SECStatus secs_status;
   int usb_config;
 
   fp_dbg ("Initializing device");
@@ -1584,16 +1539,6 @@ vfs0090_init (FpiDeviceVfs0090 *vdev)
 
   if (!usb_operation (g_usb_device_claim_interface (udev, 0, 0, &error), dev, &error))
     return FALSE;
-
-  secs_status = NSS_NoDB_Init (NULL);
-  if (secs_status != SECSuccess)
-    {
-      error = fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
-                                        "could not initialise NSS");
-      fp_err ("%s", error->message);
-      fpi_device_action_error (dev, error);
-      return FALSE;
-    }
 
   OpenSSL_add_all_algorithms ();
   ERR_load_crypto_strings ();
@@ -3001,7 +2946,6 @@ vfs0090_deinit (FpiDeviceVfs0090 *vdev, GError **error)
 {
   GUsbDevice *udev = fpi_device_get_usb_device (FP_DEVICE (vdev));
 
-  NSS_Shutdown ();
   ERR_free_strings ();
   EVP_cleanup ();
 
