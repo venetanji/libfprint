@@ -736,7 +736,6 @@ crfpmoc_clear_storage_cb (CrfpMocEcTransfer *transfer, GAsyncResult *res, gpoint
  */
 static gboolean
 crfpmoc_parse_fp_info (struct crfpmoc_ec_response_fp_info *r,
-                       guint16                            *enrolled_templates,
                        guint16                            *max_templates,
                        guint16                            *template_size,
                        GError                            **error)
@@ -781,8 +780,6 @@ crfpmoc_parse_fp_info (struct crfpmoc_ec_response_fp_info *r,
       return FALSE;
     }
 
-  if (enrolled_templates)
-    *enrolled_templates = r->template_valid;
   if (max_templates)
     *max_templates = r->template_max;
   if (template_size)
@@ -812,23 +809,68 @@ crfpmoc_show_proto_info (struct crfpmoc_ec_response_get_protocol_info *protocol_
           protocol_info->flags);
 }
 
-/* Parse the max in and out sizes from the protocol info response. It
- * is assumed these values determine the size limits for commands.
- * Note: ectool uses a fixed smaller value either to work with older
- * devices that do not support this request or some other reason.
+/* Parse and validate the max in and out payload sizes from the protocol
+ * info response. The device-reported packet sizes are used to derive the
+ * usable payload sizes, but are always clamped to
+ * CRFPMOC_EC_PROTO2_MAX_PARAM_SIZE, which is the absolute upper bound the
+ * driver's transfer buffers are sized against. This prevents a malicious
+ * or malfunctioning device from inducing oversized transfers.
+ *
+ * Fails if a reported packet size is too small to even contain the
+ * protocol header (which would otherwise underflow), or too small to
+ * carry a fingerprint template chunk header plus at least one data byte.
  */
-static void
+static gboolean
 crfpmoc_parse_max_size (struct crfpmoc_ec_response_get_protocol_info *protocol_info,
                         guint16                                      *max_insize,
-                        guint16                                      *max_outsize)
+                        guint16                                      *max_outsize,
+                        GError                                      **error)
 {
+  const gsize header = sizeof (struct crfpmoc_ec_host_response);
+  const gsize min_out = offsetof (struct crfpmoc_ec_params_fp_template, data) + 4 + 1;
+  gsize derived_in;
+  gsize derived_out;
+
   crfpmoc_show_proto_info (protocol_info);
+
+  if (protocol_info->max_response_packet_size < header ||
+      protocol_info->max_request_packet_size < header)
+    {
+      g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
+                   "Device reported packet sizes smaller than the protocol "
+                   "header (in %u, out %u, header %zu)",
+                   protocol_info->max_response_packet_size,
+                   protocol_info->max_request_packet_size, header);
+      return FALSE;
+    }
+
+  derived_in = MIN ((gsize) CRFPMOC_EC_PROTO2_MAX_PARAM_SIZE,
+                    protocol_info->max_response_packet_size - header);
+  derived_out = MIN ((gsize) CRFPMOC_EC_PROTO2_MAX_PARAM_SIZE,
+                     protocol_info->max_request_packet_size - header);
+
+  if (derived_in == 0)
+    {
+      g_set_error_literal (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
+                           "Device reported max incoming payload of zero bytes");
+      return FALSE;
+    }
+
+  if (derived_out < min_out)
+    {
+      g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
+                   "Device reported max outgoing payload %zu too small to "
+                   "carry a template chunk (need at least %zu)",
+                   derived_out, min_out);
+      return FALSE;
+    }
+
   if (max_insize)
-    *max_insize = protocol_info->max_response_packet_size -
-                  sizeof (struct crfpmoc_ec_host_response);
+    *max_insize = derived_in;
   if (max_outsize)
-    *max_outsize = protocol_info->max_request_packet_size -
-                   sizeof (struct crfpmoc_ec_host_response);
+    *max_outsize = derived_out;
+
+  return TRUE;
 }
 
 /* Stolen BSD sum algorithm. Used for debug to allow matching the
@@ -902,7 +944,14 @@ crfpmoc_open_proto_info_cb (CrfpMocEcTransfer *transfer, GAsyncResult *res, gpoi
     }
 
   protocol_info = (struct crfpmoc_ec_response_get_protocol_info *) transfer->indata;
-  crfpmoc_parse_max_size (protocol_info, &self->max_insize, &self->max_outsize);
+
+  if (!crfpmoc_parse_max_size (protocol_info, &self->max_insize,
+                               &self->max_outsize, &error))
+    {
+      g_prefix_error_literal (&error, "Failed to get max insize/outsize: ");
+      fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+      return;
+    }
 
   fpi_ssm_next_state (ssm);
 }
@@ -925,7 +974,7 @@ crfpmoc_open_fp_info_cb (CrfpMocEcTransfer *transfer, GAsyncResult *res, gpointe
 
   info = (struct crfpmoc_ec_response_fp_info *) transfer->indata;
 
-  if (!crfpmoc_parse_fp_info (info, NULL, &self->max_templates,
+  if (!crfpmoc_parse_fp_info (info, &self->max_templates,
                               &self->template_size, &error))
     {
       g_prefix_error_literal (&error, "Failed to get max templates and templates size: ");
@@ -1876,6 +1925,7 @@ crfpmoc_download_chunk_cb (CrfpMocEcTransfer *transfer, GAsyncResult *res, gpoin
   SubSsmData *data = fpi_ssm_get_data (ssm);
   DownloadData *ddata = data->sub_data;
   FpDevice *device = fpi_ssm_get_device (ssm);
+  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
   gsize stride;
 
   if (!crfpmoc_ec_transfer_submit_finish (res, &error))
@@ -1890,7 +1940,7 @@ crfpmoc_download_chunk_cb (CrfpMocEcTransfer *transfer, GAsyncResult *res, gpoin
             struct crfpmoc_ec_params_fp_frame p;
             CrfpMocEcTransfer *new_transfer;
 
-            stride = MIN (CRFPMOC_EC_PROTO2_MAX_PARAM_SIZE, ddata->remaining);
+            stride = MIN (self->max_insize, ddata->remaining);
             p = (struct crfpmoc_ec_params_fp_frame){
               .offset = ddata->offset,
               .size = stride,
@@ -1911,7 +1961,7 @@ crfpmoc_download_chunk_cb (CrfpMocEcTransfer *transfer, GAsyncResult *res, gpoin
       return;
     }
 
-  stride = MIN (CRFPMOC_EC_PROTO2_MAX_PARAM_SIZE, ddata->remaining);
+  stride = MIN (self->max_insize, ddata->remaining);
   {
     gsize old_offset = ddata->buf_offset;
 
@@ -1939,6 +1989,7 @@ crfpmoc_download_chunk_cb (CrfpMocEcTransfer *transfer, GAsyncResult *res, gpoin
 static void
 crfpmoc_download_run_state (FpiSsm *ssm, FpDevice *device)
 {
+  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
   SubSsmData *data = fpi_ssm_get_data (ssm);
   DownloadData *ddata = data->sub_data;
 
@@ -1947,7 +1998,7 @@ crfpmoc_download_run_state (FpiSsm *ssm, FpDevice *device)
     case DOWNLOAD_CHUNK:
       {
         CrfpMocEcTransfer *transfer;
-        gsize stride = MIN (CRFPMOC_EC_PROTO2_MAX_PARAM_SIZE, ddata->remaining);
+        gsize stride = MIN (self->max_insize, ddata->remaining);
         struct crfpmoc_ec_params_fp_frame p = {
           .offset = ddata->offset,
           .size = stride,
@@ -2001,6 +2052,8 @@ crfpmoc_upload_chunk_cb (CrfpMocEcTransfer *transfer, GAsyncResult *res, gpointe
 {
   g_autoptr(GError) error = NULL;
   FpiSsm *ssm = user_data;
+  FpDevice *device = fpi_ssm_get_device (ssm);
+  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
   SubSsmData *data = fpi_ssm_get_data (ssm);
   UploadData *udata = data->sub_data;
   gsize max_chunk;
@@ -2011,7 +2064,7 @@ crfpmoc_upload_chunk_cb (CrfpMocEcTransfer *transfer, GAsyncResult *res, gpointe
       return;
     }
 
-  max_chunk = CRFPMOC_EC_PROTO2_MAX_PARAM_SIZE -
+  max_chunk = self->max_outsize -
               offsetof (struct crfpmoc_ec_params_fp_template, data) - 4;
   guint32 tlen = MIN (max_chunk, udata->remaining);
   udata->offset += tlen;
@@ -2033,11 +2086,12 @@ crfpmoc_upload_chunk_cb (CrfpMocEcTransfer *transfer, GAsyncResult *res, gpointe
 static void
 crfpmoc_upload_run_state (FpiSsm *ssm, FpDevice *device)
 {
+  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
   SubSsmData *data = fpi_ssm_get_data (ssm);
   UploadData *udata = data->sub_data;
   gsize max_chunk;
 
-  max_chunk = CRFPMOC_EC_PROTO2_MAX_PARAM_SIZE -
+  max_chunk = self->max_outsize -
               offsetof (struct crfpmoc_ec_params_fp_template, data) - 4;
 
   switch (fpi_ssm_get_cur_state (ssm))
