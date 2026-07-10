@@ -1143,6 +1143,15 @@ crfpmoc_commit_fp_info_cb (CrfpMocEcTransfer *transfer, GAsyncResult *res, gpoin
   enrolled_templates = info->template_valid;
   fp_dbg ("Number of enrolled templates is: %d", enrolled_templates);
 
+  if (enrolled_templates == 0)
+    {
+      fpi_ssm_mark_failed (ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                                     "Device reported no enrolled "
+                                                     "templates after enrollment"));
+      return;
+    }
+
   sub = fpi_ssm_new (device, crfpmoc_download_run_state, DOWNLOAD_STATES);
 
   ddata = g_new0 (DownloadData, 1);
@@ -1388,6 +1397,49 @@ handle_enroll_commit (FpiSsm *ssm)
 }
 
 static void
+crfpmoc_enroll_capacity_cb (CrfpMocEcTransfer *transfer, GAsyncResult *res, gpointer user_data)
+{
+  g_autoptr(GError) error = NULL;
+  FpiSsm *ssm = user_data;
+  struct crfpmoc_ec_response_fp_info *info;
+
+  if (!crfpmoc_ec_transfer_submit_finish (res, &error))
+    {
+      fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+      return;
+    }
+
+  info = (struct crfpmoc_ec_response_fp_info *) transfer->indata;
+  fp_dbg ("handle_enroll_check_capacity: enrolled %d of %d templates",
+          info->template_valid, info->template_max);
+
+  if (info->template_max != 0 && info->template_valid >= info->template_max)
+    {
+      fpi_ssm_mark_failed (ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_FULL,
+                                                     "On-device storage is full "
+                                                     "(%d of %d templates enrolled)",
+                                                     info->template_valid,
+                                                     info->template_max));
+      return;
+    }
+
+  fpi_ssm_next_state (ssm);
+}
+
+static void
+handle_enroll_check_capacity (FpiSsm *ssm)
+{
+  FpDevice *device = fpi_ssm_get_device (ssm);
+  CrfpMocEcTransfer *transfer;
+
+  transfer = crfpmoc_ec_transfer_new_cmd (device, CRFPMOC_EC_CMD_FP_INFO, 1,
+                                          NULL, 0, sizeof (struct crfpmoc_ec_response_fp_info));
+  crfpmoc_ec_transfer_submit_cmd (transfer, fpi_device_get_cancellable (device),
+                                  crfpmoc_enroll_capacity_cb, ssm);
+}
+
+static void
 handle_ensure_keys (FpiSsm *ssm)
 {
   FpDevice *device = fpi_ssm_get_device (ssm);
@@ -1403,6 +1455,10 @@ crfpmoc_enroll_run_state (FpiSsm *ssm, FpDevice *device)
 {
   switch (fpi_ssm_get_cur_state (ssm))
     {
+    case ENROLL_CHECK_CAPACITY:
+      handle_enroll_check_capacity (ssm);
+      break;
+
     case ENROLL_ENSURE_KEYS:
       handle_ensure_keys (ssm);
       break;

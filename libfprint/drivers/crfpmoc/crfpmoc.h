@@ -449,6 +449,7 @@ enum {
 /* Enroll state machine states
  */
 enum {
+  ENROLL_CHECK_CAPACITY,       /* Reject if on-device storage is full */
   ENROLL_ENSURE_KEYS,          /* Setup the seed and context */
   ENROLL_SENSOR_ENROLL_SUBMIT, /* Enter enroll mode (async submit) */
   ENROLL_SENSOR_ENROLL_DONE,   /* Enroll mode set */
