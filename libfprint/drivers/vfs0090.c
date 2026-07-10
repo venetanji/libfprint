@@ -1574,7 +1574,7 @@ led_blink_callback_with_ssm (FpiUsbTransfer *transfer, FpDevice *dev,
 
   if (!error)
     {
-      fpi_ssm_next_state_delayed (ssm, 200, NULL);
+      fpi_ssm_next_state_delayed (ssm, 200);
     }
   else
     {
@@ -2896,7 +2896,7 @@ reactivate_ssm (FpiSsm *ssm, FpDevice *dev)
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case REACTIVATE_STATE_WAIT:
-      fpi_ssm_next_state_delayed (ssm, 100, NULL);
+      fpi_ssm_next_state_delayed (ssm, 100);
       break;
 
     case REACTIVATE_STATE_DEACTIVATE:
@@ -3098,4 +3098,6 @@ fpi_device_vfs0090_class_init (FpiDeviceVfs0090Class *klass)
   dev_class->identify = dev_activate;
   dev_class->capture = dev_activate;
   dev_class->cancel = dev_cancel;
+
+  fpi_device_class_auto_initialize_features (dev_class);
 }
