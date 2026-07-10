@@ -75,7 +75,8 @@ G_DECLARE_FINAL_TYPE (FpiDeviceCrfpMoc, fpi_device_crfpmoc, FPI, DEVICE_CRFPMOC,
 
 /* Constants for encryption parameters */
 #define CRFPMOC_FP_CONTEXT_NONCE_BYTES 12
-#define CRFPMOC_FP_CONTEXT_USERID_WORDS (32 / sizeof (guint32))
+#define CRFPMOC_FP_CONTEXT_USERID_BYTES 32
+#define CRFPMOC_FP_CONTEXT_USERID_WORDS (CRFPMOC_FP_CONTEXT_USERID_BYTES / sizeof (guint32))
 #define CRFPMOC_FP_CONTEXT_TAG_BYTES 16
 #define CRFPMOC_FP_CONTEXT_ENCRYPTION_SALT_BYTES 16
 #define CRFPMOC_FP_CONTEXT_TPM_BYTES 32
@@ -87,9 +88,13 @@ G_DECLARE_FINAL_TYPE (FpiDeviceCrfpMoc, fpi_device_crfpmoc, FPI, DEVICE_CRFPMOC,
 /* Flag in the 'size' field indicating that the full template has been sent */
 #define CRFPMOC_FP_TEMPLATE_COMMIT 0x80000000
 
-/* Should be made dynamic */
-#define CRFPMOC_DEFAULT_SEED "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-#define CRFPMOC_DEFAULT_CONTEXT "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+/* Fixed seed and context used only in emulation mode so that the recorded
+ * ioctl replay is deterministic. They are exactly 32 bytes long (the seed and
+ * context buffer size) and differ from each other so they are distinguishable
+ * in the recorded ioctls. Real hardware uses secure random values instead.
+ */
+#define CRFPMOC_DEFAULT_SEED "seedseedseedseedseedseedseedseed"
+#define CRFPMOC_DEFAULT_CONTEXT "ctxctxctxctxctxctxctxctxctxctxct"
 
 /* constants defining the 'offset' field which also contains the frame index */
 #define CRFPMOC_FP_FRAME_INDEX_SHIFT 28

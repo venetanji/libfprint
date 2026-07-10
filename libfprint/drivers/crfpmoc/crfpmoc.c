@@ -39,6 +39,9 @@ struct _FpiDeviceCrfpMoc
   guint16  max_templates;
   guint16  template_size;
 
+  guint8   seed[CRFPMOC_FP_CONTEXT_TPM_BYTES];
+  guint8   context[CRFPMOC_FP_CONTEXT_USERID_BYTES];
+
   int      emul_fd;
 };
 
@@ -1022,6 +1025,33 @@ crfpmoc_open_ssm_done (FpiSsm *ssm, FpDevice *device, GError *error)
   fpi_device_open_complete (device, error);
 }
 
+/* Initialise the per-session encryption seed and user context. In emulation
+ * mode fixed test values are used so the recorded ioctl replay stays
+ * deterministic; on real hardware random values are generated.
+ */
+static void
+crfpmoc_init_keys (FpiDeviceCrfpMoc *self)
+{
+  G_STATIC_ASSERT (sizeof (self->seed) == CRFPMOC_FP_CONTEXT_TPM_BYTES);
+  G_STATIC_ASSERT (sizeof (self->context) == CRFPMOC_FP_CONTEXT_USERID_BYTES);
+  G_STATIC_ASSERT (sizeof (CRFPMOC_DEFAULT_SEED) - 1 == CRFPMOC_FP_CONTEXT_TPM_BYTES);
+  G_STATIC_ASSERT (sizeof (CRFPMOC_DEFAULT_CONTEXT) - 1 == CRFPMOC_FP_CONTEXT_USERID_BYTES);
+
+  if (fpi_device_emulation_mode_enabled (FP_DEVICE (self)))
+    {
+      memcpy (self->seed, CRFPMOC_DEFAULT_SEED, sizeof (self->seed));
+      memcpy (self->context, CRFPMOC_DEFAULT_CONTEXT, sizeof (self->context));
+    }
+  else
+    {
+      for (size_t i = 0; i < sizeof (self->seed); i++)
+        self->seed[i] = (guint8) g_random_int_range (0, 256);
+
+      for (size_t i = 0; i < sizeof (self->context); i++)
+        self->context[i] = (guint8) g_random_int_range (0, 256);
+    }
+}
+
 static void
 crfpmoc_open (FpDevice *device)
 {
@@ -1049,6 +1079,8 @@ crfpmoc_open (FpDevice *device)
 
       fp_dbg ("Created temporary ioctl file for recording: %s", ioctl_file);
     }
+
+  crfpmoc_init_keys (self);
 
   g_assert (self->task_ssm == NULL);
   self->task_ssm = fpi_ssm_new (device, crfpmoc_open_run_state, OPEN_STATES);
@@ -1915,6 +1947,7 @@ crfpmoc_keys_ctx_poll_cb (CrfpMocEcTransfer *transfer, GAsyncResult *res, gpoint
 static void
 crfpmoc_keys_run_state (FpiSsm *ssm, FpDevice *device)
 {
+  FpiDeviceCrfpMoc *self = FPI_DEVICE_CRFPMOC (device);
   CrfpMocEcTransfer *transfer;
 
   switch (fpi_ssm_get_cur_state (ssm))
@@ -1933,7 +1966,7 @@ crfpmoc_keys_run_state (FpiSsm *ssm, FpDevice *device)
         struct crfpmoc_ec_params_fp_seed p = {
           .struct_version = CRFPMOC_FP_TEMPLATE_FORMAT_VERSION,
         };
-        memcpy (p.seed, CRFPMOC_DEFAULT_SEED, CRFPMOC_FP_CONTEXT_TPM_BYTES);
+        memcpy (p.seed, self->seed, sizeof (p.seed));
         transfer = crfpmoc_ec_transfer_new_cmd (device, CRFPMOC_EC_CMD_FP_SEED, 0,
                                                 &p, sizeof (p), 0);
         crfpmoc_ec_transfer_submit_cmd (transfer, fpi_device_get_cancellable (device),
@@ -1946,7 +1979,7 @@ crfpmoc_keys_run_state (FpiSsm *ssm, FpDevice *device)
         struct crfpmoc_ec_params_fp_context_v1 p = {
           .action = CRFPMOC_FP_CONTEXT_ASYNC,
         };
-        memcpy (p.userid, CRFPMOC_DEFAULT_CONTEXT, sizeof (p.userid));
+        memcpy (p.userid, self->context, sizeof (p.userid));
         transfer = crfpmoc_ec_transfer_new_cmd (device, CRFPMOC_EC_CMD_FP_CONTEXT, 1,
                                                 &p, sizeof (p), 0);
         crfpmoc_ec_transfer_submit_cmd (transfer, fpi_device_get_cancellable (device),
