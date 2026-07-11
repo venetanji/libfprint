@@ -131,10 +131,10 @@ crash.
 `00515010` becomes `515010`, representing the first three components of
 firmware `5.15.010.0`.
 
-The AAI version is compared with `BCM_MIN_FW_VERSION`. Depending on
-`BCM_FW_VERSION_STRICT`, old firmware may either be rejected or only warned
-about. The SBI version is warn-only because the driver has no
-confirmed runtime behavior that depends on it.
+The AAI version is compared with `BCM_MIN_FW_VERSION`. With
+`BCM_FW_VERSION_STRICT` enabled in the driver, old firmware is rejected during
+probe. The SBI version is warn-only because the driver has no confirmed
+runtime behavior that depends on it.
 
 ## Operation Flows
 

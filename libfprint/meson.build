@@ -155,34 +155,8 @@ helper_sources = {
     'virtual': files('drivers/virtual-device-listener.c'),
 }
 
-fs = import('fs')
-
 drivers_sources = []
 drivers_cflags = []
-
-# Broadcom: read minimum acceptable firmware versions from a key=value file
-# next to the source so they can be updated without touching any C or header files.
-# Keys: aai = AAI (Application Image) version (USH_REL_UPGRADE_VER, decimal)
-#        sbi = SBI (Secondary Boot Image) version (USH_SBI_MINOR_VER, decimal)
-bcm_min_fw = ''
-bcm_min_sbi = ''
-foreach line : fs.read('drivers/broadcom/min_fw_version.txt').strip().split('\n')
-    kv = line.strip().split('=')
-    if kv.length() == 2
-        if kv[0].strip() == 'aai'
-            bcm_min_fw = kv[1].strip()
-        elif kv[0].strip() == 'sbi'
-            bcm_min_sbi = kv[1].strip()
-        endif
-    endif
-endforeach
-if bcm_min_fw == '' or bcm_min_sbi == ''
-    error('drivers/broadcom/min_fw_version.txt must define aai= and sbi=')
-endif
-drivers_cflags += ['-DBCM_MIN_FW_VERSION=' + bcm_min_fw]
-drivers_cflags += ['-DBCM_MIN_SBI_VERSION=' + bcm_min_sbi]
-drivers_cflags += ['-DBCM_FW_VERSION_STRICT=' + (get_option('bcm-fw-version-strict') ? '1' : '0')]
-
 foreach driver: drivers
     drivers_sources += driver_sources[driver]
 endforeach

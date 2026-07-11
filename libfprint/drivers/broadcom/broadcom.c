@@ -35,17 +35,16 @@
 
 G_DECLARE_FINAL_TYPE (FpiDeviceBroadcom, fpi_device_broadcom, FPI, DEVICE_BROADCOM, FpDevice)
 
-/* BCM_MIN_FW_VERSION and BCM_MIN_SBI_VERSION are defined by the build system, read from
- * drivers/broadcom/min_fw_version.txt (aai= and sbi= keys).
+/* Minimum firmware versions allowed with this driver.
  * AAI (Application Image): e.g. "00515010" -> 515010, the first three components of firmware 5.15.010.0.
  * SBI (Secondary Boot Image): independent bootloader version, decimal, e.g. 229.
+ *
+ * With BCM_FW_VERSION_STRICT set, old AAI firmware fails probe so fprintd does
+ * not expose a device that may fail later through PAM.
  */
-#ifndef BCM_MIN_FW_VERSION
-#  error "BCM_MIN_FW_VERSION must be defined by the build system (see min_fw_version.txt)"
-#endif
-#ifndef BCM_MIN_SBI_VERSION
-#  error "BCM_MIN_SBI_VERSION must be defined by the build system (see min_fw_version.txt)"
-#endif
+#define BCM_MIN_FW_VERSION 515010
+#define BCM_MIN_SBI_VERSION 229
+#define BCM_FW_VERSION_STRICT 1
 
 /* USB endpoints */
 #define BCM_EP_OUT (1 | FPI_USB_ENDPOINT_OUT)          // 0x01 - bulk OUT
