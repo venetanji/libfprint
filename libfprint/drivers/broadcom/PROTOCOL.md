@@ -141,7 +141,7 @@ runtime behavior that depends on it.
 The exact implemented flow is in `broadcom.c`. The notes here explain where it
 differs from observed proprietary-driver behavior.
 
-### Verify
+### Match / Verify
 
 Observed proprietary Linux flow:
 
@@ -156,9 +156,14 @@ CLOSE(session)
 ```
 
 The post-capture `GET_CHALLENGE` returns `0x47` in the observed proprietary
-flow, i.e. a generic command failure, which seems like a bug in that driver.
-This driver skips that command and goes straight to `CANCEL_CAPTURE` and
+flow, i.e. a generic command failure, which seems like a bug in that driver. The
+libfprint driver skips that command and goes straight to `CANCEL_CAPTURE` and
 `CLOSE`.
+
+The firmware command used here is `CAPTURE`, not a separate verify command. The
+libfprint driver exposes verification through libfprint's verify-via-identify
+fallback: verification calls the identify path with a gallery containing one
+template ID.
 
 ### Enroll
 
@@ -185,9 +190,9 @@ stages so libfprint does not warn before the firmware reports completion.
 
 ### Identify
 
-The driver performs on-device 1:N matching by sending one `CAPTURE` command
-containing all enrolled template IDs. The response has the match result and the
-winning template ID.
+The libfprint driver performs on-device 1:N matching by sending one `CAPTURE`
+command containing all enrolled template IDs. The response has the match result
+and the winning template ID.
 
 Observed proprietary Linux flow also sends a post-capture `GET_CHALLENGE` that
 returns `0x47` (generic command failure); this driver skips it.
@@ -290,8 +295,8 @@ delete-all.
 ## Template IDs
 
 Template IDs are returned by enrollment commit and stored in `FpPrint` metadata.
-The driver later passes them to CAPTURE for verify/identify and to DELETE_OBJECT
-for delete.
+The driver later passes them to `CAPTURE` for identify, including libfprint's
+verify-via-identify case, and to `DELETE_OBJECT` for delete.
 
 The exact firmware-side object-ID structure is not fully understood. The
 single-template DELETE_OBJECT format used here works in practice, but firmware

@@ -282,17 +282,17 @@ bcm_build_enroll_commit (const guint32 session_id, const guint8 *hash, gsize *ou
 
 /*
  * CAPTURE
- * Used to verify a single template id or identify multiple ids.
+ * Used to match against one or more template IDs.
  * variable length
  * Packet size: 100 + N*4 bytes
  * data_len:     56 + N*4 bytes
  *
- * Same as single-template CAPTURE/verify but TLV[4] carries all N template IDs:
+ * TLV[4] carries all N template IDs:
  * [tag=2, len=N*4, template_id_0 ... template_id_N-1]
  *
  * The device performs on-device 1:N matching and returns the matched
  * template_id (or 0) along with match_result.  Parsed by the same
- * bcm_parse_capture_response() as single-template verify.
+ * bcm_parse_capture_response().
  *
  * TLV: [tag=0, len=4, session_id]
  *      [tag=0, len=4, BCM_CAPTURE_MODE]

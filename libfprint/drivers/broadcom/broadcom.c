@@ -127,19 +127,6 @@ typedef enum {
   BCM_ENROLL_NUM_STATES,
 } BcmEnrollState;
 
-/* Verify SSM - each operation opens/closes its own protocol session */
-typedef enum {
-  BCM_VERIFY_CLOSE_STALE = 0, // CLOSE any cached stale session from a previous crash
-  BCM_VERIFY_CANCEL_INIT, // send CANCEL_CAPTURE to clear any stale capture state
-  BCM_VERIFY_OPEN,
-  BCM_VERIFY_GET_CHALLENGE,
-  BCM_VERIFY_WAIT_FINGER, // poll interrupt endpoint until status=3 finger event
-  BCM_VERIFY_CAPTURE, // send CAPTURE after finger event; device responds immediately
-  BCM_VERIFY_CANCEL,
-  BCM_VERIFY_CLOSE,
-  BCM_VERIFY_NUM_STATES,
-} BcmVerifyState;
-
 /* Identify SSM - sends all N template IDs in a single CAPTURE command;
  * device performs on-device 1:N matching and returns the matched template. */
 typedef enum {
@@ -204,7 +191,6 @@ struct _FpiDeviceBroadcom
   /* Stashed error for the close-on-error path */
   GError  *task_error;
 
-  gint     verify_match_result; // -1 = unset, 0 = no-match, 1 = match
   FpPrint *identify_match; // matched template (NULL = no match)
   FpPrint *identify_scan; // new scan print (NULL = no match)
 
@@ -237,11 +223,6 @@ G_DEFINE_TYPE (FpiDeviceBroadcom, fpi_device_broadcom, FP_TYPE_DEVICE)
 static void enroll_ssm_run_state (FpiSsm   *ssm,
                                   FpDevice *device);
 static void enroll_ssm_done (FpiSsm   *ssm,
-                             FpDevice *device,
-                             GError   *error);
-static void verify_ssm_run_state (FpiSsm   *ssm,
-                                  FpDevice *device);
-static void verify_ssm_done (FpiSsm   *ssm,
                              FpDevice *device,
                              GError   *error);
 static void identify_ssm_run_state (FpiSsm   *ssm,
@@ -463,34 +444,6 @@ enroll (FpDevice *device)
 }
 
 /*
- * Verify flow:
- *
- *   verify()
- *     -> SSM: CLOSE_STALE -> CANCEL_INIT -> OPEN -> GET_CHALLENGE -> WAIT_FINGER -> CAPTURE -> CANCEL -> CLOSE
- *
- *   Callbacks per state:
- *     GET_CHALLENGE -> verify_challenge_done
- *     CAPTURE       -> verify_capture_done
- *     CANCEL        -> verify_cancel_done
- *     CLOSE         -> task_close_done   (shared)
- *
- *   On error: task_error() -> jump to CLOSE -> task_close_done
- *   SSM done: verify_ssm_done
- */
-static void
-verify (FpDevice *device)
-{
-  FpiDeviceBroadcom *self = FPI_DEVICE_BROADCOM (device);
-
-  self->session_id = 0;
-  self->verify_match_result = -1;
-  g_clear_error (&self->task_error);
-
-  self->task_ssm = fpi_ssm_new_full (device, verify_ssm_run_state, BCM_VERIFY_NUM_STATES, BCM_VERIFY_NUM_STATES, "VERIFY");
-  fpi_ssm_start (self->task_ssm, verify_ssm_done);
-}
-
-/*
  * Identify flow:
  *
  *   identify()
@@ -564,8 +517,7 @@ delete_fingerprint (FpDevice *device)
 
 /******************************************************************************
  *
- *  These callbacks are used by all four operation SSMs (enroll, verify,
- *  identify, delete).
+ *  These callbacks are used by the enroll, identify, and delete SSMs.
  *  They are defined here once, before the individual operation sections.
  *
  *  Operation flow skeleton (same for every operation):
@@ -1139,210 +1091,6 @@ enroll_ssm_done (FpiSsm *ssm G_GNUC_UNUSED, FpDevice *device, GError *error)
 
 /******************************************************************************
  *
- *  Verify
- *
- *****************************************************************************/
-static void
-verify_challenge_done (FpiDeviceBroadcom *self, GError *error)
-{
-  if (error)
-    {
-      task_error (self, error, BCM_VERIFY_CLOSE);
-      return;
-    }
-
-  error = check_response_status_from_buffer (self, NULL);
-  if (error)
-    {
-      task_error (self, error, BCM_VERIFY_CLOSE);
-      return;
-    }
-
-  if (!bcm_parse_challenge_response (self->response_buffer, self->response_length, self->challenge_hash))
-    {
-      task_error (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "Failed to parse challenge"), BCM_VERIFY_CLOSE);
-      return;
-    }
-
-  fpi_ssm_next_state (self->task_ssm);
-}
-
-static void
-verify_capture_done (FpiDeviceBroadcom *self, GError *error)
-{
-  guint32 match_result, template_id;
-  BcmMessageHeader header;
-
-  fpi_device_report_finger_status_changes (FP_DEVICE (self), FP_FINGER_STATUS_NONE, FP_FINGER_STATUS_PRESENT);
-
-  if (error)
-    {
-      task_error (self, error, BCM_VERIFY_CLOSE);
-      return;
-    }
-
-  if (bcm_parse_header (self->response_buffer, self->response_length, &header))
-    {
-      /* 0x59 = template not on device; store no-match and continue to cleanup */
-      if (header.status == BCM_STATUS_REQUESTED_TEMPLATE_NOT_FOUND)
-        {
-          fp_dbg ("CAPTURE: template 0x%08x not on device (0x59); reporting no-match", self->template_id);
-          self->verify_match_result = 0;
-          fpi_ssm_next_state (self->task_ssm);
-          return;
-        }
-
-      /* Finger not read correctly; ask user to reposition and retry */
-      if (header.status == BCM_STATUS_RETRY_REMOVE || header.status == BCM_STATUS_RETRY_OFF_CENTER)
-        {
-          const FpDeviceRetry retry_code = (header.status == BCM_STATUS_RETRY_OFF_CENTER) ? FP_DEVICE_RETRY_CENTER_FINGER : FP_DEVICE_RETRY_REMOVE_FINGER;
-          fp_dbg ("CAPTURE: retry requested (status=0x%02x)", header.status);
-          fpi_device_report_finger_status_changes (FP_DEVICE (self), FP_FINGER_STATUS_NEEDED, FP_FINGER_STATUS_NONE);
-          task_error (self, fpi_device_retry_new (retry_code), BCM_VERIFY_CANCEL);
-          return;
-        }
-    }
-
-  error = check_response_status_from_buffer (self, NULL);
-  if (error)
-    {
-      task_error (self, error, BCM_VERIFY_CLOSE);
-      return;
-    }
-
-  if (!bcm_parse_capture_response (self->response_buffer, self->response_length, &match_result, &template_id))
-    {
-      task_error (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "Failed to parse CAPTURE response"), BCM_VERIFY_CLOSE);
-      return;
-    }
-
-  fp_dbg ("Verify capture: match_result=%u, template_id=0x%08x", match_result, template_id);
-
-  self->verify_match_result = match_result;
-  fpi_ssm_next_state (self->task_ssm);
-}
-
-static void
-verify_cancel_done (FpiDeviceBroadcom *self, GError *error)
-{
-  /* Ignore cancel errors */
-  g_clear_error (&error);
-  fpi_ssm_next_state (self->task_ssm);
-}
-
-static void
-verify_ssm_run_state (FpiSsm *ssm, FpDevice *device)
-{
-  FpiDeviceBroadcom *self = FPI_DEVICE_BROADCOM (device);
-  gsize length;
-  guint8 *buffer;
-  BcmCommand command = {0};
-
-  switch (fpi_ssm_get_cur_state (ssm))
-    {
-    case BCM_VERIFY_CLOSE_STALE:
-      fp_dbg ("VERIFY - state %d: CLOSE_STALE", BCM_VERIFY_CLOSE_STALE);
-      close_stale_state (self);
-      break;
-
-    case BCM_VERIFY_CANCEL_INIT:
-      fp_dbg ("VERIFY - state %d: CANCEL_INIT", BCM_VERIFY_CANCEL_INIT);
-      buffer = bcm_build_cancel_capture (&length, &command);
-      send_command (self, buffer, length, command, cancel_init_done);
-      break;
-
-
-    case BCM_VERIFY_OPEN:
-      fp_dbg ("VERIFY - state %d: OPEN", BCM_VERIFY_OPEN);
-      buffer = bcm_build_open (&length, &command);
-      send_command (self, buffer, length, command, task_open_done);
-      break;
-
-    case BCM_VERIFY_GET_CHALLENGE:
-      fp_dbg ("VERIFY - state %d: GET_CHALLENGE", BCM_VERIFY_GET_CHALLENGE);
-      {
-        /* Extract template_id from the enrolled print up front */
-        FpPrint *print = NULL;
-        GVariant *data = NULL;
-
-        fpi_device_get_verify_data (device, &print);
-        g_assert (print != NULL);
-        g_object_get (print, fpi_data_property_name, &data, NULL);
-
-        if (!data || !g_variant_is_of_type (data, G_VARIANT_TYPE (variant_type_uint32)))
-          {
-            g_clear_pointer (&data, g_variant_unref);
-            task_error (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID, "Invalid print data"), BCM_VERIFY_CLOSE);
-            return;
-          }
-
-        g_variant_get (data, variant_type_uint32, &self->template_id);
-        g_variant_unref (data);
-
-        buffer = bcm_build_get_challenge (self->session_id, &length, &command);
-        send_command (self, buffer, length, command, verify_challenge_done);
-      }
-      break;
-
-    case BCM_VERIFY_WAIT_FINGER:
-      fp_dbg ("VERIFY - state %d: WAIT_FINGER", BCM_VERIFY_WAIT_FINGER);
-      /* Poll interrupt endpoint; advance to BCM_VERIFY_CAPTURE on finger event */
-      wait_finger (self);
-      break;
-
-    case BCM_VERIFY_CAPTURE:
-      fp_dbg ("VERIFY - state %d: CAPTURE", BCM_VERIFY_CAPTURE);
-      /* Finger is on sensor; send CAPTURE. The device responds immediately. */
-      buffer = bcm_build_capture (self->session_id, &self->template_id, 1, &length, &command);
-      send_command (self, buffer, length, command, verify_capture_done);
-      break;
-
-    case BCM_VERIFY_CANCEL:
-      fp_dbg ("VERIFY - state %d: CANCEL", BCM_VERIFY_CANCEL);
-      buffer = bcm_build_cancel_capture (&length, &command);
-      send_command (self, buffer, length, command, verify_cancel_done);
-      break;
-
-    case BCM_VERIFY_CLOSE:
-      fp_dbg ("VERIFY - state %d: CLOSE", BCM_VERIFY_CLOSE);
-      buffer = bcm_build_close (self->session_id, &length, &command);
-      send_command (self, buffer, length, command, task_close_done);
-      break;
-    }
-}
-
-static void
-verify_ssm_done (FpiSsm *ssm G_GNUC_UNUSED, FpDevice *device, GError *error)
-{
-  FpiDeviceBroadcom *self = FPI_DEVICE_BROADCOM (device);
-
-  self->task_ssm = NULL;
-
-  /* verify_match_result is initialized to -1 (unset) at the start of every verify
-   * and is only written by verify_capture_done().  If the SSM completed without
-   * error but the field is still -1, a success path bypassed the capture callback
-   * entirely. Treat that as a protocol/state-machine error rather than silently
-   * reporting a false no-match, which would be indistinguishable from a real
-   * failed comparison. */
-  if (!error && self->verify_match_result == -1)
-    error = fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "Verify completed but match result was never set");
-
-  if (!error)
-    {
-      FpPrint *print = NULL;
-      fpi_device_get_verify_data (device, &print);
-      /* The device returns match_result == 1 for a positive match; anything else
-       * (0 = no-match, any unexpected value) is treated as a non-match. */
-      if (self->verify_match_result == 1)
-        fpi_device_verify_report (device, FPI_MATCH_SUCCESS, print, NULL);
-      else
-        fpi_device_verify_report (device, FPI_MATCH_FAIL, NULL, NULL);
-    }
-  fpi_device_verify_complete (device, error);
-}
-
-/******************************************************************************
- *
  *  Identify: single CAPTURE with all N template IDs (on-device 1:N matching)
  *
  *  The driver sends one CAPTURE containing all enrolled template IDs
@@ -1391,12 +1139,24 @@ identify_capture_done (FpiDeviceBroadcom *self, GError *error)
       return;
     }
 
-  /* 0x59 = none of the templates found on device; store no-match and clean up */
-  if (bcm_parse_header (self->response_buffer, self->response_length, &header) && header.status == BCM_STATUS_REQUESTED_TEMPLATE_NOT_FOUND)
+  if (bcm_parse_header (self->response_buffer, self->response_length, &header))
     {
-      fp_dbg ("CAPTURE: gallery templates not on device (0x59); reporting no-match");
-      fpi_ssm_next_state (self->task_ssm);
-      return;
+      if (header.status == BCM_STATUS_REQUESTED_TEMPLATE_NOT_FOUND)
+        {
+          fp_dbg ("CAPTURE: gallery templates not on device (0x59); reporting no-match");
+          fpi_ssm_next_state (self->task_ssm);
+          return;
+        }
+
+      if (header.status == BCM_STATUS_RETRY_REMOVE || header.status == BCM_STATUS_RETRY_OFF_CENTER)
+        {
+          const FpDeviceRetry retry_code = (header.status == BCM_STATUS_RETRY_OFF_CENTER) ? FP_DEVICE_RETRY_CENTER_FINGER : FP_DEVICE_RETRY_REMOVE_FINGER;
+
+          fp_dbg ("CAPTURE: retry requested (status=0x%02x)", header.status);
+          fpi_device_report_finger_status_changes (FP_DEVICE (self), FP_FINGER_STATUS_NEEDED, FP_FINGER_STATUS_NONE);
+          task_error (self, fpi_device_retry_new (retry_code), BCM_IDENTIFY_CANCEL);
+          return;
+        }
     }
 
   error = check_response_status_from_buffer (self, NULL);
@@ -2092,7 +1852,6 @@ fpi_device_broadcom_class_init (FpiDeviceBroadcomClass *klass)
   device_class->open = device_open;
   device_class->close = device_close;
   device_class->enroll = enroll;
-  device_class->verify = verify;
   device_class->identify = identify;
   device_class->delete = delete_fingerprint;
 
