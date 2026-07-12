@@ -5,7 +5,7 @@
  *
  * Reverse-engineered from the proprietary TOD plugin.
  * Supports Broadcom ControlVault 3 (BCM5882/Citadel) USB fingerprint sensors
- * with PIDs 0x5842-0x5845.
+ * with PIDs 0x5840-0x5845.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -71,6 +71,8 @@ G_DECLARE_FINAL_TYPE (FpiDeviceBroadcom, fpi_device_broadcom, FPI, DEVICE_BROADC
 
 /* Working PIDs at the time of writing */
 static const FpIdEntry id_table[] = {
+  {.vid = BCM_USB_VID, .pid = 0x5840},
+  {.vid = BCM_USB_VID, .pid = 0x5841},
   {.vid = BCM_USB_VID, .pid = 0x5842},
   {.vid = BCM_USB_VID, .pid = 0x5843},
   {.vid = BCM_USB_VID, .pid = 0x5844},
