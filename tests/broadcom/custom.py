@@ -31,54 +31,69 @@ assert d.get_driver() == "broadcom"
 assert not d.has_feature(FPrint.DeviceFeature.CAPTURE)
 assert d.has_feature(FPrint.DeviceFeature.IDENTIFY)
 assert d.has_feature(FPrint.DeviceFeature.VERIFY)
-assert d.has_feature(FPrint.DeviceFeature.STORAGE)           # list stub + delete registered
-assert d.has_feature(FPrint.DeviceFeature.STORAGE_DELETE)    # sends DELETE_OBJECT to device
+assert not d.has_feature(FPrint.DeviceFeature.DUPLICATES_CHECK)
+assert d.has_feature(FPrint.DeviceFeature.STORAGE)
+assert not d.has_feature(FPrint.DeviceFeature.STORAGE_LIST)
+assert d.has_feature(FPrint.DeviceFeature.STORAGE_DELETE)
+assert not d.has_feature(FPrint.DeviceFeature.STORAGE_CLEAR)
 
 d.open_sync()
-
-template = FPrint.Print.new(d)
 
 def enroll_progress(*args):
     print('enroll progress: ' + str(args))
 
+def enroll_finger(finger):
+    template = FPrint.Print.new(d)
+    template.set_finger(finger)
+    print("enrolling", finger)
+    assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
+    enrolled = d.enroll_sync(template, None, enroll_progress, None)
+    assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
+    print("enroll done:", enrolled)
+    return enrolled
+
 def identify_done(dev, res):
-    global identified
+    global identified, identify_match
+
     identified = True
     identify_match, identify_print = dev.identify_finish(res)
-    print('identification_done: ', identify_match, identify_print)
+    print('identification_done. match:', identify_match,
+          'print:', identify_print)
     assert identify_match is not None
+    assert identify_print is not None
     assert identify_match.equal(identify_print)
 
-# Enroll
-print("enrolling")
-assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
-p = d.enroll_sync(template, None, enroll_progress, None)
-assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
-print("enroll done")
+# Enroll, verify, identify, delete. Broadcom cannot list or clear storage; the
+# serialized print carries a device-side template ID, not uploadable template data.
+enrolled = enroll_finger(FPrint.Finger.LEFT_INDEX)
 
-# Verify
-print("verifying")
+print("verifying enrolled finger")
 assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
-verify_res, verify_print = d.verify_sync(p)
+verify_res, verify_print = d.verify_sync(enrolled)
 assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
-print("verify done")
+print("verify done:", verify_res, verify_print)
 assert verify_res == True
+assert verify_print is not None
+assert verify_print.equal(enrolled)
 
-# Identify (async, like goodixmoc test)
 identified = False
-deserialized_prints = [FPrint.Print.deserialize(p.serialize())]
-assert deserialized_prints[0].equal(p)
+identify_match = None
+deserialized_prints = [FPrint.Print.deserialize(enrolled.serialize())]
+assert deserialized_prints[-1].equal(enrolled)
 
 print('async identifying')
 d.identify(deserialized_prints, callback=identify_done)
-del deserialized_prints
-
 while not identified:
     ctx.iteration(True)
+del deserialized_prints
+
+assert identify_match.equal(enrolled)
 
 print("deleting")
-d.delete_print_sync(p)
+d.delete_print_sync(enrolled)
 print("delete done")
+
+del enrolled
 
 d.close_sync()
 
