@@ -47,9 +47,9 @@ G_DECLARE_FINAL_TYPE (FpiDeviceBroadcom, fpi_device_broadcom, FPI, DEVICE_BROADC
 #define BCM_FW_VERSION_STRICT 1
 
 /* USB endpoints */
-#define BCM_EP_OUT (1 | FPI_USB_ENDPOINT_OUT)          // 0x01 - bulk OUT
-#define BCM_EP_IN (1 | FPI_USB_ENDPOINT_IN)            // 0x81 - bulk IN
-#define BCM_EP_INTERRUPT (5 | FPI_USB_ENDPOINT_IN)     // 0x85 - interrupt IN
+#define BCM_EP_OUT (1 | FPI_USB_ENDPOINT_OUT)          /* 0x01 - bulk OUT */
+#define BCM_EP_IN (1 | FPI_USB_ENDPOINT_IN)            /* 0x81 - bulk IN */
+#define BCM_EP_INTERRUPT (5 | FPI_USB_ENDPOINT_IN)     /* 0x85 - interrupt IN */
 
 /* Timeouts in ms.
  * BCM_COMMAND_TIMEOUT / BCM_DATA_TIMEOUT are kept short (5 s) so that when the
@@ -85,10 +85,10 @@ static const FpIdEntry id_table[] = {
 
 /* Response status codes (u32 LE at offset 20) */
 #define BCM_STATUS_OK 0x00000000
-#define BCM_STATUS_SESSION_STUCK 0x00000017         // OPEN: session-ID pool exhausted / stale sessions left behind
+#define BCM_STATUS_SESSION_STUCK 0x00000017         /* OPEN: session-ID pool exhausted / stale sessions left behind */
 #define BCM_STATUS_FAILED 0x00000047
-#define BCM_STATUS_RETRY_REMOVE 0x000000a4          // finger not read correctly - remove and retry
-#define BCM_STATUS_RETRY_OFF_CENTER 0x00000089      // off-center or finger moved - center finger
+#define BCM_STATUS_RETRY_REMOVE 0x000000a4          /* finger not read correctly - remove and retry */
+#define BCM_STATUS_RETRY_OFF_CENTER 0x00000089      /* off-center or finger moved - center finger */
 #define BCM_STATUS_DELETE_TEMPLATE_NOT_FOUND 0x0000001b
 #define BCM_STATUS_REQUESTED_TEMPLATE_NOT_FOUND 0x00000059
 
@@ -115,13 +115,13 @@ static const FpIdEntry id_table[] = {
 
 /* Enroll SSM - each operation opens/closes its own protocol session */
 typedef enum {
-  BCM_ENROLL_CLOSE_STALE = 0, // CLOSE any cached stale session from a previous crash
-  BCM_ENROLL_CANCEL_INIT, // send CANCEL_CAPTURE to clear any stale capture state
+  BCM_ENROLL_CLOSE_STALE = 0, /* CLOSE any cached stale session from a previous crash */
+  BCM_ENROLL_CANCEL_INIT, /* send CANCEL_CAPTURE to clear any stale capture state */
   BCM_ENROLL_OPEN,
   BCM_ENROLL_START,
   BCM_ENROLL_GET_CHALLENGE,
-  BCM_ENROLL_WAIT_FINGER, // poll interrupt endpoint until status=3 finger event
-  BCM_ENROLL_UPDATE, // send ENROLL_UPDATE after finger event; device responds immediately
+  BCM_ENROLL_WAIT_FINGER, /* poll interrupt endpoint until status=3 finger event */
+  BCM_ENROLL_UPDATE, /* send ENROLL_UPDATE after finger event; device responds immediately */
   BCM_ENROLL_COMMIT,
   BCM_ENROLL_CLOSE,
   BCM_ENROLL_NUM_STATES,
@@ -130,12 +130,12 @@ typedef enum {
 /* Identify SSM - sends all N template IDs in a single CAPTURE command;
  * device performs on-device 1:N matching and returns the matched template. */
 typedef enum {
-  BCM_IDENTIFY_CLOSE_STALE = 0, // CLOSE any cached stale session from a previous crash
-  BCM_IDENTIFY_CANCEL_INIT, // clear any stale capture state
+  BCM_IDENTIFY_CLOSE_STALE = 0, /* CLOSE any cached stale session from a previous crash */
+  BCM_IDENTIFY_CANCEL_INIT, /* clear any stale capture state */
   BCM_IDENTIFY_OPEN,
   BCM_IDENTIFY_GET_CHALLENGE,
   BCM_IDENTIFY_WAIT_FINGER,
-  BCM_IDENTIFY_CAPTURE, // single CAPTURE with all template IDs
+  BCM_IDENTIFY_CAPTURE, /* single CAPTURE with all template IDs */
   BCM_IDENTIFY_CANCEL,
   BCM_IDENTIFY_CLOSE,
   BCM_IDENTIFY_NUM_STATES,
@@ -143,10 +143,10 @@ typedef enum {
 
 /* Delete SSM - opens a session, sends DELETE_OBJECT, closes. */
 typedef enum {
-  BCM_DELETE_CLOSE_STALE = 0, // CLOSE any cached stale session from a previous crash
-  BCM_DELETE_CANCEL_INIT, // clear any stale capture state
+  BCM_DELETE_CLOSE_STALE = 0, /* CLOSE any cached stale session from a previous crash */
+  BCM_DELETE_CANCEL_INIT, /* clear any stale capture state */
   BCM_DELETE_OPEN,
-  BCM_DELETE_DELETE, // send DELETE_OBJECT with the template_id
+  BCM_DELETE_DELETE, /* send DELETE_OBJECT with the template_id */
   BCM_DELETE_CLOSE,
   BCM_DELETE_NUM_STATES,
 } BcmDeleteState;
@@ -191,11 +191,11 @@ struct _FpiDeviceBroadcom
   /* Stashed error for the close-on-error path */
   GError  *task_error;
 
-  FpPrint *identify_match; // matched template (NULL = no match)
-  FpPrint *identify_scan; // new scan print (NULL = no match)
+  FpPrint *identify_match; /* matched template (NULL = no match) */
+  FpPrint *identify_scan; /* new scan print (NULL = no match) */
 
   guint    open_retry_count;
-  guint    blind_close_index; // index into BCM_SESSION_POOL during blind recovery
+  guint    blind_close_index; /* index into BCM_SESSION_POOL during blind recovery */
 
   /* Session cache fd. Held open with LOCK_EX while session is active.
    * Released (and file unlinked) on session close. OS releases lock on
@@ -335,7 +335,7 @@ probe (FpDevice *device)
       goto release;
     }
 
-  // AAI (Application Image) version check.
+  /* AAI (Application Image) version check. */
   fp_info ("Broadcom AAI firmware version %08u", firmware_version);
   if (firmware_version < BCM_MIN_FW_VERSION)
     {
@@ -627,7 +627,7 @@ open_stale_close_done (FpiDeviceBroadcom *self, GError *error)
   g_clear_error (&error);
 
   self->session_id = 0;
-  // Jump to CANCEL_INIT (state 1), skipping CLOSE_STALE (state 0)
+  /* Jump to CANCEL_INIT (state 1), skipping CLOSE_STALE (state 0) */
   fpi_ssm_jump_to_state (self->task_ssm, 1);
 }
 
@@ -650,7 +650,7 @@ open_blind_close_done (FpiDeviceBroadcom *self, GError *error)
     {
       fp_dbg ("Session pool sweep complete; retrying OPEN");
       self->session_id = 0;
-      // Jump to CANCEL_INIT (state 1), skipping CLOSE_STALE (state 0)
+      /* Jump to CANCEL_INIT (state 1), skipping CLOSE_STALE (state 0) */
       fpi_ssm_jump_to_state (self->task_ssm, 1);
       return;
     }
@@ -749,7 +749,7 @@ task_open_done (FpiDeviceBroadcom *self, GError *error)
 static void
 task_close_done (FpiDeviceBroadcom *self, GError *error)
 {
-  // Any transport-level errors?
+  /* Any transport-level errors? */
   if (error)
     {
       if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
@@ -761,7 +761,7 @@ task_close_done (FpiDeviceBroadcom *self, GError *error)
     }
   else
     {
-      // We may still have protocol-level errors.
+      /* We may still have protocol-level errors. */
       error = check_response_status_from_buffer (self, NULL);
       if (error)
         {
@@ -1733,7 +1733,7 @@ send_command (FpiDeviceBroadcom *self, guint8 *buffer, const gsize length, const
 
   FpDevice *device = FP_DEVICE (self);
 
-  // Guard against forbidden commands that crash the device firmware.
+  /* Guard against forbidden commands that crash the device firmware. */
   if (command.id == BCM_COMMAND_ENUMERATE_OBJECTS_DIRECT)
     {
       GError *error;
@@ -1770,7 +1770,7 @@ check_response_status_from_header (const FpiDeviceBroadcom *self, const BcmMessa
 
   if (header->status != BCM_STATUS_OK && header->status != BCM_STATUS_RETRY_REMOVE && header->status != BCM_STATUS_RETRY_OFF_CENTER)
     {
-      // Dump response buffer to log in case of error:
+      /* Dump response buffer to log in case of error. */
       fp_warn ("Error response for command 0x%02x (status=0x%08x), header dump:", header->command_id, header->status);
       for (gsize i = 0; i < BCM_MESSAGE_HEADER_SIZE && i < self->response_length; i += 4)
         {
@@ -1856,8 +1856,11 @@ fpi_device_broadcom_class_init (FpiDeviceBroadcomClass *klass)
   device_class->delete = delete_fingerprint;
 
   fpi_device_class_auto_initialize_features (device_class);
-  // We support on-device delete (STORAGE_DELETE is auto-set) but cannot list on-device templates (ENUMERATE_OBJECTS requires MGMT mode).
-  // Manually set STORAGE so fprintd calls our delete vfunc during DeleteEnrolledFinger, WITHOUT setting STORAGE_LIST which would trigger
-  // post-verify reconciliation that deletes every locally-stored print not returned by list().
+  /* We support on-device delete (STORAGE_DELETE is auto-set) but cannot list
+   * on-device templates (ENUMERATE_OBJECTS requires MGMT mode). Manually set
+   * STORAGE so fprintd calls our delete vfunc during DeleteEnrolledFinger,
+   * WITHOUT setting STORAGE_LIST which would trigger post-verify
+   * reconciliation that deletes every locally-stored print not returned by
+   * list(). */
   device_class->features |= FP_DEVICE_FEATURE_STORAGE;
 }

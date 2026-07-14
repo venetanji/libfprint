@@ -20,7 +20,7 @@
 
 #pragma once
 
-// The commands
+/* The commands */
 #define BCM_CMD_OPEN ((BcmCommand){ "OPEN",           0x02 })
 #define BCM_CMD_CLOSE ((BcmCommand){ "CLOSE",          0x04 })
 #define BCM_CMD_DELETE_OBJECT ((BcmCommand){ "DELETE_OBJECT",  0x0a })
@@ -32,36 +32,38 @@
 #define BCM_CMD_ENROLL_COMMIT ((BcmCommand){ "ENROLL_COMMIT",  0x6e })
 #define BCM_CMD_START_ENROLL ((BcmCommand){ "START_ENROLL",   0x8a })
 
-// Header constants
+/* Header constants */
 #define BCM_MSG_VERSION 1
 #define BCM_MSG_PARAM 2
 
-// Credential type constant
+/* Credential type constant */
 #define BCM_CREDENTIAL_TYPE 0x44
 
-// Message types (u16 LE at offset 10)
+/* Message types (u16 LE at offset 10) */
 #define BCM_MSG_SIMPLE_REQ 0x0040
 #define BCM_MSG_EXT_REQ 0x0042
-// Response types are not used right now. They are included in responses and could be validated against, but
-// length + status + tlv validation is enough for now.
+/* Response types are not used right now. They are included in responses and
+ * could be validated against, but length + status + tlv validation is enough
+ * for now. */
 #define BCM_MSG_SIMPLE_RSP 0x0140
 #define BCM_MSG_EXT_RSP 0x0142
 
-// Capture parameters
+/* Capture parameters */
 #define BCM_CAPTURE_MODE 0x48
 #define BCM_CAPTURE_QUALITY 0x53e2
 
-// Protocol constants
+/* Protocol constants */
 #define BCM_MESSAGE_HEADER_SIZE 36
 #define BCM_MESSAGE_DATA_OFFSET 44
-#define BCM_HASH_SIZE 20             // SHA-1
+#define BCM_HASH_SIZE 20             /* SHA-1 */
 #define BCM_INTERRUPT_SIZE 8
 
 /**
  * Outgoing message builders - each returns a g_malloc'd buffer.
  * Caller must g_free() the returned buffer.
  */
-// Command struct. Bundles the wire byte and human-readable name together for logging purposes.
+/* Command struct. Bundles the wire byte and human-readable name together for
+ * logging purposes. */
 typedef struct
 {
   const gchar *name;
@@ -103,7 +105,7 @@ guint8 *bcm_build_cancel_capture (gsize      *out_length,
  * Incoming message parsers. Returns true on success
  */
 
-// Parsed message header
+/* Parsed message header */
 typedef struct
 {
   guint32 version;
@@ -115,7 +117,7 @@ typedef struct
   guint32 status;
 } BcmMessageHeader;
 
-// Parsed interrupt notification
+/* Parsed interrupt notification */
 typedef struct
 {
   guint32 status;

@@ -110,10 +110,10 @@ bcm_build_open (gsize *out_length, BcmCommand *out_command)
   fpi_byte_writer_init_with_size (&w, length, TRUE);
   append_tlv_header (&w, length, BCM_CMD_OPEN.id, BCM_MSG_SIMPLE_REQ, 0, 52);
   append_tlv_u32 (&w, 0, BCM_CREDENTIAL_TYPE);
-  //myAppId and myUserId are hardcoded
+  /* myAppId and myUserId are hardcoded. */
   append_tlv_byte_blob (&w, 1, (const guint8 *) "myAppID", 7);
   append_tlv_byte_blob (&w, 1, (const guint8 *) "myUserID", 8);
-  append_tlv_u32_array (&w, 1, NULL, 0); //Empty array => len==0
+  append_tlv_u32_array (&w, 1, NULL, 0); /* Empty array => len==0 */
 
   *out_length = length;
   return fpi_byte_writer_reset_and_get_data (&w);
@@ -165,7 +165,7 @@ bcm_build_delete_object (const guint32 session_id, const guint32 template_id, gs
   append_tlv_header (&w, length, BCM_CMD_DELETE_OBJECT.id, BCM_MSG_EXT_REQ, session_id, 32);
   append_tlv_u32 (&w, 0, session_id);
   append_tlv_u32 (&w, 0, template_id);
-  append_tlv_u32_array (&w, 2, NULL, 0); //Empty array => len==0
+  append_tlv_u32_array (&w, 2, NULL, 0); /* Empty array => len==0 */
 
   *out_length = length;
   return fpi_byte_writer_reset_and_get_data (&w);
@@ -215,8 +215,8 @@ bcm_build_get_challenge (const guint32 session_id, gsize *out_length, BcmCommand
   fpi_byte_writer_init_with_size (&w, length, TRUE);
   append_tlv_header (&w, length, BCM_CMD_GET_CHALLENGE.id, BCM_MSG_EXT_REQ, session_id, 36);
   append_tlv_u32 (&w, 0, session_id);
-  append_tlv_u32 (&w, 0, 2); // purpose
-  append_tlv_u32 (&w, 0, 0x23); // hash_algo = SHA-1
+  append_tlv_u32 (&w, 0, 2);    /* purpose */
+  append_tlv_u32 (&w, 0, 0x23); /* hash_algo = SHA-1 */
 
   *out_length = length;
   return fpi_byte_writer_reset_and_get_data (&w);
@@ -243,7 +243,7 @@ bcm_build_enroll_update (const guint32 session_id, const guint8 *hash, gsize *ou
   append_tlv_header (&w, length, BCM_CMD_ENROLL_UPDATE.id, BCM_MSG_SIMPLE_REQ, session_id, 48);
   append_tlv_u32 (&w, 0, session_id);
   append_tlv_byte_blob (&w, 0, hash, BCM_HASH_SIZE);
-  append_tlv_u32_array (&w, 2, NULL, 0); //scan_type. Empty array => len==0
+  append_tlv_u32_array (&w, 2, NULL, 0); /* scan_type. Empty array => len==0 */
 
   *out_length = length;
   return fpi_byte_writer_reset_and_get_data (&w);
@@ -272,9 +272,9 @@ bcm_build_enroll_commit (const guint32 session_id, const guint8 *hash, gsize *ou
   append_tlv_header (&w, length, BCM_CMD_ENROLL_COMMIT.id, BCM_MSG_SIMPLE_REQ, session_id, 64);
   append_tlv_u32 (&w, 0, session_id);
   append_tlv_byte_blob (&w, 0, hash, BCM_HASH_SIZE);
-  append_tlv_u32_array (&w, 2, NULL, 0); //scan_type. Empty array => len==0
+  append_tlv_u32_array (&w, 2, NULL, 0); /* scan_type. Empty array => len==0 */
   append_tlv_u32_array (&w, 2, NULL, 0);
-  append_tlv_u32_array (&w, 3, NULL, 0); //commit_flag
+  append_tlv_u32_array (&w, 3, NULL, 0); /* commit_flag */
 
   *out_length = length;
   return fpi_byte_writer_reset_and_get_data (&w);
@@ -315,7 +315,7 @@ bcm_build_capture (const guint32 session_id, const guint32 *template_ids, const 
   append_tlv_u32 (&w, 0, session_id);
   append_tlv_u32 (&w, 0, BCM_CAPTURE_MODE);
   append_tlv_u32 (&w, 0, BCM_CAPTURE_QUALITY);
-  append_tlv_u32 (&w, 0, 0); // reserved
+  append_tlv_u32 (&w, 0, 0); /* reserved */
 
   /* TLV[4]: tag=2, len=N*4, followed by N template IDs as u32 LE */
   append_tlv_u32_array (&w, 2, template_ids, n_templates);
@@ -447,7 +447,7 @@ bcm_parse_version_response (const guint8 *data, const gsize length, guint32 *fw_
   version_blob[version_blob_length] = '\0';
   fp_dbg ("GET_VERSION response:\n%s", version_blob);
 
-  //Application image firmware version
+  /* Application image firmware version */
   *fw_version = parse_version_field (version_blob, version_blob_length, "USH_REL_UPGRADE_VER:");
 
   if (*fw_version == 0)
@@ -457,7 +457,7 @@ bcm_parse_version_response (const guint8 *data, const gsize length, guint32 *fw_
     }
   fp_dbg ("GET_VERSION: FW version %u", *fw_version);
 
-  //Secondary boot image version
+  /* Secondary boot image version */
   *sbi_version = parse_version_field (version_blob, version_blob_length, "USH_SBI_MINOR_VER:");
   fp_dbg ("GET_VERSION: SBI version %u%s", *sbi_version, *sbi_version == 0 ? " (unknown)" : "");
 
@@ -647,17 +647,17 @@ append_tlv_header (FpiByteWriter *w, const guint32 total_len, const guint8 cmd_i
 {
   gboolean ok = TRUE;
 
-  ok &= fpi_byte_writer_put_uint32_le (w, BCM_MSG_VERSION); // 0  version
-  ok &= fpi_byte_writer_put_uint32_le (w, total_len);       // 4  total_len
-  ok &= fpi_byte_writer_put_uint8 (w, cmd_id);              // 8  cmd_id
-  ok &= fpi_byte_writer_put_uint8 (w, 0);                   // 9  reserved
-  ok &= fpi_byte_writer_put_uint16_le (w, msg_type);        // 10 msg_type
-  ok &= fpi_byte_writer_put_uint32_le (w, BCM_MSG_PARAM);   // 12 param
-  ok &= fpi_byte_writer_put_uint32_le (w, session_id);      // 16 session
-  ok &= fpi_byte_writer_fill (w, 0, 16);                    // 20 status + reserved[12]
-  ok &= fpi_byte_writer_put_uint32_le (w, 0);               // 36 data pad
-  ok &= fpi_byte_writer_put_uint32_le (w, data_len);        // 40 data_len
-  // The writer is now at offset 44, the first TLV.
+  ok &= fpi_byte_writer_put_uint32_le (w, BCM_MSG_VERSION); /* 0  version */
+  ok &= fpi_byte_writer_put_uint32_le (w, total_len);       /* 4  total_len */
+  ok &= fpi_byte_writer_put_uint8 (w, cmd_id);              /* 8  cmd_id */
+  ok &= fpi_byte_writer_put_uint8 (w, 0);                   /* 9  reserved */
+  ok &= fpi_byte_writer_put_uint16_le (w, msg_type);        /* 10 msg_type */
+  ok &= fpi_byte_writer_put_uint32_le (w, BCM_MSG_PARAM);   /* 12 param */
+  ok &= fpi_byte_writer_put_uint32_le (w, session_id);      /* 16 session */
+  ok &= fpi_byte_writer_fill (w, 0, 16);                    /* 20 status + reserved[12] */
+  ok &= fpi_byte_writer_put_uint32_le (w, 0);               /* 36 data pad */
+  ok &= fpi_byte_writer_put_uint32_le (w, data_len);        /* 40 data_len */
+  /* The writer is now at offset 44, the first TLV. */
 
   g_assert (ok);
 }
