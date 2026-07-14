@@ -105,7 +105,7 @@ process.wait()
 # Run capture
 # https://osqa-ask.wireshark.org/questions/53919/how-can-i-precisely-specify-a-usb-device-to-capture-with-tshark/
 
-print(f'### Reseting USB port (as descriptors could be missing in the dump otherwise)')
+print(f'### Resetting USB port (as descriptors could be missing in the dump otherwise)')
 usb_device.open()
 usb_device.reset()
 usb_device.close()
@@ -151,13 +151,25 @@ def capture_test(cmd, capture_file, prompt):
     except ChildProcessError:
         pass
 
-    # Filter the capture
-    print(f'\n### Saving USB capture as test case {test_name}')
-    args = ['tshark', '-r', unfiltered_cap_path,
-            '-Y', f'usb.bus_id == {bus_num} and usb.device_address == {device_num}',
-            '-w', os.path.join(test_dir, capture_file)]
-    with subprocess.Popen(args, stderr=subprocess.DEVNULL) as filter_process:
-        filter_process.wait()
+# Filter the capture
+# If the driver test directory contains an 'endpoints_filter' file, its content
+# is appended to the tshark filter to restrict capture to specific endpoints.
+# This is needed for multi-interface devices where only one interface should be
+# replayed (e.g. a combined fingerprint+smartcard reader).
+print(f'\n### Saving USB capture as test case {test_name}')
+display_filter = f'usb.bus_id == {bus_num} and usb.device_address == {device_num}'
+endpoints_filter_path = os.path.join(test_dir, 'endpoints_filter')
+if os.path.exists(endpoints_filter_path):
+    with open(endpoints_filter_path) as f:
+        ep_filter = f.read().strip()
+    if ep_filter:
+        display_filter += f' and ({ep_filter})'
+        print(f'### Applying endpoint filter: {ep_filter}')
+args = ['tshark', '-r', unfiltered_cap_path,
+        '-Y', display_filter,
+        '-w', os.path.join(test_dir, capture_file)]
+with subprocess.Popen(args, stderr=subprocess.DEVNULL) as filter_process:
+    filter_process.wait()
 
 def t_waitpid(pid, timeout):
     timeout = time.time() + timeout
