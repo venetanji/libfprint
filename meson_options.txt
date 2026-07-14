@@ -34,3 +34,7 @@ option('installed-tests',
        description: 'Whether to install the installed tests',
        type: 'boolean',
        value: true)
+option('bcm-fw-version-strict',
+       description: 'Broadcom driver: fail probe (hide device from PAM) when firmware is below minimum version. Set to false to warn and continue instead.',
+       type: 'boolean',
+       value: true)
