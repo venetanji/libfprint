@@ -31,8 +31,10 @@ struct _FpiDeviceEgisEtu905
 {
   FpDevice   parent;
   FpiSsm    *task_ssm;
+  FpiSsm    *cancel_ssm;
   GPtrArray *enrolled_ids;
   gint       max_enroll_stages;
+  gboolean   identify_started;  /* TRUE after cmd_sensor_identify is sent */
 };
 
 G_DEFINE_TYPE (FpiDeviceEgisEtu905, fpi_device_egis_etu905, FP_TYPE_DEVICE);
@@ -1297,22 +1299,107 @@ egis_etu905_identify_check_cb (FpDevice *device,
   fpi_ssm_next_state (self->task_ssm);
 }
 
+static void egis_etu905_cancel_run_state (FpiSsm   *ssm,
+                                          FpDevice *device);
+
 static void
-egis_etu905_identify_send_cancel_result_cb (FpDevice *device,
-                                            guchar   *buffer_in,
-                                            gsize     length_in,
-                                            GError   *error)
+egis_etu905_cancel_ssm_done (FpiSsm   *ssm,
+                             FpDevice *device,
+                             GError   *error)
+{
+  FpiDeviceEgisEtu905 *self = FPI_DEVICE_EGIS_ETU905 (device);
+
+  self->cancel_ssm = NULL;
+  fpi_device_cancel_complete (device, error);
+}
+
+static void
+egis_etu905_cancel_next_state_cb (FpDevice *device,
+                                  guchar   *buffer_in,
+                                  gsize     length_in,
+                                  GError   *error)
 {
   FpiDeviceEgisEtu905 *self = FPI_DEVICE_EGIS_ETU905 (device);
 
   if (error)
-    {
-      fpi_ssm_mark_failed (self->task_ssm, error);
-      return;
-    }
+    fpi_ssm_mark_failed (self->cancel_ssm, error);
+  else
+    fpi_ssm_next_state (self->cancel_ssm);
+}
 
-  /* Advance to complete state */
-  fpi_ssm_next_state (self->task_ssm);
+static void
+egis_etu905_cancel_run_state (FpiSsm   *ssm,
+                              FpDevice *device)
+{
+  FpiDeviceEgisEtu905 *self = FPI_DEVICE_EGIS_ETU905 (device);
+
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case CANCEL_SENSOR_RESET:
+      /* Reset sensor to ensure device is in a clean state.
+       * Use NULL cancellable to ensure this command reaches the device. */
+      egis_etu905_exec_cmd_full (device, cmd_sensor_reset,
+                                 G_N_ELEMENTS (cmd_sensor_reset),
+                                 egis_etu905_cancel_next_state_cb,
+                                 NULL);
+      break;
+
+    case CANCEL_SEND_CANCEL:
+      /* Send cmd_identify_cancel to trigger firmware template update.
+       * Only send if identify was actually started (cmd_sensor_identify was sent).
+       * Use NULL cancellable to ensure this command reaches the device. */
+      if (self->identify_started)
+        {
+          egis_etu905_exec_cmd_full (device, cmd_identify_cancel,
+                                     G_N_ELEMENTS (cmd_identify_cancel),
+                                     egis_etu905_cancel_next_state_cb,
+                                     NULL);
+        }
+      else
+        {
+          fpi_ssm_next_state (ssm);
+        }
+      break;
+
+    case CANCEL_SEND_CANCEL_RESULT:
+      /* Retrieve the cancel result after template update is triggered.
+       * Only send if identify was actually started.
+       * Use NULL cancellable to ensure this command reaches the device. */
+      if (self->identify_started)
+        {
+          egis_etu905_exec_cmd_full (device, cmd_identify_cancel_result,
+                                     G_N_ELEMENTS (cmd_identify_cancel_result),
+                                     egis_etu905_cancel_next_state_cb,
+                                     NULL);
+        }
+      else
+        {
+          fpi_ssm_next_state (ssm);
+        }
+      break;
+    }
+}
+
+static void
+egis_etu905_cancel (FpDevice *device)
+{
+  FpiDeviceEgisEtu905 *self = FPI_DEVICE_EGIS_ETU905 (device);
+  FpiDeviceAction action = fpi_device_get_current_action (device);
+
+  fp_dbg ("Cancelling action %d", action);
+
+  if (action == FPI_DEVICE_ACTION_IDENTIFY ||
+      action == FPI_DEVICE_ACTION_VERIFY)
+    {
+      g_assert (self->cancel_ssm == NULL);
+      self->cancel_ssm = fpi_ssm_new (device, egis_etu905_cancel_run_state, CANCEL_STATES);
+      fpi_ssm_start (self->cancel_ssm, egis_etu905_cancel_ssm_done);
+    }
+  else
+    {
+      /* No cleanup command needed for this action. */
+      fpi_device_cancel_complete (device, NULL);
+    }
 }
 
 static void
@@ -1347,6 +1434,7 @@ egis_etu905_identify_run_state (FpiSsm   *ssm,
       break;
 
     case IDENTIFY_SENSOR_IDENTIFY:
+      self->identify_started = TRUE;
       egis_etu905_exec_cmd (device, cmd_sensor_identify, G_N_ELEMENTS (cmd_sensor_identify),
                             egis_etu905_task_ssm_next_state_cb);
       break;
@@ -1366,15 +1454,10 @@ egis_etu905_identify_run_state (FpiSsm   *ssm,
                             egis_etu905_identify_check_cb);
       break;
 
-    case IDENTIFY_SEND_CANCEL_RESULT:
-      egis_etu905_exec_cmd (device, cmd_identify_cancel_result,
-                            G_N_ELEMENTS (cmd_identify_cancel_result),
-                            egis_etu905_identify_send_cancel_result_cb);
-      break;
-
     case IDENTIFY_COMPLETE_SENSOR_RESET:
-      egis_etu905_exec_cmd (device, cmd_sensor_reset, G_N_ELEMENTS (cmd_sensor_reset),
-                            egis_etu905_task_ssm_next_state_cb);
+      egis_etu905_exec_cmd_full (device, cmd_sensor_reset, G_N_ELEMENTS (cmd_sensor_reset),
+                                 egis_etu905_task_ssm_next_state_cb,
+                                 NULL);
       break;
 
     /*
@@ -1401,6 +1484,7 @@ egis_etu905_identify (FpDevice *device)
   FpiDeviceEgisEtu905 *self = FPI_DEVICE_EGIS_ETU905 (device);
 
   g_assert (self->task_ssm == NULL);
+  self->identify_started = FALSE;
   self->task_ssm = fpi_ssm_new (device, egis_etu905_identify_run_state, IDENTIFY_STATES);
   fpi_ssm_start (self->task_ssm, egis_etu905_task_ssm_done);
 }
@@ -1641,49 +1725,6 @@ egis_etu905_close (FpDevice *device)
   g_usb_device_release_interface (fpi_device_get_usb_device (device),
                                   0, 0, &error);
   fpi_device_close_complete (device, g_steal_pointer (&error));
-}
-
-static void
-egis_etu905_cancel_done_cb (FpDevice *device,
-                            guchar   *buffer_in,
-                            gsize     length_in,
-                            GError   *error)
-{
-  fpi_device_cancel_complete (device, error);
-}
-
-static void
-egis_etu905_cancel (FpDevice *device)
-{
-  FpiDeviceAction action = fpi_device_get_current_action (device);
-
-  fp_dbg ("Cancelling action %d", action);
-
-  /* Tell the device to abort the sensor operation. The cleanup command
-   * uses no cancellable so it actually reaches the device; fpi_device_
-   * cancel_complete() is called from the callback once it finishes. */
-  if (action == FPI_DEVICE_ACTION_ENROLL)
-    {
-      egis_etu905_exec_cmd_full (device,
-                                 cmd_enroll_discard,
-                                 G_N_ELEMENTS (cmd_enroll_discard),
-                                 egis_etu905_cancel_done_cb,
-                                 NULL);
-    }
-  else if (action == FPI_DEVICE_ACTION_IDENTIFY ||
-           action == FPI_DEVICE_ACTION_VERIFY)
-    {
-      egis_etu905_exec_cmd_full (device,
-                                 cmd_identify_cancel,
-                                 G_N_ELEMENTS (cmd_identify_cancel),
-                                 egis_etu905_cancel_done_cb,
-                                 NULL);
-    }
-  else
-    {
-      /* No cleanup command needed for this action. */
-      fpi_device_cancel_complete (device, NULL);
-    }
 }
 
 static void

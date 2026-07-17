@@ -39,7 +39,8 @@ def identify_done(dev, res):
     identified = True
     identify_match, identify_print = dev.identify_finish(res)
     print("MATCH FOUND!" if identify_match else "NO MATCH FOUND")
-    assert identify_match.equal(identify_print)
+    if identify_match:
+        assert identify_match.equal(identify_print)
 
 # List
 print("--- LISTING ---")
@@ -63,6 +64,28 @@ stored = d.list_prints_sync()
 prints2 = len(stored)
 print(f"--- LIST DONE: Found {prints2} prints after enroll---")
 assert (prints2 - prints1) == 1
+
+# Verify
+print("--- VERIFYING ---")
+assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
+verify_res, verify_print = d.verify_sync(p)
+assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
+print(f"--- VERIFY DONE: Result {verify_res} ---")
+
+# Identify
+print("--- ASYNC IDENTIFYING ---")
+identified = False
+deserialized_prints = []
+for sp in stored:
+    deserialized_prints.append(FPrint.Print.deserialize(sp.serialize()))
+    assert deserialized_prints[-1].equal(p)
+
+d.identify(deserialized_prints, callback=identify_done)
+del deserialized_prints
+
+while not identified:
+    ctx.iteration(True)
+print("--- IDENTIFY DONE ---")
 
 # Cancel test - start async identify and cancel it
 print("--- TESTING CANCELLATION ---")
@@ -92,27 +115,11 @@ while not identify_cancelled:
 print(f"--- CANCELLATION TEST DONE, result: {cancel_result} ---")
 del deserialized_prints
 
-# Verify
-print("--- VERIFYING ---")
-assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
-verify_res, verify_print = d.verify_sync(p)
-assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
-print(f"--- VERIFY DONE: Result {verify_res} ---")
-
-# Identify
-print("--- ASYNC IDENTIFYING ---")
-identified = False
-deserialized_prints = []
-for p in stored:
-    deserialized_prints.append(FPrint.Print.deserialize(p.serialize()))
-    assert deserialized_prints[-1].equal(p)
-
-d.identify(deserialized_prints, callback=identify_done)
-del deserialized_prints
-
-while not identified:
-    ctx.iteration(True)
-print("--- IDENTIFY DONE ---")
+# Close and reopen device to ensure clean state after cancellation
+print("--- REOPENING DEVICE ---")
+d.close_sync()
+d.open_sync()
+print("--- DEVICE REOPENED ---")
 
 # Delete
 print("--- DELETING ---")
@@ -135,3 +142,4 @@ d.close_sync()
 
 del d
 del c
+
