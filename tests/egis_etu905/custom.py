@@ -5,7 +5,7 @@ import sys
 import gi
 
 gi.require_version('FPrint', '2.0')
-from gi.repository import FPrint, GLib
+from gi.repository import FPrint, GLib, Gio
 
 # Exit with error on any exception, included those happening in async callbacks
 sys.excepthook = lambda *args: (traceback.print_exception(*args), sys.exit(1))
@@ -63,6 +63,34 @@ stored = d.list_prints_sync()
 prints2 = len(stored)
 print(f"--- LIST DONE: Found {prints2} prints after enroll---")
 assert (prints2 - prints1) == 1
+
+# Cancel test - start async identify and cancel it
+print("--- TESTING CANCELLATION ---")
+deserialized_prints = []
+for sp in stored:
+    deserialized_prints.append(FPrint.Print.deserialize(sp.serialize()))
+
+cancellable = Gio.Cancellable()
+identify_cancelled = False
+cancel_result = None
+
+def identify_cancelled_cb(dev, res):
+    global identify_cancelled, cancel_result
+    identify_cancelled = True
+    try:
+        result = dev.identify_finish(res)
+        cancel_result = result
+    except Exception as e:
+        cancel_result = e
+        print(f"Identify cancelled with error: {e}")
+
+d.identify(deserialized_prints, cancellable=cancellable, callback=identify_cancelled_cb)
+cancellable.cancel()
+
+while not identify_cancelled:
+    ctx.iteration(True)
+print(f"--- CANCELLATION TEST DONE, result: {cancel_result} ---")
+del deserialized_prints
 
 # Verify
 print("--- VERIFYING ---")
