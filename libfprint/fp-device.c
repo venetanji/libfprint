@@ -124,6 +124,9 @@ fp_device_task_cancelled_cb (GCancellable *cancellable, FpDevice *self)
 {
   FpDevicePrivate *priv = fp_device_get_instance_private (self);
 
+  g_debug ("Task cancellable for operation %d cancelled",
+           priv->current_action);
+
   g_cancellable_cancel (priv->current_cancellable);
 }
 
