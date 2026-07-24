@@ -367,20 +367,17 @@ cmd_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
 }
 
 static void
-cmd_forget_cb (FpiUsbTransfer *transfer,
+cancel_cmd_cb (FpiUsbTransfer *transfer,
                FpDevice       *device,
                gpointer        user_data,
                GError         *error)
 {
   if (error)
-    {
-      g_warning ("Async command sending failed: %s", error->message);
-      g_error_free (error);
-    }
+    g_warning ("Sending cancel command failed: %s", error->message);
   else
-    {
-      g_debug ("Async command sent successfully");
-    }
+    g_debug ("Cancel command sent successfully");
+
+  fpi_device_cancel_complete (device, error);
 }
 
 static void
@@ -445,8 +442,7 @@ synaptics_sensor_cmd (FpiDeviceSynaptics *self,
     {
       g_assert (callback == NULL);
 
-      /* We just send and forget here. */
-      fpi_usb_transfer_submit (transfer, 1000, NULL, cmd_forget_cb, NULL);
+      fpi_usb_transfer_submit (transfer, 1000, NULL, cancel_cmd_cb, NULL);
     }
   else
     {
@@ -1458,7 +1454,8 @@ cancel (FpDevice *dev)
 {
   FpiDeviceSynaptics *self = FPI_DEVICE_SYNAPTICS (dev);
 
-  /* We just send out a cancel command and hope for the best. */
+  /* Send out a cancel command; completion (and any sending error) is
+   * reported asynchronously from cancel_cmd_cb once the transfer is done. */
   synaptics_sensor_cmd (self, -1, BMKT_CMD_CANCEL_OP, NULL, 0, NULL);
 
   /* Cancel any current interrupt transfer (resulting us to go into

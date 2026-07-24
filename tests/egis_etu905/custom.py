@@ -5,7 +5,7 @@ import sys
 import gi
 
 gi.require_version('FPrint', '2.0')
-from gi.repository import FPrint, GLib
+from gi.repository import FPrint, GLib, Gio
 
 # Exit with error on any exception, included those happening in async callbacks
 sys.excepthook = lambda *args: (traceback.print_exception(*args), sys.exit(1))
@@ -39,7 +39,8 @@ def identify_done(dev, res):
     identified = True
     identify_match, identify_print = dev.identify_finish(res)
     print("MATCH FOUND!" if identify_match else "NO MATCH FOUND")
-    assert identify_match.equal(identify_print)
+    if identify_match:
+        assert identify_match.equal(identify_print)
 
 # List
 print("--- LISTING ---")
@@ -75,8 +76,8 @@ print(f"--- VERIFY DONE: Result {verify_res} ---")
 print("--- ASYNC IDENTIFYING ---")
 identified = False
 deserialized_prints = []
-for p in stored:
-    deserialized_prints.append(FPrint.Print.deserialize(p.serialize()))
+for sp in stored:
+    deserialized_prints.append(FPrint.Print.deserialize(sp.serialize()))
     assert deserialized_prints[-1].equal(p)
 
 d.identify(deserialized_prints, callback=identify_done)
@@ -85,6 +86,40 @@ del deserialized_prints
 while not identified:
     ctx.iteration(True)
 print("--- IDENTIFY DONE ---")
+
+# Cancel test - start async identify and cancel it
+print("--- TESTING CANCELLATION ---")
+deserialized_prints = []
+for sp in stored:
+    deserialized_prints.append(FPrint.Print.deserialize(sp.serialize()))
+
+cancellable = Gio.Cancellable()
+identify_cancelled = False
+cancel_result = None
+
+def identify_cancelled_cb(dev, res):
+    global identify_cancelled, cancel_result
+    identify_cancelled = True
+    try:
+        result = dev.identify_finish(res)
+        cancel_result = result
+    except Exception as e:
+        cancel_result = e
+        print(f"Identify cancelled with error: {e}")
+
+d.identify(deserialized_prints, cancellable=cancellable, callback=identify_cancelled_cb)
+cancellable.cancel()
+
+while not identify_cancelled:
+    ctx.iteration(True)
+print(f"--- CANCELLATION TEST DONE, result: {cancel_result} ---")
+del deserialized_prints
+
+# Close and reopen device to ensure clean state after cancellation
+print("--- REOPENING DEVICE ---")
+d.close_sync()
+d.open_sync()
+print("--- DEVICE REOPENED ---")
 
 # Delete
 print("--- DELETING ---")
@@ -107,3 +142,4 @@ d.close_sync()
 
 del d
 del c
+

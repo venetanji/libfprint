@@ -55,68 +55,53 @@ G_DECLARE_FINAL_TYPE (FpiDeviceEgisEtu905, fpi_device_egis_etu905, FPI, DEVICE_E
 
 /* standard prefixes for all read/writes */
 
-static guchar egis_etu905_write_prefix[] = {'E', 'G', 'I', 'S', 0x00, 0x00, 0x00, 0x01};
-static gsize egis_etu905_write_prefix_len = sizeof (egis_etu905_write_prefix) / sizeof (egis_etu905_write_prefix[0]);
+static const guchar egis_etu905_write_prefix[] = {'E', 'G', 'I', 'S', 0x00, 0x00, 0x00, 0x01};
 
-static guchar egis_etu905_read_prefix[] = {'S', 'I', 'G', 'E', 0x00, 0x00, 0x00, 0x01};
-static gsize egis_etu905_read_prefix_len = sizeof (egis_etu905_read_prefix) / sizeof (egis_etu905_read_prefix[0]);
+static const guchar egis_etu905_read_prefix[] = {'S', 'I', 'G', 'E', 0x00, 0x00, 0x00, 0x01};
 
 
 /* hard-coded command payloads */
 
-static guchar cmd_fw_version[] = {0x00, 0x00, 0x00, 0x07, 0x50, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x0c};
-static gsize cmd_fw_version_len = sizeof (cmd_fw_version) / sizeof (cmd_fw_version[0]);
-static guchar rsp_fw_version_suffix[] = {0x90, 0x00};
-static gsize rsp_fw_version_suffix_len = sizeof (rsp_fw_version_suffix) / sizeof (rsp_fw_version_suffix[0]);
+static const guchar cmd_fw_version[] = {0x00, 0x00, 0x00, 0x07, 0x50, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x0c};
+static const guchar rsp_fw_version_suffix[] = {0x90, 0x00};
 
-static guchar cmd_init[] = {0x00, 0x00, 0x00, 0x29, 0x50, 0x81, 0x80, 0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00,
-                            0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x12, 0x00, 0x45, 0x67, 0x69, 0x73,
-                            0x46, 0x50, 0x53, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x00, 0x51, 0xc6, 0xbd, 0x71};
-static gsize cmd_init_len = sizeof (cmd_init) / sizeof (cmd_init[0]);
+static const guchar cmd_init[] = {0x00, 0x00, 0x00, 0x29, 0x50, 0x81, 0x80, 0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00,
+                                  0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x12, 0x00, 0x45, 0x67, 0x69, 0x73,
+                                  0x46, 0x50, 0x53, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x00, 0x51, 0xc6, 0xbd, 0x71};
 
-static guchar cmd_list[] = {0x00, 0x00, 0x00, 0x07, 0x50, 0x19, 0x04, 0x00, 0x00, 0x01, 0x40};
-static gsize cmd_list_len = sizeof (cmd_list) / sizeof (cmd_list[0]);
+static const guchar cmd_list[] = {0x00, 0x00, 0x00, 0x07, 0x50, 0x19, 0x04, 0x00, 0x00, 0x01, 0x40};
 
-static guchar cmd_sensor_reset[] = {0x00, 0x00, 0x00, 0x04, 0x50, 0x1a, 0x00, 0x00};
-static gsize cmd_sensor_reset_len = sizeof (cmd_sensor_reset) / sizeof (cmd_sensor_reset[0]);
+static const guchar cmd_sensor_reset[] = {0x00, 0x00, 0x00, 0x04, 0x50, 0x1a, 0x00, 0x00};
 
-static guchar cmd_sensor_check[] = {0x00, 0x00, 0x00, 0x04, 0x50, 0x17, 0x02, 0x00};
-static gsize cmd_sensor_check_len = sizeof (cmd_sensor_check) / sizeof (cmd_sensor_check[0]);
+static const guchar cmd_sensor_check[] = {0x00, 0x00, 0x00, 0x04, 0x50, 0x17, 0x02, 0x00};
 
-static guchar cmd_sensor_identify[] = {0x00, 0x00, 0x00, 0x04, 0x50, 0x17, 0x01, 0x01};
-static gsize cmd_sensor_identify_len = sizeof (cmd_sensor_identify) / sizeof (cmd_sensor_identify[0]);
+static const guchar cmd_sensor_identify[] = {0x00, 0x00, 0x00, 0x04, 0x50, 0x17, 0x01, 0x01};
 
-static guchar rsp_identify_match_suffix[] = {0x90, 0x00};
-static gsize rsp_identify_match_suffix_len = sizeof (rsp_identify_match_suffix) / sizeof (rsp_identify_match_suffix[0]);
+static const guchar rsp_identify_match_suffix[] = {0x90, 0x00};
 
-static guchar rsp_identify_notmatch_suffix[] = {0x90, 0x04};
-static gsize rsp_identify_notmatch_suffix_len = sizeof (rsp_identify_notmatch_suffix) / sizeof (rsp_identify_notmatch_suffix[0]);
+static const guchar rsp_identify_notmatch_suffix[] = {0x90, 0x04};
 
-static guchar cmd_enroll_starting[] = {0x00, 0x00, 0x00, 0x07, 0x50, 0x16, 0x01, 0x00, 0x00, 0x00, 0x20};
-static gsize cmd_enroll_starting_len = sizeof (cmd_enroll_starting) / sizeof (cmd_enroll_starting[0]);
+static const guchar cmd_enroll_starting[] = {0x00, 0x00, 0x00, 0x07, 0x50, 0x16, 0x01, 0x00, 0x00, 0x00, 0x20};
 
-static guchar cmd_sensor_start_capture[] = {0x00, 0x00, 0x00, 0x04, 0x50, 0x16, 0x02, 0x01};
-static gsize cmd_sensor_start_capture_len = sizeof (cmd_sensor_start_capture) / sizeof (cmd_sensor_start_capture[0]);
+static const guchar cmd_sensor_start_capture[] = {0x00, 0x00, 0x00, 0x04, 0x50, 0x16, 0x02, 0x01};
 
-static guchar cmd_read_capture[] = {0x00, 0x00, 0x00, 0x07, 0x50, 0x16, 0x02, 0x02, 0x00, 0x00, 0x02};
-static gsize cmd_read_capture_len = sizeof (cmd_read_capture) / sizeof (cmd_read_capture[0]);
+static const guchar cmd_read_capture[] = {0x00, 0x00, 0x00, 0x07, 0x50, 0x16, 0x02, 0x02, 0x00, 0x00, 0x02};
 
-static guchar cmd_duplicate_check[] = {0x00, 0x00, 0x00, 0x04, 0x50, 0x16, 0x05, 0x00};
-static gsize cmd_duplicate_check_len = sizeof (cmd_duplicate_check) / sizeof (cmd_duplicate_check[0]);
+static const guchar cmd_duplicate_check[] = {0x00, 0x00, 0x00, 0x04, 0x50, 0x16, 0x05, 0x00};
 
-static guchar rsp_read_success_prefix[] = {0x00, 0x00, 0x00, 0x04};
-static gsize rsp_read_success_prefix_len = sizeof (rsp_read_success_prefix) / sizeof (rsp_read_success_prefix[0]);
-static guchar rsp_read_success_suffix[] = {0x90, 0x00};
-static gsize rsp_read_success_suffix_len = sizeof (rsp_read_success_suffix) / sizeof (rsp_read_success_suffix[0]);
-static guchar rsp_read_offcenter_prefix[] = {0x00, 0x00, 0x00, 0x04};
-static gsize rsp_read_offcenter_prefix_len = sizeof (rsp_read_offcenter_prefix) / sizeof (rsp_read_offcenter_prefix[0]);
-static guchar rsp_read_offcenter_suffix[] = {0x64, 0x91};
-static gsize rsp_read_offcenter_suffix_len = sizeof (rsp_read_offcenter_suffix) / sizeof (rsp_read_offcenter_suffix[0]);
-static guchar rsp_read_dirty_prefix[] = {0x00, 0x00, 0x00, 0x02, 0x64};
-static gsize rsp_read_dirty_prefix_len = sizeof (rsp_read_dirty_prefix) / sizeof (rsp_read_dirty_prefix[0]);
+static const guchar rsp_read_success_prefix[] = {0x00, 0x00, 0x00, 0x04};
+static const guchar rsp_read_success_suffix[] = {0x90, 0x00};
+static const guchar rsp_read_offcenter_prefix[] = {0x00, 0x00, 0x00, 0x04};
+static const guchar rsp_read_offcenter_suffix[] = {0x64, 0x91};
+static const guchar rsp_read_dirty_prefix[] = {0x00, 0x00, 0x00, 0x02, 0x64};
 
-static guchar cmd_commit_starting[] = {0x00, 0x00, 0x00, 0x07, 0x50, 0x16, 0x05, 0x00, 0x00, 0x00, 0x20};
-static gsize cmd_commit_starting_len = sizeof (cmd_commit_starting) / sizeof (cmd_commit_starting[0]);
+static const guchar cmd_commit_starting[] = {0x00, 0x00, 0x00, 0x07, 0x50, 0x16, 0x05, 0x00, 0x00, 0x00, 0x20};
+
+static const guchar cmd_enroll_discard[] = {0x00, 0x00, 0x00, 0x07, 0x50, 0x16, 0x04, 0x00, 0x00, 0x00, 0x20};
+
+static const guchar cmd_identify_cancel[] = {0x00, 0x00, 0x00, 0x04, 0x50, 0x04, 0x01, 0x00};
+
+static const guchar cmd_identify_cancel_result[] = {0x00, 0x00, 0x00, 0x04, 0x50, 0x04, 0x02, 0x00};
 
 /* prefixes/suffixes and other things for dynamically created command payloads */
 
@@ -124,22 +109,15 @@ static gsize cmd_commit_starting_len = sizeof (cmd_commit_starting) / sizeof (cm
 #define EGIS_ETU905_IDENTIFY_RESPONSE_PRINT_ID_OFFSET 46
 #define EGIS_ETU905_CMD_CHECK_SEPARATOR_LENGTH 32
 
-static guchar cmd_new_print_prefix_type2[] = {0x00, 0x00, 0x00, 0x50, 0x50, 0x16, 0x03, 0x00, 0x00, 0x00, 0x49};
-static gsize cmd_new_print_prefix_type2_len = sizeof (cmd_new_print_prefix_type2) / sizeof (cmd_new_print_prefix_type2[0]);
+static const guchar cmd_new_print_prefix_type2[] = {0x00, 0x00, 0x00, 0x50, 0x50, 0x16, 0x03, 0x00, 0x00, 0x00, 0x49};
 
-static guchar cmd_delete_prefix[] = {0x50, 0x18, 0x04, 0x00, 0x00};
-static gsize cmd_delete_prefix_len = sizeof (cmd_delete_prefix) / sizeof (cmd_delete_prefix[0]);
-static guchar rsp_delete_success_prefix[] = {0x00, 0x00, 0x00, 0x02, 0x90, 0x00};
-static gsize rsp_delete_success_prefix_len = sizeof (rsp_delete_success_prefix) / sizeof (rsp_delete_success_prefix[0]);
+static const guchar cmd_delete_prefix[] = {0x50, 0x18, 0x04, 0x00, 0x00};
+static const guchar rsp_delete_success_prefix[] = {0x00, 0x00, 0x00, 0x02, 0x90, 0x00};
 
-static guchar cmd_check_prefix_type1[] = {0x50, 0x17, 0x03, 0x00, 0x00};
-static gsize cmd_check_prefix_type1_len = sizeof (cmd_check_prefix_type1) / sizeof (cmd_check_prefix_type1[0]);
-static guchar cmd_check_prefix_type2[] = {0x50, 0x17, 0x03, 0x80, 0x00};
-static gsize cmd_check_prefix_type2_len = sizeof (cmd_check_prefix_type2) / sizeof (cmd_check_prefix_type2[0]);
-static guchar cmd_check_suffix[] = {0x00, 0x40};
-static gsize cmd_check_suffix_len = sizeof (cmd_check_suffix) / sizeof (cmd_check_suffix[0]);
-static guchar rsp_check_not_yet_enrolled_suffix[] = {0x90, 0x04};
-static gsize rsp_check_not_yet_enrolled_suffix_len = sizeof (rsp_check_not_yet_enrolled_suffix) / sizeof (rsp_check_not_yet_enrolled_suffix[0]);
+static const guchar cmd_check_prefix_type1[] = {0x50, 0x17, 0x03, 0x00, 0x00};
+static const guchar cmd_check_prefix_type2[] = {0x50, 0x17, 0x03, 0x80, 0x00};
+static const guchar cmd_check_suffix[] = {0x00, 0x40};
+static const guchar rsp_check_not_yet_enrolled_suffix[] = {0x90, 0x04};
 
 
 /* SSM task states and various status enums */
@@ -202,3 +180,10 @@ typedef enum {
   DELETE_DELETE,
   DELETE_STATES,
 } DeleteStates;
+
+typedef enum {
+  CANCEL_SENSOR_RESET,
+  CANCEL_SEND_CANCEL,
+  CANCEL_SEND_CANCEL_RESULT,
+  CANCEL_STATES,
+} CancelStates;

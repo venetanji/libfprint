@@ -81,6 +81,38 @@ fpi_image_device_deactivate (FpImageDevice *self, gboolean cancelling)
   cls->deactivate (self);
 }
 
+static void
+fp_image_device_cleanup_cancellation_id (FpImageDevice *self)
+{
+  FpImageDevicePrivate *priv = fp_image_device_get_instance_private (self);
+
+  if (!priv->cancellation_id)
+    return;
+
+  g_cancellable_disconnect (fpi_device_get_cancellable (FP_DEVICE (self)),
+                            priv->cancellation_id);
+  priv->cancellation_id = 0;
+}
+
+static void
+fp_image_device_deactivate_timeout_cb (FpDevice *device, gpointer user_data)
+{
+  FpImageDevice *self = FP_IMAGE_DEVICE (user_data);
+
+  fp_image_device_cleanup_cancellation_id (self);
+  fpi_image_device_deactivate (self, TRUE);
+}
+
+static void
+fp_image_device_await_cancelled_cb (GCancellable *cancellable, FpImageDevice *self)
+{
+  fp_dbg ("Action cancelled while waiting for finger or image, scheduling deactivation");
+
+  fpi_device_add_timeout (FP_DEVICE (self), 0,
+                          (FpTimeoutFunc) fp_image_device_deactivate_timeout_cb,
+                          self, NULL);
+}
+
 /* Static helper functions */
 
 /* This should not be called directly to activate/deactivate the device! */
@@ -150,6 +182,7 @@ fp_image_device_change_state (FpImageDevice *self, FpiImageDeviceState state)
   priv->state = state;
   g_object_notify (G_OBJECT (self), "fpi-image-device-state");
   g_signal_emit_by_name (self, "fpi-image-device-state-changed", priv->state);
+  fp_image_device_cleanup_cancellation_id (self);
 
   if (state == FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON)
     {
@@ -162,6 +195,15 @@ fp_image_device_change_state (FpImageDevice *self, FpiImageDeviceState state)
       fpi_device_report_finger_status_changes (FP_DEVICE (self),
                                                FP_FINGER_STATUS_NONE,
                                                FP_FINGER_STATUS_NEEDED);
+    }
+
+  if (state == FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON ||
+      state == FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF ||
+      state == FPI_IMAGE_DEVICE_STATE_CAPTURE)
+    {
+      priv->cancellation_id = g_cancellable_connect (fpi_device_get_cancellable (FP_DEVICE (self)),
+                                                     G_CALLBACK (fp_image_device_await_cancelled_cb),
+                                                     self, NULL);
     }
 }
 
@@ -656,6 +698,8 @@ fpi_image_device_deactivate_complete (FpImageDevice *self, GError *error)
   g_return_if_fail (priv->state == FPI_IMAGE_DEVICE_STATE_DEACTIVATING);
 
   g_debug ("Image device deactivation completed");
+
+  fp_image_device_cleanup_cancellation_id (self);
 
   priv->active = FALSE;
 

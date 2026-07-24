@@ -876,13 +876,55 @@ fpi_device_action_error (FpDevice *device,
 }
 
 /**
+ * fpi_device_cancel_complete:
+ * @device: The #FpDevice
+ * @error: (nullable) (transfer full): The #GError or %NULL on success.
+ *
+ * Called by the driver at the end of its cancel() vfunc once any cleanup
+ * is finished.
+ * It will complete the current action with a cancellation error.
+ */
+void
+fpi_device_cancel_complete (FpDevice *device,
+                            GError   *error)
+{
+  FpDevicePrivate *priv = fp_device_get_instance_private (device);
+
+  if (!g_atomic_int_compare_and_exchange (&priv->deferred_cancel, TRUE, FALSE) &&
+      !g_atomic_int_compare_and_exchange (&priv->cancel_requested, TRUE, FALSE))
+    {
+      g_critical ("No cancellation was pending!");
+      return;
+    }
+
+  if (error)
+    {
+      g_critical ("Cancellation cleanup failed: %s", error->message);
+      g_clear_error (&error);
+    }
+
+  if (priv->current_cancellation_reason)
+    {
+      g_debug ("Cancellation complete, reporting reason: %s",
+               priv->current_cancellation_reason->message);
+      fpi_device_action_error (device,
+                               g_steal_pointer (&priv->current_cancellation_reason));
+    }
+  else
+    {
+      fpi_device_action_error (device,
+                               g_error_new (G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                                            "Operation was cancelled"));
+    }
+}
+
+/**
  * fpi_device_critical_enter:
  * @device: The #FpDevice
  *
  * Enter a critical section in the driver code where no outside calls from
  * libfprint should happen. Drivers can already assume that everything
- * happens from the same thread, however, that still allows e.g. the cancel
- * vfunc to be called at any point in time.
+ * happens from the same thread.
  *
  * Using this kind of critical section, the driver can assume that libfprint
  * will not forward any external requests to the driver for the time being.
@@ -917,14 +959,10 @@ static gboolean
 fpi_device_critical_section_flush_idle_cb (FpDevice *device)
 {
   FpDevicePrivate *priv = fp_device_get_instance_private (device);
-  FpDeviceClass *cls = FP_DEVICE_GET_CLASS (device);
 
   if (priv->cancel_queued)
     {
-      /* Cancellation must only happen if the driver is busy. */
-      if (priv->current_action != FPI_DEVICE_ACTION_NONE &&
-          priv->current_task_idle_return_source == NULL)
-        cls->cancel (device);
+      g_atomic_int_set (&priv->cancel_requested, TRUE);
       priv->cancel_queued = FALSE;
 
       return G_SOURCE_CONTINUE;
@@ -1033,7 +1071,8 @@ fp_device_task_return_in_idle_cb (gpointer user_data)
   g_autoptr(GTask) task = NULL;
   g_autoptr(GError) cancellation_reason = NULL;
   FpDeviceTaskReturnData *data = user_data;
-  FpDevicePrivate *priv = fp_device_get_instance_private (data->device);
+  FpDevice *device = data->device;
+  FpDevicePrivate *priv = fp_device_get_instance_private (device);
   FpiDeviceAction action;
 
   if (!g_log_writer_default_would_drop (G_LOG_LEVEL_DEBUG, G_LOG_DOMAIN))
@@ -1050,13 +1089,13 @@ fp_device_task_return_in_idle_cb (gpointer user_data)
   g_clear_object (&priv->current_cancellable);
   cancellation_reason = g_steal_pointer (&priv->current_cancellation_reason);
 
-  fpi_device_update_temp (data->device, FALSE);
+  fpi_device_update_temp (device, FALSE);
 
   if (action == FPI_DEVICE_ACTION_OPEN &&
       data->type != FP_DEVICE_TASK_RETURN_ERROR)
     {
       priv->is_open = TRUE;
-      g_object_notify (G_OBJECT (data->device), "open");
+      g_object_notify (G_OBJECT (device), "open");
     }
   else if (action == FPI_DEVICE_ACTION_CLOSE)
     {
@@ -1064,7 +1103,7 @@ fp_device_task_return_in_idle_cb (gpointer user_data)
        * device. Generally, e.g. cancellations should be ignored.
        */
       priv->is_open = FALSE;
-      g_object_notify (G_OBJECT (data->device), "open");
+      g_object_notify (G_OBJECT (device), "open");
     }
 
   /* TODO: Port/use the cancellation mechanism for device removal! */
@@ -1126,7 +1165,7 @@ fp_device_task_return_in_idle_cb (gpointer user_data)
 }
 
 static void
-fpi_device_task_return_data_free (FpDeviceTaskReturnData *data)
+fpi_device_task_return_data_cleanup (FpDeviceTaskReturnData *data)
 {
   switch (data->type)
     {
@@ -1149,9 +1188,37 @@ fpi_device_task_return_data_free (FpDeviceTaskReturnData *data)
     default:
       g_assert_not_reached ();
     }
+}
+
+static void
+fpi_device_task_return_data_free (gpointer p)
+{
+  FpDeviceTaskReturnData *data = p;
+
+  fpi_device_task_return_data_cleanup (data);
 
   g_object_unref (data->device);
   g_free (data);
+}
+
+static gboolean
+fp_device_cancel_in_idle_cb (gpointer user_data)
+{
+  FpDeviceTaskReturnData *data = user_data;
+  FpDevice *device = data->device;
+  FpDevicePrivate *priv = fp_device_get_instance_private (device);
+  FpDeviceClass *cls = FP_DEVICE_GET_CLASS (device);
+
+  g_assert (g_atomic_int_get (&priv->deferred_cancel));
+  g_assert (priv->current_action != FPI_DEVICE_ACTION_NONE);
+  g_assert (cls->cancel != NULL);
+
+  g_debug ("Cancelling on ongoing operation in idle");
+
+  priv->current_task_idle_return_source = NULL;
+  cls->cancel (device);
+
+  return G_SOURCE_REMOVE;
 }
 
 /**
@@ -1170,17 +1237,35 @@ fpi_device_return_task_in_idle (FpDevice              *device,
 {
   FpDevicePrivate *priv = fp_device_get_instance_private (device);
   FpDeviceTaskReturnData *data;
+  GSourceFunc idle_cb;
 
+  g_assert (priv->current_task_idle_return_source == NULL);
   data = g_new0 (FpDeviceTaskReturnData, 1);
   data->device = g_object_ref (device);
   data->type = return_type;
   data->result = return_data;
 
+  idle_cb = fp_device_task_return_in_idle_cb;
+
+  /* If cancellation was requested, defer the completion, first call cancel()
+   * vfunc synchronously.
+   * Once cancellation is completed re-issues the action completion.
+   */
+  if (g_atomic_int_compare_and_exchange (&priv->cancel_requested, TRUE, FALSE))
+    {
+      gboolean deferred_cancel;
+
+      deferred_cancel = g_atomic_int_exchange (&priv->deferred_cancel, TRUE);
+      g_assert (!deferred_cancel);
+
+      idle_cb = fp_device_cancel_in_idle_cb;
+    }
+
   priv->current_task_idle_return_source = g_idle_source_new ();
   g_source_set_priority (priv->current_task_idle_return_source,
                          g_task_get_priority (priv->current_task));
   g_source_set_callback (priv->current_task_idle_return_source,
-                         fp_device_task_return_in_idle_cb,
+                         idle_cb,
                          data,
                          (GDestroyNotify) fpi_device_task_return_data_free);
 

@@ -26,9 +26,10 @@
 
 static const FpIdEntry allowlist_id_table[] = {
   /* Currently known and unsupported devices.
-   * You can generate this list from the wiki page using e.g.:
-   *   gio cat https://gitlab.freedesktop.org/libfprint/wiki/-/wikis/Unsupported-Devices.md | sed -n 's!|.*\([0-9a-fA-F]\{4\}\):\([0-9a-fA-F]\{4\}\).*|.*!  { .vid = 0x\1, .pid = 0x\2 },!p'
+   * You can regenerate this list from the wiki page with:
+   *   ninja -C _build sync-unsupported-devices
    */
+  /* --- BEGIN GENERATED IDS --- */
   { .vid = 0x0a5c, .pid = 0x5802 },
   { .vid = 0x047d, .pid = 0x00f2 },
   { .vid = 0x047d, .pid = 0x8054 },
@@ -166,6 +167,7 @@ static const FpIdEntry allowlist_id_table[] = {
   { .vid = 0x298d, .pid = 0x2033 },
   { .vid = 0x2df0, .pid = 0x0003 },
   { .vid = 0x3538, .pid = 0x0930 },
+  /* --- END GENERATED IDS --- */
   { .vid = 0 },
 };
 
