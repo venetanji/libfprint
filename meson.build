@@ -211,6 +211,7 @@ driver_helper_mapping = {
     'aes4000' : [ 'aeslib', 'aes3k' ],
     'egismoc' : [ 'sdcp' ],
     'elanspi' : [ 'udev' ],
+    'focaltech_moc' : [ 'sdcp' ],
     'uru4000' : [ 'openssl' ],
     'virtual_image'          : [ 'virtual' ],
     'virtual_device'         : [ 'virtual' ],

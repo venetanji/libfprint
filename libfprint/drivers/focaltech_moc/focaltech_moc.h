@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 Focaltech Microelectronics
+ * Copyright (C) 2021-2026 FocalTech Systems Co., Ltd.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -25,28 +25,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-G_DECLARE_FINAL_TYPE (FpiDeviceFocaltechMoc, fpi_device_focaltech_moc, FPI, DEVICE_FOCALTECH_MOC, FpDevice)
+#include "fpi-sdcp-device.h"
 
-#define FOCALTECH_MOC_DRIVER_FULLNAME "Focaltech MOC Sensors"
+G_DECLARE_FINAL_TYPE (FpiDeviceFocaltechMoc, fpi_device_focaltech_moc, FPI, DEVICE_FOCALTECH_MOC, FpSdcpDevice)
+
+#define FOCALTECH_MOC_DRIVER_FULLNAME "FocalTech MOC Sensors"
 
 #define FOCALTECH_MOC_CMD_TIMEOUT 1000
 #define FOCALTECH_MOC_MAX_FINGERS 10
-#define FOCALTECH_MOC_UID_PREFIX_LENGTH 8
-#define FOCALTECH_MOC_USER_ID_LENGTH 64
 
 typedef void (*FocaltechCmdMsgCallback) (FpiDeviceFocaltechMoc *self,
                                          GError                *error);
 
 struct _FpiDeviceFocaltechMoc
 {
-  FpDevice        parent;
+  FpSdcpDevice    parent;
   FpiSsm         *task_ssm;
   FpiSsm         *cmd_ssm;
   FpiUsbTransfer *cmd_transfer;
   gboolean        cmd_cancelable;
   gsize           cmd_len_in;
   int             num_frames;
-  int             delete_slot;
+  GBytes         *enrollment_nonce;
+  GError         *enroll_error;
+  gboolean        enroll_session_open;
   guint8          bulk_in_ep;
   guint8          bulk_out_ep;
 };
