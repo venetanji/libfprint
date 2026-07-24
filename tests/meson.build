@@ -59,7 +59,7 @@ drivers_tests = [
     'fpcmoc',
 	'realtek',
 	'realtek-5816',
-    'focaltech_moc',
+#    'focaltech_moc', # commented out until new capture with SDCP support can be provided
 ]
 
 if get_option('introspection')
