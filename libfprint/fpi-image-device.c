@@ -171,9 +171,16 @@ fp_image_device_enroll_maybe_await_finger_on (FpImageDevice *self)
   FpImageDevicePrivate *priv = fp_image_device_get_instance_private (self);
 
   /* We wait for both the minutiae scan to complete and the finger to
-   * be removed before we switch to AWAIT_FINGER_ON. */
+   * be removed before either starting the next enrollment stage or
+   * deactivating after the final stage. */
   if (priv->minutiae_scan_active || priv->finger_present)
     return;
+
+  if (priv->enroll_stage == fp_device_get_nr_enroll_stages (FP_DEVICE (self)))
+    {
+      fpi_image_device_deactivate (self, FALSE);
+      return;
+    }
 
   fp_image_device_change_state (self, FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON);
 }
@@ -313,14 +320,9 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
 
       /* Start another scan or deactivate. */
       if (priv->enroll_stage == fp_device_get_nr_enroll_stages (device))
-        {
-          fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
-          fpi_image_device_deactivate (self, FALSE);
-        }
-      else
-        {
-          fp_image_device_enroll_maybe_await_finger_on (FP_IMAGE_DEVICE (device));
-        }
+        fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
+
+      fp_image_device_enroll_maybe_await_finger_on (FP_IMAGE_DEVICE (device));
     }
   else if (action == FPI_DEVICE_ACTION_IDENTIFY)
     {

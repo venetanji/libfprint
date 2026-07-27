@@ -278,10 +278,25 @@ class VirtualImage(unittest.TestCase):
 
         self.assertEqual(self.dev.get_finger_status(), FPrint.FingerStatusFlags.NEEDED)
 
+        # Keep the finger present after the final enrollment image. Enrollment
+        # must not complete until the finger has been removed and the image
+        # device has finished deactivating.
+        self.send_finger_automatic(False)
+        self.send_finger_report(True)
         self.send_image(image, dx=2, dy=0, dw=1, dh=1, angle=-0.017)
+
+        while self._step < self.dev.get_nr_enroll_stages():
+            ctx.iteration(True)
+
+        self.assertIsNone(self._enrolled)
+        self.assertTrue(self.dev.get_finger_status() &
+                        FPrint.FingerStatusFlags.PRESENT)
+
+        self.send_finger_report(False)
         while self._enrolled is None:
             ctx.iteration(True)
 
+        self.send_finger_automatic(True)
         self.assertEqual(self.dev.get_finger_status(), FPrint.FingerStatusFlags.NONE)
         self.assertEqual(self._enrolled.props.driver, self.dev.get_driver())
         self.assertEqual(self._enrolled.props.device_id, self.dev.get_device_id())
