@@ -147,6 +147,7 @@ drivers_info = {
     'focaltech_moc': {},
     'mafpmoc': {},
     'secugen': {},
+    'secugen_u20al': {},
 
     # SPI driver (non-optional if SPI is available)
     'elanspi': { 'spi': true, 'helper': ['udev'], 'optional': not have_spi },
