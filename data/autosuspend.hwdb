@@ -171,6 +171,7 @@ usb:v04F3p0C99*
 usb:v04F3p0C9C*
 usb:v04F3p0C9D*
 usb:v04F3p0C9F*
+usb:v04F3p0CA2*
 usb:v04F3p0CA3*
 usb:v04F3p0CA7*
 usb:v04F3p0CA8*
@@ -415,7 +416,6 @@ usb:v04F3p0C85*
 usb:v04F3p0C8A*
 usb:v04F3p0C8E*
 usb:v04F3p0C90*
-usb:v04F3p0CA2*
 usb:v04F3p24CC*
 usb:v04F3p2706*
 usb:v04F3p3032*

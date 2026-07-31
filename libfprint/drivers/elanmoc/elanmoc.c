@@ -36,6 +36,7 @@ static const FpIdEntry id_table[] = {
   { .vid = 0x04f3,  .pid = 0x0c9c,  },
   { .vid = 0x04f3,  .pid = 0x0c9d,  },
   { .vid = 0x04f3,  .pid = 0x0c9f,  },
+  { .vid = 0x04f3,  .pid = 0x0ca2,  },
   { .vid = 0x04f3,  .pid = 0x0ca3,  },
   { .vid = 0x04f3,  .pid = 0x0ca7,  },
   { .vid = 0x04f3,  .pid = 0x0ca8,  },
