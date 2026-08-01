@@ -160,6 +160,7 @@ usb:v04F3p0C58*
  ID_PERSIST=0
 
 # Supported by libfprint driver elanmoc
+usb:v04F3p0C90*
 usb:v04F3p0C7D*
 usb:v04F3p0C7E*
 usb:v04F3p0C82*
@@ -408,7 +409,6 @@ usb:v04F3p0C80*
 usb:v04F3p0C85*
 usb:v04F3p0C8A*
 usb:v04F3p0C8E*
-usb:v04F3p0C90*
 usb:v04F3p0CA2*
 usb:v04F3p24CC*
 usb:v04F3p2706*

@@ -127,6 +127,23 @@ static const struct elanmoc_cmd elanmoc_get_userid_cmd = {
   .resp_len = 97,
 };
 
+/* Verify sequence used by 04f3:0c90, recovered from a USB capture of the
+ * Windows driver:
+ *   40 ff 03        wait for finger, 2 byte reply on ep 0x84,
+ *                   second byte = matched slot number
+ *   40 ff 12 <slot> fetch that slot's user id, 64 byte reply on ep 0x83 */
+static const struct elanmoc_cmd elanmoc_wait_finger_cmd = {
+  .cmd_header = {0x40, 0xff, 0x03},
+  .cmd_len = 3,
+  .resp_len = 2,
+};
+
+static const struct elanmoc_cmd elanmoc_get_match_cmd = {
+  .cmd_header = {0x40, 0xff, 0x12},
+  .cmd_len = 4,
+  .resp_len = 64,
+};
+
 static const struct elanmoc_cmd elanmoc_set_mod_cmd = {
   .cmd_header = {0x40, 0xff, 0x14},
   .cmd_len = 4,
