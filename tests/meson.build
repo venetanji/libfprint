@@ -63,7 +63,7 @@ drivers_tests = {
     'focaltech_moc-6553': {},
     'mafpmoc': {},
     'secugen': {},
-    'samsung730b': { 'timeout': 20 },
+    'samsung730b': { 'timeout': 40 },
 }
 
 if get_option('introspection')

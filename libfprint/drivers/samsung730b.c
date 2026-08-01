@@ -204,16 +204,19 @@ s730b_roi_needs_retry_for_action (const S730bRoiStats *s,
    */
   if (action == FPI_DEVICE_ACTION_ENROLL)
     {
-      /* sat255 > 42% is risky for enrollment. */
-      if (s->sat255_pct > 42.0)
+      /* Enroll quality gate: was sat255>42 which rejected many real
+       * presses on this sensor (sat often 40–50% with usable ridges).
+       * Keep a ceiling so totally blown-out frames still retry.
+       */
+      if (s->sat255_pct > 52.0)
         return TRUE;
 
       /* Require decent gradient for enrollment. */
-      if (s->grad_mean < 20.0)
+      if (s->grad_mean < 18.0)
         return TRUE;
 
-      /* Combined: high sat255 needs higher gradient. */
-      if (s->sat255_pct > 35.0 && s->grad_mean < 22.0)
+      /* Combined: very high sat255 needs higher gradient. */
+      if (s->sat255_pct > 45.0 && s->grad_mean < 20.0)
         return TRUE;
     }
 
@@ -1159,8 +1162,8 @@ s730b_submit_image (FpImageDevice *dev,
    */
   {
     /*
-     * Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
-     * with clip_limit=3.0 for adaptive contrast enhancement.
+     * CLAHE clip_limit=3.0: experiment with 2.0 collapsed genuine scores
+     * into the teens (TAR ~40%). Keep 3.0 for usable minutiae density.
      */
     s730b_preproc_clahe (tmp->data, tmp->width, tmp->height, 3.0);
 
@@ -1168,11 +1171,10 @@ s730b_submit_image (FpImageDevice *dev,
     s730b_preproc_contrast_stretch (tmp->data, (gsize) tmp->width * tmp->height);
 
     /*
-     * Apply edge sharpening via unsharp mask.
-     * The amount (2.5) was empirically tuned to maximize minutiae extraction
-     * without introducing excessive noise artifacts.
+     * unsharp 1.5: better TAR than 1.0; still milder than original 2.5
+     * which inflated FAR. Pair with thr~40 to reject residual impostors.
      */
-    s730b_preproc_unsharp_mask (tmp->data, tmp->width, tmp->height, 2.5);
+    s730b_preproc_unsharp_mask (tmp->data, tmp->width, tmp->height, 1.5);
   }
 
   const int resize_factor = S730B_RESIZE_FACTOR;
@@ -1297,7 +1299,10 @@ s730b_enroll_worker (GTask *task, gpointer source_object, gpointer task_data, GC
       /* VERIFY/IDENTIFY: never block indefinitely in WAIT_OFF.
        * fprintd may run an internal IDENTIFY before ENROLL; if we block here it will cancel.
        */
-      if (s730b_wait_finger_lost_timeout (data->usb_dev, cancellable, 1200))
+      /* Longer wait: short timeouts caused frequent
+       * "try again after removing the finger" in rapid verify loops.
+       */
+      if (s730b_wait_finger_lost_timeout (data->usb_dev, cancellable, 2800))
         data->finger_lifted = TRUE;
 
       if (g_task_return_error_if_cancelled (task))
@@ -1330,7 +1335,7 @@ s730b_enroll_worker (GTask *task, gpointer source_object, gpointer task_data, GC
             /* For VERIFY/IDENTIFY, do not block indefinitely waiting for removal.
              * This avoids stalling deactivation paths while still encouraging a fresh press.
              */
-            if (!s730b_wait_finger_lost_timeout (data->usb_dev, cancellable, 2000))
+            if (!s730b_wait_finger_lost_timeout (data->usb_dev, cancellable, 3500))
               {
                 g_task_return_error (task,
                                      fpi_device_retry_new_msg (FP_DEVICE_RETRY_REMOVE_FINGER,
@@ -1708,10 +1713,16 @@ fpi_device_samsung730b_class_init (FpiDeviceSamsung730bClass *klass)
   /*
    * bz3_threshold is the minimum bozorth3 match score required to consider
    * two fingerprints as matching. Lower values increase FAR (False Accept Rate)
-   * but reduce FRR (False Reject Rate). Value of 25 was empirically determined
-   * to provide good balance for this small-image sensor.
+   * but reduce FRR (False Reject Rate).
+   *
+   * Tuning (2026-08-01), CLAHE 3.0 + unsharp 1.5:
+   *   thr=25 → FAR ~40%
+   *   thr=32 → TAR 10/10, FAR 1/5 (one fluke impostor ~40)
+   *   thr=41 → FAR 0/5 but TAR 7/10 (genuine 26–33 dropped)
+   * Keep thr=32 as best TAR/FAR tradeoff; rely on milder sharpening
+   * and longer finger-off waits for stability.
    */
-  img_class->bz3_threshold = 25;
+  img_class->bz3_threshold = 32;
 
   gobject_class->finalize = fpi_device_samsung730b_finalize;
 }
