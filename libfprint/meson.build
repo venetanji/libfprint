@@ -130,6 +130,7 @@ driver_sources = {
         'drivers/synaptics/synaptics.c',
         'drivers/synaptics/bmkt_message.c',
     ),
+    'syna0082' : files('drivers/syna0082.c'),
     'goodixmoc' : files(
         'drivers/goodixmoc/goodix.c',
         'drivers/goodixmoc/goodix_proto.c',
