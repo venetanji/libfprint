@@ -3,7 +3,7 @@
  *
  * Device-specific initialization blobs are intentionally provisioned outside
  * the source tree. Set LIBFPRINT_SYNA0082_BLOB_DIR to the directory containing
- * config-39.bin, config-06.bin, and scan-matrix-02.bin.
+ * config-06.bin and scan-matrix-02.bin.
  */
 
 #define FP_COMPONENT "syna0082"
@@ -32,7 +32,7 @@ struct _FpiDeviceSyna0082
 {
   FpImageDevice parent;
 
-  guint8        *config_39;
+  guint8         config_39[CONFIG_39_LENGTH];
   guint8        *config_06;
   guint8        *scan_02;
   gsize          init_stage;
@@ -52,6 +52,26 @@ static const guint8 command_01[] = { 0x01 };
 static const guint8 command_19[] = { 0x19 };
 static const guint8 command_75[] = { 0x75 };
 static const guint8 command_51[] = { 0x51, 0x00, 0x20, 0x00, 0x00 };
+
+static void
+build_scan_config_v1 (guint8 output[CONFIG_39_LENGTH])
+{
+  static const struct
+  {
+    guint8 offset;
+    guint8 value;
+  } fields[] = {
+    { 0, 0x39 }, { 1, 0x20 }, { 2, 0xbf }, { 3, 0x02 },
+    { 5, 0xff }, { 6, 0xff }, { 9, 0x01 }, { 10, 0xd1 },
+    { 12, 0x20 }, { 17, 0xd1 }, { 18, 0xd1 }, { 32, 0x20 },
+    { 45, 0xff }, { 46, 0xff }, { 50, 0xd1 }, { 52, 0x20 },
+    { 72, 0x20 },
+  };
+
+  memset (output, 0, CONFIG_39_LENGTH);
+  for (gsize i = 0; i < G_N_ELEMENTS (fields); i++)
+    output[fields[i].offset] = fields[i].value;
+}
 
 static void start_interrupt (FpiDeviceSyna0082 *self);
 
@@ -565,9 +585,8 @@ dev_open (FpImageDevice *image_device)
   if (directory == NULL || *directory == '\0')
     directory = "/var/lib/libfprint/syna0082";
 
-  if (!load_blob (directory, "config-39.bin", CONFIG_39_LENGTH, 0x39,
-                  &self->config_39, &error) ||
-      !load_blob (directory, "config-06.bin", CONFIG_06_LENGTH, 0x06,
+  build_scan_config_v1 (self->config_39);
+  if (!load_blob (directory, "config-06.bin", CONFIG_06_LENGTH, 0x06,
                   &self->config_06, &error) ||
       !load_blob (directory, "scan-matrix-02.bin", SCAN_02_LENGTH, 0x02,
                   &self->scan_02, &error))
@@ -593,7 +612,6 @@ dev_close (FpImageDevice *image_device)
 
   g_usb_device_release_interface (
     fpi_device_get_usb_device (FP_DEVICE (self)), 0, 0, &error);
-  g_clear_pointer (&self->config_39, g_free);
   g_clear_pointer (&self->config_06, g_free);
   g_clear_pointer (&self->scan_02, g_free);
   fpi_image_device_close_complete (image_device, error);
