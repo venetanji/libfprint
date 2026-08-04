@@ -9,6 +9,7 @@
 #define FP_COMPONENT "syna0082"
 
 #include "drivers_api.h"
+#include "syna0082-matcher.h"
 
 #define EP_OUT 0x01
 #define EP_IN 0x81
@@ -23,6 +24,7 @@
 #define IMAGE_HEADER_LENGTH 18
 #define IMAGE_WIDTH 56
 #define IMAGE_HEIGHT 144
+#define RELEASE_QUIET_MS 600
 
 typedef struct _FpiDeviceSyna0082 FpiDeviceSyna0082;
 
@@ -37,6 +39,7 @@ struct _FpiDeviceSyna0082
   gsize          rearm_stage;
   guint          capture_count;
   gboolean       deactivating;
+  gboolean       awaiting_release;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceSyna0082, fpi_device_syna0082,
@@ -124,6 +127,8 @@ capture_read_cb (FpiUsbTransfer *transfer,
   FpImage *image;
   guint16 width;
   guint16 height;
+  guint x;
+  guint y;
 
   if (error)
     {
@@ -157,13 +162,20 @@ capture_read_cb (FpiUsbTransfer *transfer,
     }
 
   image = fp_image_new (width, height);
-  memcpy (image->data,
-          transfer->buffer + IMAGE_HEADER_LENGTH,
-          width * height);
+  /* The device serializes 56 sensor columns of 144 pixels each. FpImage
+   * expects a conventional row-major raster, so transpose while copying. */
+  for (y = 0; y < height; y++)
+    for (x = 0; x < width; x++)
+      image->data[y * width + x] =
+        transfer->buffer[IMAGE_HEADER_LENGTH + x * height + y];
   image->flags |= FPI_IMAGE_PARTIAL;
   self->capture_count++;
   fpi_image_device_image_captured (FP_IMAGE_DEVICE (self), image);
-  fpi_image_device_report_finger_status (FP_IMAGE_DEVICE (self), FALSE);
+  /* This sensor only reports repeated finger-on events. Keep listening until
+   * they have stopped for a short interval before reporting finger-off, so a
+   * held finger cannot satisfy two enrollment stages. */
+  self->awaiting_release = TRUE;
+  start_interrupt (self);
 }
 
 static void
@@ -218,6 +230,22 @@ interrupt_cb (FpiUsbTransfer *transfer,
 
   if (error)
     {
+      if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        {
+          g_clear_error (&error);
+          complete_deactivation (self);
+          return;
+        }
+      if (self->awaiting_release &&
+          g_error_matches (error,
+                           G_USB_DEVICE_ERROR,
+                           G_USB_DEVICE_ERROR_TIMED_OUT))
+        {
+          g_clear_error (&error);
+          self->awaiting_release = FALSE;
+          fpi_image_device_report_finger_status (FP_IMAGE_DEVICE (self), FALSE);
+          return;
+        }
       fail_session_or_deactivate (self, error);
       return;
     }
@@ -225,8 +253,13 @@ interrupt_cb (FpiUsbTransfer *transfer,
       (transfer->buffer[1] == 0x42 || transfer->buffer[1] == 0x43) &&
       transfer->buffer[2] == 0x04)
     {
-      fpi_image_device_report_finger_status (FP_IMAGE_DEVICE (self), TRUE);
-      start_capture (self);
+      if (self->awaiting_release)
+        start_interrupt (self);
+      else
+        {
+          fpi_image_device_report_finger_status (FP_IMAGE_DEVICE (self), TRUE);
+          start_capture (self);
+        }
     }
   else
     start_interrupt (self);
@@ -248,7 +281,7 @@ start_interrupt (FpiDeviceSyna0082 *self)
   fpi_usb_transfer_fill_interrupt (transfer, EP_INTERRUPT, 5);
   transfer->short_is_error = TRUE;
   fpi_usb_transfer_submit (transfer,
-                           0,
+                           self->awaiting_release ? RELEASE_QUIET_MS : 0,
                            fpi_device_get_cancellable (device),
                            interrupt_cb,
                            NULL);
@@ -393,6 +426,7 @@ dev_activate (FpImageDevice *image_device)
   self->deactivating = FALSE;
   self->init_stage = 0;
   self->capture_count = 0;
+  self->awaiting_release = FALSE;
   transfer = fpi_usb_transfer_new (FP_DEVICE (self));
   fpi_usb_transfer_fill_control (transfer,
                                  G_USB_DEVICE_DIRECTION_DEVICE_TO_HOST,
@@ -570,6 +604,153 @@ static const FpIdEntry id_table[] = {
   { .vid = 0, .pid = 0 },
 };
 
+static gboolean
+print_get_data (FpPrint    *print,
+                const char *expected_type,
+                GVariant  **data,
+                GError    **error)
+{
+  g_object_get (print, "fpi-data", data, NULL);
+  if (*data && g_variant_is_of_type (*data, G_VARIANT_TYPE (expected_type)))
+    return TRUE;
+
+  g_clear_pointer (data, g_variant_unref);
+  g_set_error_literal (error,
+                       G_IO_ERROR,
+                       G_IO_ERROR_INVALID_DATA,
+                       "Invalid 06cb:0082 print data");
+  return FALSE;
+}
+
+static gboolean
+dev_extract_print (FpImageDevice *image_device,
+                   FpImage       *image,
+                   FpPrint      **print,
+                   GError       **error)
+{
+  g_autoptr(GBytes) features = NULL;
+  g_autoptr(GVariant) data = NULL;
+  gconstpointer bytes;
+  gsize length;
+
+  features = syna0082_matcher_extract (image->data,
+                                      image->width,
+                                      image->height,
+                                      error);
+  if (!features)
+    {
+      g_autofree gchar *message = g_strdup ((*error)->message);
+
+      g_clear_error (error);
+      *error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_GENERAL, "%s", message);
+      return FALSE;
+    }
+
+  bytes = g_bytes_get_data (features, &length);
+  data = g_variant_ref_sink (
+    g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, bytes, length, 1));
+  *print = fp_print_new (FP_DEVICE (image_device));
+  fpi_print_set_type (*print, FPI_PRINT_RAW);
+  g_object_set (*print, "fpi-data", data, NULL);
+  return TRUE;
+}
+
+static gboolean
+dev_append_print (FpImageDevice *image_device,
+                  FpPrint       *enroll_print,
+                  FpPrint       *scan_print,
+                  GError       **error)
+{
+  g_autoptr(GVariant) gallery = NULL;
+  g_autoptr(GVariant) scan = NULL;
+  g_autoptr(GVariant) result = NULL;
+  GVariantBuilder builder;
+
+  (void) image_device;
+
+  if (!print_get_data (scan_print, "ay", &scan, error))
+    return FALSE;
+
+  g_object_get (enroll_print, "fpi-data", &gallery, NULL);
+  if (gallery && !g_variant_is_of_type (gallery, G_VARIANT_TYPE ("aay")))
+    {
+      g_set_error_literal (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Invalid 06cb:0082 enrollment gallery");
+      return FALSE;
+    }
+
+  g_variant_builder_init (&builder, G_VARIANT_TYPE ("aay"));
+  if (gallery)
+    for (gsize index = 0; index < g_variant_n_children (gallery); index++)
+      g_variant_builder_add_value (&builder,
+                                   g_variant_get_child_value (gallery, index));
+  g_variant_builder_add_value (&builder, g_variant_ref (scan));
+  result = g_variant_ref_sink (g_variant_builder_end (&builder));
+
+  g_object_set (enroll_print, "fpi-data", result, NULL);
+  return TRUE;
+}
+
+static FpiMatchResult
+dev_match_print (FpImageDevice *image_device,
+                 FpPrint       *template_print,
+                 FpPrint       *scan_print,
+                 GError       **error)
+{
+  g_autoptr(GVariant) gallery = NULL;
+  g_autoptr(GVariant) scan = NULL;
+  const guint8 *scan_bytes;
+  gsize scan_length;
+  guint accepted = 0;
+  guint best_inliers = 0;
+
+  (void) image_device;
+
+  if (!print_get_data (template_print, "aay", &gallery, error) ||
+      !print_get_data (scan_print, "ay", &scan, error))
+    return FPI_MATCH_ERROR;
+
+  scan_bytes = g_variant_get_fixed_array (scan, &scan_length, 1);
+  for (gsize index = 0; index < g_variant_n_children (gallery); index++)
+    {
+      g_autoptr(GVariant) reference =
+        g_variant_get_child_value (gallery, index);
+      const guint8 *reference_bytes;
+      gsize reference_length;
+      Syna0082MatchScore score;
+
+      reference_bytes = g_variant_get_fixed_array (reference,
+                                                   &reference_length,
+                                                   1);
+      if (!syna0082_matcher_compare (reference_bytes,
+                                    reference_length,
+                                    scan_bytes,
+                                    scan_length,
+                                    &score,
+                                    error))
+        return FPI_MATCH_ERROR;
+
+      fp_dbg ("gallery[%" G_GSIZE_FORMAT "]: matches=%u inliers=%u "
+              "ratio=%.3f scale=%.3f rotation=%.1f coverage=%.4f accepted=%d",
+              index,
+              score.matches,
+              score.inliers,
+              score.inlier_ratio,
+              score.scale,
+              score.rotation,
+              score.coverage,
+              score.accepted);
+      if (score.accepted)
+        accepted++;
+      best_inliers = MAX (best_inliers, score.inliers);
+    }
+
+  return accepted > 0 && (best_inliers >= 8 || accepted >= 2) ?
+         FPI_MATCH_SUCCESS : FPI_MATCH_FAIL;
+}
+
 static void
 fpi_device_syna0082_init (FpiDeviceSyna0082 *self)
 {
@@ -592,7 +773,9 @@ fpi_device_syna0082_class_init (FpiDeviceSyna0082Class *klass)
   image_class->activate = dev_activate;
   image_class->change_state = dev_change_state;
   image_class->deactivate = dev_deactivate;
-  image_class->bz3_threshold = 20;
+  image_class->extract_print = dev_extract_print;
+  image_class->append_print = dev_append_print;
+  image_class->match_print = dev_match_print;
   image_class->img_width = IMAGE_WIDTH;
   image_class->img_height = IMAGE_HEIGHT;
 }

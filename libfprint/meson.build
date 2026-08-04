@@ -130,7 +130,10 @@ driver_sources = {
         'drivers/synaptics/synaptics.c',
         'drivers/synaptics/bmkt_message.c',
     ),
-    'syna0082' : files('drivers/syna0082.c'),
+    'syna0082' : files(
+        'drivers/syna0082.c',
+        'drivers/syna0082-matcher.cpp',
+    ),
     'goodixmoc' : files(
         'drivers/goodixmoc/goodix.c',
         'drivers/goodixmoc/goodix_proto.c',
@@ -147,6 +150,7 @@ helper_sources = {
     'aesx660': files('drivers/aesx660.c'),
     'aes3k': files('drivers/aes3k.c'),
     'openssl': files(),
+    'opencv': files(),
     'pixman': files(),
     'udev': files(),
     'virtual': files('drivers/virtual-device-listener.c'),
