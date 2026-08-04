@@ -96,17 +96,50 @@ decode_features (const guint8 *data,
                  GError      **error)
 {
   gsize offset = 0;
+  gsize expected_length;
   guint32 count;
   const gsize row_size = (2 + descriptor_columns) * sizeof (guint32);
 
-  if (length < feature_header_size ||
+  if (data == nullptr || length < feature_header_size ||
       std::memcmp (data, feature_magic, sizeof (feature_magic) - 1) != 0)
-    goto invalid;
+    {
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_INVALID_DATA,
+                   "Feature header is invalid (length=%" G_GSIZE_FORMAT ")",
+                   length);
+      return FALSE;
+    }
   offset = sizeof (feature_magic) - 1;
-  if (!read_u32 (data, length, &offset, &count) ||
-      count < minimum_features || count > maximum_features ||
-      length - offset != static_cast<gsize> (count) * row_size)
-    goto invalid;
+  if (!read_u32 (data, length, &offset, &count))
+    {
+      g_set_error_literal (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Feature count is missing");
+      return FALSE;
+    }
+  if (count < minimum_features || count > maximum_features)
+    {
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_INVALID_DATA,
+                   "Feature count is invalid (count=%u)",
+                   count);
+      return FALSE;
+    }
+  expected_length = feature_header_size + static_cast<gsize> (count) * row_size;
+  if (length != expected_length)
+    {
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_INVALID_DATA,
+                   "Feature length is invalid (length=%" G_GSIZE_FORMAT
+                   ", expected=%" G_GSIZE_FORMAT ")",
+                   length,
+                   expected_length);
+      return FALSE;
+    }
 
   features->points.reserve (count);
   features->descriptors = cv::Mat (count, descriptor_columns, CV_32F);
@@ -118,7 +151,14 @@ decode_features (const guint8 *data,
       if (!read_float (data, length, &offset, &x) ||
           !read_float (data, length, &offset, &y) ||
           !std::isfinite (x) || !std::isfinite (y))
-        goto invalid;
+        {
+          g_set_error (error,
+                       G_IO_ERROR,
+                       G_IO_ERROR_INVALID_DATA,
+                       "Feature point is invalid (row=%u)",
+                       row);
+          return FALSE;
+        }
       features->points.emplace_back (x, y);
       for (guint column = 0; column < descriptor_columns; column++)
         {
@@ -126,18 +166,19 @@ decode_features (const guint8 *data,
 
           if (!read_float (data, length, &offset, &value) ||
               !std::isfinite (value))
-            goto invalid;
+            {
+              g_set_error (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Feature descriptor is invalid (row=%u, column=%u)",
+                           row,
+                           column);
+              return FALSE;
+            }
           features->descriptors.at<float> (row, column) = value;
         }
     }
   return TRUE;
-
-invalid:
-  g_set_error_literal (error,
-                       G_IO_ERROR,
-                       G_IO_ERROR_INVALID_DATA,
-                       "Invalid 06cb:0082 feature template");
-  return FALSE;
 }
 }
 
@@ -231,9 +272,18 @@ syna0082_matcher_compare (const guint8       *reference,
   if (!decode_features (reference,
                         reference_length,
                         &reference_features,
-                        error) ||
-      !decode_features (probe, probe_length, &probe_features, error))
-    return FALSE;
+                        error))
+    {
+      if (error != nullptr && *error != nullptr)
+        g_prefix_error (error, "Invalid 06cb:0082 reference: ");
+      return FALSE;
+    }
+  if (!decode_features (probe, probe_length, &probe_features, error))
+    {
+      if (error != nullptr && *error != nullptr)
+        g_prefix_error (error, "Invalid 06cb:0082 probe: ");
+      return FALSE;
+    }
 
   cv::BFMatcher (cv::NORM_L2).knnMatch (reference_features.descriptors,
                                        probe_features.descriptors,
