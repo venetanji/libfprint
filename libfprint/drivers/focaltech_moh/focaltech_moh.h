@@ -26,8 +26,7 @@
 G_DECLARE_FINAL_TYPE (FpiDeviceFocaltechMoh, fpi_device_focaltech_moh, FPI,
                       DEVICE_FOCALTECH_MOH, FpDevice)
 
-#define FT9201_VID 0x2808
-#define FT9201_PID 0x9338
+#define FOCALTECH_VID 0x2808
 
 #define FT9201_EP_IN 0x83   /* Bulk IN  (EP3, 32B max packet) */
 

@@ -204,6 +204,7 @@ usb:v2808p6553*
 
 # Supported by libfprint driver focaltech_moh
 usb:v2808p9338*
+usb:v2808p9348*
  ID_AUTOSUSPEND=1
  ID_PERSIST=0
 
@@ -545,7 +546,6 @@ usb:v27C6p5F10*
 usb:v27C6p5F91*
 usb:v2808p06FC*
 usb:v2808p6652*
-usb:v2808p9348*
 usb:v2808p93A9*
 usb:v2808pA553*
 usb:v2808pA573*
