@@ -412,7 +412,7 @@ enroll_ssm_handler (FpiSsm *ssm, FpDevice *dev)
           }
 
         ft9201_preprocess (self->image_buf, preprocessed);
-        memcpy (self->enroll_images[self->enroll_stage], preprocessed,
+        memcpy (self->enroll_images + self->enroll_stage * FT9201_RAW_SIZE, preprocessed,
                 FT9201_RAW_SIZE);
 
         self->enroll_stage++;
@@ -442,7 +442,7 @@ enroll_ssm_handler (FpiSsm *ssm, FpDevice *dev)
           {
             GVariant *img = g_variant_new_fixed_array (
               G_VARIANT_TYPE_BYTE,
-              self->enroll_images[i], FT9201_RAW_SIZE, 1);
+              self->enroll_images + i * FT9201_RAW_SIZE, FT9201_RAW_SIZE, 1);
 
             g_variant_builder_add (&builder, "(@ay)", img);
           }
@@ -627,6 +627,7 @@ dev_open (FpDevice *dev)
     }
 
   self->image_buf = g_malloc0 (FT9201_RAW_SIZE);
+  self->enroll_images = g_malloc0 (FT9201_NUM_ENROLL_STAGES * FT9201_RAW_SIZE);
   self->warmup_done = FALSE;
 
   fpi_device_open_complete (dev, NULL);
@@ -641,6 +642,7 @@ dev_close (FpDevice *dev)
   G_DEBUG_HERE ();
 
   g_clear_pointer (&self->image_buf, g_free);
+  g_clear_pointer (&self->enroll_images, g_free);
 
   g_usb_device_release_interface (fpi_device_get_usb_device (dev),
                                   0, 0, &error);
@@ -695,6 +697,11 @@ fpi_device_focaltech_moh_class_init (FpiDeviceFocaltechMohClass *klass)
   dev_class->close = dev_close;
   dev_class->enroll = focaltech_moh_enroll;
   dev_class->verify = focaltech_moh_verify;
+  /* The temperature model counts time spent *waiting for a finger* as active
+   * time, and a 15-stage enrollment spends most of its time waiting. That is
+   * enough to trip the overheat guard on a sensor that is sitting idle. Every
+   * other match-on-chip driver here does the same, including focaltech_moc. */
+  dev_class->temp_hot_seconds = -1;
 
   fpi_device_class_auto_initialize_features (dev_class);
 }

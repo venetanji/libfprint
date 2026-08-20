@@ -38,7 +38,7 @@ drivers_tests = {
     'elan': {},
     'elan-cobo': {},
     'elanmoc': {},
-    'focaltech_moh': {},
+    'focaltech_moh': { 'timeout': 60 },
     'elanspi': { 'timeout': 30 },
     'synaptics': {},
     'upektc_img': {},
