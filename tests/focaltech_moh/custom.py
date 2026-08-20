@@ -20,7 +20,7 @@ del devices
 
 assert d.get_driver() == "focaltech_moh"
 assert d.has_feature(FPrint.DeviceFeature.CAPTURE)
-assert not d.has_feature(FPrint.DeviceFeature.IDENTIFY)
+assert d.has_feature(FPrint.DeviceFeature.IDENTIFY)
 assert d.has_feature(FPrint.DeviceFeature.VERIFY)
 assert not d.has_feature(FPrint.DeviceFeature.DUPLICATES_CHECK)
 assert not d.has_feature(FPrint.DeviceFeature.STORAGE)
