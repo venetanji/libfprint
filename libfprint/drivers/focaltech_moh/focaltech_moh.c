@@ -36,6 +36,7 @@
 
 #include "drivers_api.h"
 #include "focaltech_moh.h"
+#include "fpi-image.h"
 
 #include <math.h>
 
@@ -673,6 +674,50 @@ focaltech_moh_verify (FpDevice *dev)
 }
 
 /* ------------------------------------------------------------------ */
+/* Image capture (raw, for dataset collection and debugging)           */
+/* ------------------------------------------------------------------ */
+
+static void
+capture_task_ssm_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
+{
+  FpiDeviceFocaltechMoh *self = FPI_DEVICE_FOCALTECH_MOH (dev);
+  FpImage *img;
+
+  self->task_ssm = NULL;
+
+  fpi_device_report_finger_status_changes (dev,
+                                           FP_FINGER_STATUS_NONE,
+                                           FP_FINGER_STATUS_PRESENT);
+
+  if (error)
+    {
+      fpi_device_capture_complete (dev, NULL, error);
+      return;
+    }
+
+  /* Deliberately hand out the *raw* sensor frame, not the preprocessed one:
+   * this is what makes the capture useful for evaluating preprocessing and
+   * matching offline. */
+  img = fp_image_new (FT9201_RAW_WIDTH, FT9201_RAW_HEIGHT);
+  memcpy (img->data, self->image_buf, FT9201_RAW_SIZE);
+
+  fpi_device_capture_complete (dev, img, NULL);
+}
+
+static void
+focaltech_moh_capture (FpDevice *dev)
+{
+  FpiDeviceFocaltechMoh *self = FPI_DEVICE_FOCALTECH_MOH (dev);
+
+  fpi_device_report_finger_status_changes (dev,
+                                           FP_FINGER_STATUS_NEEDED,
+                                           FP_FINGER_STATUS_NONE);
+
+  self->task_ssm = fpi_ssm_new (dev, capture_ssm_handler, CAPTURE_NUM_STATES);
+  fpi_ssm_start (self->task_ssm, capture_task_ssm_complete);
+}
+
+/* ------------------------------------------------------------------ */
 /* GType boilerplate                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -697,6 +742,8 @@ fpi_device_focaltech_moh_class_init (FpiDeviceFocaltechMohClass *klass)
   dev_class->close = dev_close;
   dev_class->enroll = focaltech_moh_enroll;
   dev_class->verify = focaltech_moh_verify;
+  dev_class->capture = focaltech_moh_capture;
+
   /* The temperature model counts time spent *waiting for a finger* as active
    * time, and a 15-stage enrollment spends most of its time waiting. That is
    * enough to trip the overheat guard on a sensor that is sitting idle. Every
