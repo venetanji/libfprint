@@ -177,11 +177,11 @@ ft9201_match_score (const guint8 *tmpl, const guint8 *probe)
 /* ------------------------------------------------------------------ */
 
 static void
-ft9201_ctrl_out (FpDevice  *dev,
-                 FpiSsm    *ssm,
-                 guint8     request,
-                 guint16    value,
-                 guint16    index)
+ft9201_ctrl_out (FpDevice *dev,
+                 FpiSsm   *ssm,
+                 guint8    request,
+                 guint16   value,
+                 guint16   index)
 {
   FpiUsbTransfer *transfer = fpi_usb_transfer_new (dev);
 
@@ -432,7 +432,7 @@ enroll_ssm_handler (FpiSsm *ssm, FpDevice *dev)
     case ENROLL_CAPTURE:
       {
         FpiSsm *capture = fpi_ssm_new (dev, capture_ssm_handler,
-                                        CAPTURE_NUM_STATES);
+                                       CAPTURE_NUM_STATES);
 
         fpi_device_report_finger_status_changes (dev,
                                                  FP_FINGER_STATUS_NEEDED,
@@ -541,7 +541,7 @@ verify_ssm_handler (FpiSsm *ssm, FpDevice *dev)
     case VERIFY_CAPTURE:
       {
         FpiSsm *capture = fpi_ssm_new (dev, capture_ssm_handler,
-                                        CAPTURE_NUM_STATES);
+                                       CAPTURE_NUM_STATES);
 
         fpi_device_report_finger_status_changes (dev,
                                                  FP_FINGER_STATUS_NEEDED,
