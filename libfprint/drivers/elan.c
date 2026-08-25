@@ -467,6 +467,7 @@ elan_run_cmd (FpiSsm                *ssm,
 
 enum stop_capture_states {
   STOP_CAPTURE,
+  STOP_CAPTURE_SETTLE,
   STOP_CAPTURE_NUM_STATES,
 };
 
@@ -480,6 +481,12 @@ stop_capture_run_state (FpiSsm *ssm, FpDevice *dev)
     case STOP_CAPTURE:
       elan_run_cmd (ssm, dev, &stop_cmd,
                     ELAN_CMD_TIMEOUT);
+      break;
+
+    case STOP_CAPTURE_SETTLE:
+      /* stop_cmd has no response, but the sensor needs time to leave
+       * pre-scan before another calibration can request an image. */
+      fpi_ssm_next_state_delayed (ssm, 10);
       break;
     }
 }
