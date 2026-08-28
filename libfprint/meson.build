@@ -88,6 +88,30 @@ nbis_sources = [
 ]
 
 driver_sources = {
+    'goodix5125' : files(
+        'drivers/goodix5125/goodix5125.c',
+        'drivers/goodix5125/goodix5125-proto.c',
+        'drivers/goodix5125/goodix5125-calib.c',
+        'drivers/goodix5125/goodix5125-fdt.c',
+        'drivers/goodix5125/goodix5125-image.c',
+        'drivers/goodix5125/goodix5125-pairing.c',
+        'drivers/goodix5125/goodix5125-tls.c',
+        'drivers/goodix5125/goodix5125-usb.c',
+        'drivers/goodix5125/goodix5125-usb-async.c',
+        # Vendored LGPL-2.1-or-later ChicagoHS biometric backend. See the
+        # driver README for its provenance and the protocol specification.
+        'drivers/goodix5125/chicago/goodix-chicago-bir.c',
+        'drivers/goodix5125/chicago/goodix-chicago-calibration.c',
+        'drivers/goodix5125/chicago/goodix-chicago-enrollment.c',
+        'drivers/goodix5125/chicago/goodix-chicago-feature.c',
+        'drivers/goodix5125/chicago/goodix-chicago-late-rejection.c',
+        'drivers/goodix5125/chicago/goodix-chicago-late-rejection-compat.c',
+        'drivers/goodix5125/chicago/goodix-chicago-match.c',
+        'drivers/goodix5125/chicago/goodix-chicago-preprocess.c',
+        'drivers/goodix5125/chicago/goodix-chicago-runtime.c',
+        'drivers/goodix5125/chicago/goodix-chicago-template.c',
+        'drivers/goodix5125/common/goodix-crc.c',
+    ),
     'upekts' : files(
         'drivers/upekts.c',
         'drivers/upek_proto.c',

@@ -115,6 +115,7 @@ have_spi = host_machine.system() == 'linux'
 drivers = get_option('drivers').split(',')
 
 drivers_info = {
+    'goodix5125': { 'helper': ['openssl'] },
     'upektc_img': {},
     'vfs5011': { 'endian_dependent': true },
     'vfs7552': {},

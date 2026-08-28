@@ -293,7 +293,7 @@ else
         args: ['-c', 'exit 77']
     )
 
-    foreach driver_test: drivers_tests
+    foreach driver_test, args: drivers_tests
         test(driver_test,
             sh,
             args: ['-c', 'exit 77']
@@ -377,6 +377,44 @@ foreach test_name: unit_tests
         },
     )
 endforeach
+
+if 'goodix5125' in drivers
+    goodix5125_test = executable('test-goodix5125',
+        sources: [
+            'goodix5125.c',
+            '../libfprint/drivers/goodix5125/goodix5125-proto.c',
+            '../libfprint/drivers/goodix5125/goodix5125-calib.c',
+            '../libfprint/drivers/goodix5125/goodix5125-fdt.c',
+            '../libfprint/drivers/goodix5125/goodix5125-image.c',
+            '../libfprint/drivers/goodix5125/goodix5125-pairing.c',
+            '../libfprint/drivers/goodix5125/goodix5125-usb.c',
+            '../libfprint/drivers/goodix5125/chicago/goodix-chicago-calibration.c',
+            '../libfprint/drivers/goodix5125/chicago/goodix-chicago-template.c',
+            '../libfprint/drivers/goodix5125/common/goodix-crc.c',
+        ],
+        dependencies: [libfprint_private_dep],
+        c_args: common_cflags,
+    )
+    test('goodix5125',
+        goodix5125_test,
+        suite: ['unit-tests'],
+        env: envs,
+    )
+
+    goodix5125_tls_test = executable('test-goodix5125-tls',
+        sources: [
+            'goodix5125-tls.c',
+            '../libfprint/drivers/goodix5125/goodix5125-tls.c',
+        ],
+        dependencies: [libfprint_private_dep],
+        c_args: common_cflags,
+    )
+    test('goodix5125-tls',
+        goodix5125_tls_test,
+        suite: ['unit-tests'],
+        env: envs,
+    )
+endif
 
 # Run udev rule generator with fatal warnings
 hwdb_envs = envs
