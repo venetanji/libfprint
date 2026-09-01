@@ -69,7 +69,7 @@ enum {
 };
 
 enum {
-  MS_KBD,
+  MS_KBD = 0,
   MS_INTELLIMOUSE,
   MS_STANDALONE,
   MS_STANDALONE_V2,
@@ -81,7 +81,6 @@ static const struct uru4k_dev_profile
 {
   const char *name;
   gboolean    auth_cr;
-  gboolean    image_not_flipped;
 } uru4k_dev_info[] = {
   [MS_KBD] = {
     .name = "Microsoft Keyboard with Fingerprint Reader",
@@ -106,7 +105,6 @@ static const struct uru4k_dev_profile
   [DP_URU4000B] = {
     .name = "Digital Persona U.are.U 4000B",
     .auth_cr = FALSE,
-    .image_not_flipped = TRUE, /* See comment in the code where it is used. */
   },
 };
 
@@ -149,6 +147,8 @@ struct _FpiDeviceUru4000
   unsigned char                   fwfixer_value;
 
   EVP_CIPHER_CTX                 *cipher_ctx;
+
+  gboolean                        image_not_flipped;
 };
 G_DECLARE_FINAL_TYPE (FpiDeviceUru4000, fpi_device_uru4000, FPI, DEVICE_URU4000,
                       FpImageDevice);
@@ -833,8 +833,10 @@ imaging_run_state (FpiSsm *ssm, FpDevice *_dev)
        * is correct.
        * It may be that there are different models with the same USB ID that
        * behave differently.
+       * In newer firmware of uru4500, the image is already flipped correctly
+       * when sent to host.
        */
-      if (self->profile->image_not_flipped)
+      if (self->image_not_flipped)
         fpimg->flags |= FPI_IMAGE_V_FLIPPED | FPI_IMAGE_H_FLIPPED;
 
       fpi_image_device_image_captured (dev, g_steal_pointer (&fpimg));
@@ -1194,11 +1196,34 @@ init_run_state (FpiSsm *ssm, FpDevice *_dev)
       break;
 
     case INIT_REPORT_VERSION:
-      /* Likely hardware revision, and firmware version.
-       * Not sure which is which. */
-      fp_info ("Versions %02x%02x and %02x%02x",
-               self->last_reg_rd[10], self->last_reg_rd[11],
-               self->last_reg_rd[4],  self->last_reg_rd[5]);
+      /* Confirmed which part of the register contains the firmware version by
+      * https://gitlab.freedesktop.org/libfprint/libfprint/-/work_items/626 */
+      unsigned long hw_ver = (self->last_reg_rd[10] << 8) | self->last_reg_rd[11];
+      unsigned long fw_ver = (self->last_reg_rd[4] << 8) | self->last_reg_rd[5];
+      fp_info ("Hardware version 0x%04lx and firmware version 0x%04lx",
+               hw_ver, fw_ver);
+
+      if (fw_ver > 0x0119)
+        {
+          fp_warn ("Device firmware version is newer than supported by libfprint (>0x0119), firmware downgrade might be needed");
+          fp_warn ("Please check https://gitlab.freedesktop.org/libfprint/libfprint/-/work_items/626 for more information");
+        }
+
+      ptrdiff_t index_offset = self->profile - uru4k_dev_info;
+      if (index_offset == DP_URU4000B)
+        {
+          if (fw_ver >= 0x0115)
+            {
+              self->image_not_flipped = FALSE;
+              fp_info ("Device firmware version is >= 0x0115, image should be already flipped by device");
+            }
+          else
+            {
+              self->image_not_flipped = TRUE;
+              fp_info ("Device firmware version is < 0x0115, image might not be flipped by device");
+            }
+        }
+
       fpi_ssm_mark_completed (ssm);
       break;
     }
