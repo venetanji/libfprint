@@ -139,6 +139,10 @@ driver_sources = {
     'focaltech_moc' : files('drivers/focaltech_moc/focaltech_moc.c'),
     'mafpmoc' : files('drivers/mafpmoc/mafpmoc.c'),
     'secugen' : files('drivers/secugen.c'),
+    'broadcom' : files(
+        'drivers/broadcom/broadcom.c',
+        'drivers/broadcom/broadcom_msg.c'
+    ),
 }
 
 helper_sources = {
