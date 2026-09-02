@@ -48,8 +48,6 @@ typedef struct
   GUsbContext  *usb_ctx;
   GCancellable *cancellable;
 
-  GSList       *sources;
-
   gint          pending_devices;
   gboolean      enumerated;
 
@@ -89,76 +87,38 @@ is_driver_allowed (const gchar *driver)
   return g_strv_contains ((const gchar * const *) allowlisted_drivers, driver);
 }
 
-typedef struct
+static void
+remove_device (FpContext *context,
+               FpDevice  *device)
 {
-  FpContext *context;
-  FpDevice  *device;
-  GSource   *source;
-} RemoveDeviceData;
-
-static gboolean
-remove_device_idle_cb (RemoveDeviceData *data)
-{
-  FpContextPrivate *priv = fp_context_get_instance_private (data->context);
+  FpContextPrivate *priv = fp_context_get_instance_private (context);
   guint idx = 0;
 
-  g_return_val_if_fail (g_ptr_array_find (priv->devices, data->device, &idx), G_SOURCE_REMOVE);
+  g_return_if_fail (g_ptr_array_find (priv->devices, device, &idx));
 
-  g_signal_emit (data->context, signals[DEVICE_REMOVED_SIGNAL], 0, data->device);
+  g_object_ref (device);
   g_ptr_array_remove_index_fast (priv->devices, idx);
-
-  return G_SOURCE_REMOVE;
-}
-
-static void
-remove_device_data_free (RemoveDeviceData *data)
-{
-  FpContextPrivate *priv = fp_context_get_instance_private (data->context);
-
-  priv->sources = g_slist_remove (priv->sources, data->source);
-  g_free (data);
-}
-
-static void
-remove_device (FpContext *context, FpDevice *device)
-{
-  g_autoptr(GSource) source = NULL;
-  FpContextPrivate *priv = fp_context_get_instance_private (context);
-  RemoveDeviceData *data;
-
-  data = g_new (RemoveDeviceData, 1);
-  data->context = context;
-  data->device = device;
-
-  source = data->source = g_idle_source_new ();
-  g_source_set_callback (source,
-                         G_SOURCE_FUNC (remove_device_idle_cb), data,
-                         (GDestroyNotify) remove_device_data_free);
-  g_source_attach (source, g_main_context_get_thread_default ());
-
-  priv->sources = g_slist_prepend (priv->sources, source);
+  g_signal_emit (context, signals[DEVICE_REMOVED_SIGNAL], 0, device);
+  g_clear_object (&device);
 }
 
 static void
 device_remove_on_notify_open_cb (FpContext *context, GParamSpec *pspec, FpDevice *device)
 {
+  g_signal_handlers_disconnect_by_func (device, device_remove_on_notify_open_cb, context);
   remove_device (context, device);
 }
 
 static void
 device_removed_cb (FpContext *context, FpDevice *device)
 {
-  gboolean open = FALSE;
-
-  g_object_get (device, "open", &open, NULL);
-
   /* Wait for device close if the device is currently still open. */
-  if (open)
+  if (fp_device_is_open (device))
     {
       g_signal_connect_object (device, "notify::open",
                                (GCallback) device_remove_on_notify_open_cb,
                                context,
-                               G_CONNECT_SWAPPED);
+                               G_CONNECT_SWAPPED | G_CONNECT_AFTER);
     }
   else
     {
@@ -194,7 +154,7 @@ async_device_init_done_cb (GObject *source_object, GAsyncResult *res, gpointer u
   g_signal_connect_object (device, "removed",
                            (GCallback) device_removed_cb,
                            context,
-                           G_CONNECT_SWAPPED);
+                           G_CONNECT_SWAPPED | G_CONNECT_AFTER);
 
   g_signal_emit (context, signals[DEVICE_ADDED_SIGNAL], 0, device);
 }
@@ -274,8 +234,10 @@ usb_device_removed_cb (FpContext *self, GUsbDevice *device, GUsbContext *usb_ctx
       if (cls->type != FP_DEVICE_TYPE_USB)
         continue;
 
-      if (fpi_device_get_usb_device (dev) == device)
-        fpi_device_remove (dev);
+      if (fpi_device_get_usb_device (dev) != device)
+        continue;
+
+      fpi_device_remove (dev);
     }
 }
 
@@ -289,8 +251,6 @@ fp_context_finalize (GObject *object)
   g_clear_object (&priv->cancellable);
   g_clear_pointer (&priv->drivers, g_array_unref);
   g_clear_pointer (&priv->devices, g_ptr_array_unref);
-
-  g_slist_free_full (g_steal_pointer (&priv->sources), (GDestroyNotify) g_source_destroy);
 
   if (priv->usb_ctx)
     g_object_run_dispose (G_OBJECT (priv->usb_ctx));
@@ -581,7 +541,7 @@ fp_context_enumerate (FpContext *context)
  *
  * Get all devices. fp_context_enumerate() will be called as needed.
  *
- * Returns: (transfer none) (element-type FpDevice): a new #GPtrArray of #FpDevice's.
+ * Returns: (transfer none) (element-type FpDevice): a #GPtrArray of #FpDevice's.
  */
 GPtrArray *
 fp_context_get_devices (FpContext *context)

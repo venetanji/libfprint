@@ -115,36 +115,28 @@ context_device_removed_cb (FpContext *ctx, FpDevice *device, FptContext *tctx)
   /* "device-removed" on context is always after "removed" on device */
   g_assert_cmpint (GPOINTER_TO_INT (tctx->user_data), ==, DEV_REMOVED_CB);
   tctx->user_data = GINT_TO_POINTER (CTX_DEVICE_REMOVED_CB);
+
+  g_assert_false (g_ptr_array_find (fp_context_get_devices (tctx->fp_context), device, NULL));
 }
 
 static void
 test_context_remove_device_closed (void)
 {
   g_autoptr(FptContext) tctx = fpt_context_new_with_virtual_device (FPT_VIRTUAL_DEVICE_IMAGE);
-  gboolean removed;
+  FpDevice *device = tctx->device;
 
   tctx->user_data = NULL;
-  g_signal_connect (tctx->device, "removed", (GCallback) device_removed_cb, tctx);
   g_signal_connect (tctx->fp_context, "device-removed", (GCallback) context_device_removed_cb, tctx);
+  g_signal_connect (tctx->device, "removed", (GCallback) device_removed_cb, tctx);
 
   /* Triggering remove on closed device. */
   fpi_device_remove (tctx->device);
-
-  g_assert_nonnull (tctx->device);
-  g_object_get (tctx->device, "removed", &removed, NULL);
-  g_assert_true (removed);
-  g_assert_cmpint (GPOINTER_TO_INT (tctx->user_data), ==, DEV_REMOVED_CB);
-
-  /* device-removed is dispatched from idle. */
-  while (g_main_context_iteration (NULL, FALSE))
-    {
-    }
 
   /* The device is now destroyed and device-removed was called. */
   g_assert_null (tctx->device);
   g_assert_cmpint (GPOINTER_TO_INT (tctx->user_data), ==, CTX_DEVICE_REMOVED_CB);
 
-  fpt_teardown_virtual_device_environment ();
+  g_assert_false (g_ptr_array_find (fp_context_get_devices (tctx->fp_context), device, NULL));
 }
 
 static void
@@ -165,6 +157,7 @@ test_context_remove_device_closing (void)
   g_autoptr(FptContext) tctx = fpt_context_new_with_virtual_device (FPT_VIRTUAL_DEVICE_IMAGE);
   g_autoptr(GError) close_error = NULL;
   g_autoptr(GError) error = NULL;
+  FpDevice *device = tctx->device;
   gboolean removed;
 
   tctx->user_data = NULL;
@@ -190,18 +183,10 @@ test_context_remove_device_closing (void)
   g_assert_error (close_error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED);
 
   /* Now the removed callback has been called already. */
-  g_assert_nonnull (tctx->device);
-  g_assert_cmpint (GPOINTER_TO_INT (tctx->user_data), ==, DEV_REMOVED_CB);
-
-  /* While device-removed needs another idle iteration. */
-  while (g_main_context_iteration (NULL, FALSE))
-    {
-    }
-
   g_assert_null (tctx->device);
   g_assert_cmpint (GPOINTER_TO_INT (tctx->user_data), ==, CTX_DEVICE_REMOVED_CB);
 
-  fpt_teardown_virtual_device_environment ();
+  g_assert_false (g_ptr_array_find (fp_context_get_devices (tctx->fp_context), device, NULL));
 }
 
 static void
@@ -234,20 +219,11 @@ test_context_remove_device_open (void)
     }
   g_assert_cmpint (GPOINTER_TO_INT (tctx->user_data), ==, DEV_REMOVED_CB);
 
-  /* On close, the device will be removed from the context,
-   * but only a main loop iteration later. */
+  /* On close, the device will be removed from the context */
   fp_device_close_sync (tctx->device, NULL, &error);
   g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED);
-  g_assert_nonnull (tctx->device);
-  g_assert_cmpint (GPOINTER_TO_INT (tctx->user_data), ==, DEV_REMOVED_CB);
-
-  while (g_main_context_iteration (NULL, FALSE))
-    {
-    }
   g_assert_null (tctx->device);
   g_assert_cmpint (GPOINTER_TO_INT (tctx->user_data), ==, CTX_DEVICE_REMOVED_CB);
-
-  fpt_teardown_virtual_device_environment ();
 }
 
 static void
@@ -298,18 +274,55 @@ test_context_remove_device_opening (void)
   fp_device_close_sync (tctx->device, NULL, &close_error);
   g_assert_error (close_error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED);
 
-  g_assert_nonnull (tctx->device);
-  g_assert_cmpint (GPOINTER_TO_INT (tctx->user_data), ==, DEV_REMOVED_CB);
+  g_assert_null (tctx->device);
+  g_assert_cmpint (GPOINTER_TO_INT (tctx->user_data), ==, CTX_DEVICE_REMOVED_CB);
+}
 
-  /* The device-removed signal needs an idle iteration. */
-  while (g_main_context_iteration (NULL, FALSE))
-    {
-    }
+static void
+open_close_cb (GObject *device, GAsyncResult *res, gpointer user_data)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(FpPrint) print = NULL;
+  gboolean *data = user_data;
+
+  g_assert_true (fp_device_open_finish (FP_DEVICE (device), res, &error));
+  g_assert_null (print);
+  g_assert_null (error);
+
+  g_assert_false (fp_device_close_sync (FP_DEVICE (device), NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED);
+
+  *data = TRUE;
+}
+
+static void
+test_context_remove_device_closes_on_open_callback (void)
+{
+  g_autoptr(FptContext) tctx = fpt_context_new_with_virtual_device (FPT_VIRTUAL_DEVICE_IMAGE);
+  gboolean open_done = FALSE;
+  gboolean removed;
+
+  tctx->user_data = NULL;
+  g_signal_connect (tctx->device, "removed", (GCallback) device_removed_cb, tctx);
+  g_signal_connect (tctx->fp_context, "device-removed", (GCallback) context_device_removed_cb, tctx);
+
+  fp_device_open (tctx->device, NULL, open_close_cb, &open_done);
+  g_assert_false (open_done);
+
+  fpi_device_remove (tctx->device);
+
+  /* Removed but not yet notified*/
+  g_assert_nonnull (tctx->device);
+  g_object_get (tctx->device, "removed", &removed, NULL);
+  g_assert_true (removed);
+  g_assert_null (tctx->user_data);
+
+  /* Running the mainloop now will cause the open to *succeed* despite removal! */
+  while (!open_done)
+    g_main_context_iteration (NULL, TRUE);
 
   g_assert_null (tctx->device);
   g_assert_cmpint (GPOINTER_TO_INT (tctx->user_data), ==, CTX_DEVICE_REMOVED_CB);
-
-  fpt_teardown_virtual_device_environment ();
 }
 
 static void
@@ -369,18 +382,42 @@ test_context_remove_device_active (void)
   /* Now we close the device, state remains unchanged mostly. */
   fp_device_close_sync (tctx->device, NULL, &error);
   g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED);
-  g_assert_nonnull (tctx->device);
-  g_assert_cmpint (GPOINTER_TO_INT (tctx->user_data), ==, DEV_REMOVED_CB);
-
-  /* And "device-removed" is called */
-  while (g_main_context_iteration (NULL, FALSE))
-    {
-    }
-
   g_assert_null (tctx->device);
   g_assert_cmpint (GPOINTER_TO_INT (tctx->user_data), ==, CTX_DEVICE_REMOVED_CB);
+}
 
-  fpt_teardown_virtual_device_environment ();
+static void
+device_removed_close_cb (FpDevice *device, FptContext *tctx)
+{
+  g_autoptr(GError) error = NULL;
+  g_assert_nonnull (device);
+  g_assert_true (device == tctx->device);
+
+  g_assert_null (tctx->user_data);
+  tctx->user_data = GINT_TO_POINTER (DEV_REMOVED_CB);
+
+  g_assert_true (fp_device_is_open (tctx->device));
+  fp_device_close_sync (tctx->device, NULL, &error);
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED);
+  g_assert_false (fp_device_is_open (tctx->device));
+
+  g_assert_cmpint (GPOINTER_TO_INT (tctx->user_data), ==, DEV_REMOVED_CB);
+}
+
+static void
+test_context_remove_device_close_on_removal (void)
+{
+  g_autoptr(FptContext) tctx = fpt_context_new_with_virtual_device (FPT_VIRTUAL_DEVICE_IMAGE);
+  g_autoptr(GError) error = NULL;
+
+  fp_device_open_sync (tctx->device, NULL, &error);
+  g_assert_no_error (error);
+
+  g_signal_connect (tctx->fp_context, "device-removed", (GCallback) context_device_removed_cb, tctx);
+  g_signal_connect (tctx->device, "removed", (GCallback) device_removed_close_cb, tctx);
+
+  fpi_device_remove (tctx->device);
+  g_assert_cmpint (GPOINTER_TO_INT (tctx->user_data), ==, CTX_DEVICE_REMOVED_CB);
 }
 
 int
@@ -397,6 +434,8 @@ main (int argc, char *argv[])
   g_test_add_func ("/context/remove-device-open", test_context_remove_device_open);
   g_test_add_func ("/context/remove-device-opening", test_context_remove_device_opening);
   g_test_add_func ("/context/remove-device-active", test_context_remove_device_active);
+  g_test_add_func ("/context/remove-device-close-on-removal", test_context_remove_device_close_on_removal);
+  g_test_add_func ("/context/remove-device-closes-on-open-callback", test_context_remove_device_closes_on_open_callback);
 
   return g_test_run ();
 }
