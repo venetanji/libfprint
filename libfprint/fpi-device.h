@@ -28,12 +28,14 @@
  * FpiDeviceUdevSubtypeFlags:
  * @FPI_DEVICE_UDEV_SUBTYPE_SPIDEV: The device requires an spidev node
  * @FPI_DEVICE_UDEV_SUBTYPE_HIDRAW: The device requires a hidraw node
+ * @FPI_DEVICE_UDEV_SUBTYPE_MISC: The device requires a misc node
  *
  * Bitfield of required hardware resources for a udev-backed device.
  */
 typedef enum {
   FPI_DEVICE_UDEV_SUBTYPE_SPIDEV = 1 << 0,
   FPI_DEVICE_UDEV_SUBTYPE_HIDRAW = 1 << 1,
+  FPI_DEVICE_UDEV_SUBTYPE_MISC = 1 << 2,
 } FpiDeviceUdevSubtypeFlags;
 
 /**
@@ -45,6 +47,7 @@ typedef enum {
  * @udev_types: Subtypes for udev-based devices
  * @spi_acpi_id: ACPI ID (for SPI devices)
  * @hid_id: HID device identifier (for HID devices)
+ * @misc_name: Misc name (for MISC devices)
  *
  * An entry in the table of supported hardware. For USB devices, the product ID
  * and vendor ID should be provided. The optional @driver_data field defaults
@@ -65,7 +68,11 @@ struct _FpIdEntry
     struct
     {
       FpiDeviceUdevSubtypeFlags udev_types;
-      const gchar              *spi_acpi_id;
+      union
+      {
+        const gchar *spi_acpi_id;
+        const gchar *misc_name;
+      };
       struct
       {
         guint pid;
@@ -229,6 +236,8 @@ GUsbDevice  *fpi_device_get_usb_device (FpDevice *device);
 const gchar *fpi_device_get_virtual_env (FpDevice *device);
 gpointer     fpi_device_get_udev_data (FpDevice                 *device,
                                        FpiDeviceUdevSubtypeFlags subtype);
+gint         fpi_device_get_udev_fd (FpDevice                 *device,
+                                     FpiDeviceUdevSubtypeFlags subtype);
 
 
 FpiDeviceAction fpi_device_get_current_action (FpDevice *device);

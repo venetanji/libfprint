@@ -471,14 +471,18 @@ fp_context_enumerate (FpContext *context)
 #ifdef HAVE_UDEV
   {
     g_autoptr(GUdevClient) udev_client = g_udev_client_new (NULL);
+    g_autolist(GUdevDevice) spidev_devices = NULL;
+    g_autolist(GUdevDevice) hidraw_devices = NULL;
+    g_autolist(GUdevDevice) misc_devices = NULL;
 
     /* This uses a very simple algorithm to allocate devices to drivers and assumes that no two drivers will want the same device. Future improvements
      * could add a usb_discover style udev_discover that returns a score, however for internal devices the potential overlap should be very low between
      * separate drivers.
      */
 
-    g_autoptr(GList) spidev_devices = g_udev_client_query_by_subsystem (udev_client, "spidev");
-    g_autoptr(GList) hidraw_devices = g_udev_client_query_by_subsystem (udev_client, "hidraw");
+    spidev_devices = g_udev_client_query_by_subsystem (udev_client, "spidev");
+    hidraw_devices = g_udev_client_query_by_subsystem (udev_client, "hidraw");
+    misc_devices = g_udev_client_query_by_subsystem (udev_client, "misc");
 
     /* for each potential driver, try to match all requested resources. */
     for (i = 0; i < priv->drivers->len; i++)
@@ -492,30 +496,44 @@ fp_context_enumerate (FpContext *context)
 
         for (entry = cls->id_table; entry->udev_types; entry++)
           {
-            GList *matched_spidev = NULL, *matched_hidraw = NULL;
+            g_autoptr(GUdevDevice) matched_spidev = NULL;
+            g_autoptr(GUdevDevice) matched_hidraw = NULL;
+            g_autoptr(GUdevDevice) matched_misc = NULL;
 
             if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_SPIDEV)
               {
-                for (matched_spidev = spidev_devices; matched_spidev; matched_spidev = matched_spidev->next)
+                for (GList *l = spidev_devices; l; l = l->next)
                   {
-                    const gchar * sysfs = g_udev_device_get_sysfs_path (matched_spidev->data);
+                    GUdevDevice *dev = l->data;
+                    const gchar * sysfs = g_udev_device_get_sysfs_path (dev);
+
                     if (!sysfs)
                       continue;
-                    if (strstr (sysfs, entry->spi_acpi_id))
-                      break;
+
+                    if (!strstr (sysfs, entry->spi_acpi_id))
+                      continue;
+
+                    g_set_object (&matched_spidev, dev);
+                    break;
                   }
+
                 /* If match was not found exit */
                 if (matched_spidev == NULL)
                   continue;
               }
+
             if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_HIDRAW)
               {
-                for (matched_hidraw = hidraw_devices; matched_hidraw; matched_hidraw = matched_hidraw->next)
+                for (GList *l = hidraw_devices; l; l = l->next)
                   {
                     /* Find the parent HID node, and check the vid/pid from its HID_ID property */
-                    g_autoptr(GUdevDevice) parent = g_udev_device_get_parent_with_subsystem (matched_hidraw->data, "hid", NULL);
-                    const gchar * hid_id = g_udev_device_get_property (parent, "HID_ID");
+                    GUdevDevice *dev = l->data;
+                    g_autoptr(GUdevDevice) parent = NULL;
+                    const gchar * hid_id;
                     guint32 vendor, product;
+
+                    parent = g_udev_device_get_parent_with_subsystem (dev, "hid", NULL);
+                    hid_id = g_udev_device_get_property (parent, "HID_ID");
 
                     if (!parent || !hid_id)
                       continue;
@@ -523,13 +541,40 @@ fp_context_enumerate (FpContext *context)
                     if (sscanf (hid_id, "%*X:%X:%X", &vendor, &product) != 2)
                       continue;
 
-                    if (vendor == entry->hid_id.vid && product == entry->hid_id.pid)
-                      break;
+                    if (vendor != entry->hid_id.vid || product != entry->hid_id.pid)
+                      continue;
+
+                    g_set_object (&matched_hidraw, dev);
+                    break;
                   }
+
                 /* If match was not found exit */
                 if (matched_hidraw == NULL)
                   continue;
               }
+
+            if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_MISC)
+              {
+                for (GList *l = misc_devices; l; l = l->next)
+                  {
+                    GUdevDevice *dev = l->data;
+                    const gchar *sysfs = g_udev_device_get_sysfs_path (dev);
+
+                    if (!sysfs)
+                      continue;
+
+                    if (!g_str_has_suffix (sysfs, entry->misc_name))
+                      continue;
+
+                    g_set_object (&matched_misc, dev);
+                    break;
+                  }
+
+                /* If match was not found exit */
+                if (matched_misc == NULL)
+                  continue;
+              }
+
             priv->pending_devices++;
             g_async_initable_new_async (driver,
                                         G_PRIORITY_LOW,
@@ -537,26 +582,15 @@ fp_context_enumerate (FpContext *context)
                                         async_device_init_done_cb,
                                         context,
                                         "fpi-driver-data", entry->driver_data,
-                                        "fpi-udev-data-spidev", (matched_spidev ? g_udev_device_get_device_file (matched_spidev->data) : NULL),
-                                        "fpi-udev-data-hidraw", (matched_hidraw ? g_udev_device_get_device_file (matched_hidraw->data) : NULL),
+                                        "fpi-udev-data-spidev", (matched_spidev ?
+                                                                 g_udev_device_get_device_file (matched_spidev) : NULL),
+                                        "fpi-udev-data-hidraw", (matched_hidraw ?
+                                                                 g_udev_device_get_device_file (matched_hidraw) : NULL),
+                                        "fpi-udev-data-misc", (matched_misc ?
+                                                               g_udev_device_get_device_file (matched_misc) : NULL),
                                         NULL);
-            /* remove entries from list to avoid conflicts */
-            if (matched_spidev)
-              {
-                g_object_unref (matched_spidev->data);
-                spidev_devices = g_list_delete_link (spidev_devices, matched_spidev);
-              }
-            if (matched_hidraw)
-              {
-                g_object_unref (matched_hidraw->data);
-                hidraw_devices = g_list_delete_link (hidraw_devices, matched_hidraw);
-              }
           }
       }
-
-    /* free all unused elemnts in both lists */
-    g_list_foreach (spidev_devices, (GFunc) g_object_unref, NULL);
-    g_list_foreach (hidraw_devices, (GFunc) g_object_unref, NULL);
   }
 #endif
 

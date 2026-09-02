@@ -102,6 +102,10 @@ driver_sources = {
     'aes2660' : files('drivers/aes2660.c'),
     'aes3500' : files('drivers/aes3500.c'),
     'aes4000' : files('drivers/aes4000.c'),
+    'crfpmoc' : files(
+        'drivers/crfpmoc/crfpmoc.c',
+        'drivers/crfpmoc/crfpmoc-ec-transfer.c',
+    ),
     'vcom5s' : files('drivers/vcom5s.c'),
     'vfs101' : files('drivers/vfs101.c'),
     'vfs301' : files(

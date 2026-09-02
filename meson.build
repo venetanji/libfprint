@@ -30,7 +30,7 @@ if libfprint_sanitizers == ['none']
   libfprint_sanitizers = []
 endif
 
-glib_min_version = '2.68'
+glib_min_version = '2.76'
 
 glib_version_def = 'GLIB_VERSION_@0@_@1@'.format(
     glib_min_version.split('.')[0], glib_min_version.split('.')[1])
@@ -115,6 +115,7 @@ have_spi = host_machine.system() == 'linux'
 drivers = get_option('drivers').split(',')
 
 drivers_info = {
+    'crfpmoc': { 'endian_dependent': true },
     'upektc_img': {},
     'vfs5011': { 'endian_dependent': true },
     'vfs7552': {},

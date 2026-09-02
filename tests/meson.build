@@ -35,6 +35,7 @@ drivers_tests = {
     'aes2501': { 'timeout': 20 },
     'aes2550': {},
     'aes3500': {},
+    'crfpmoc': {},
     'elan': {},
     'elan-cobo': {},
     'elanmoc': {},

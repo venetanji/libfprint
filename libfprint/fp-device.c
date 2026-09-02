@@ -23,6 +23,11 @@
 
 #include "fp-device-private.h"
 
+#include <fcntl.h>
+#include <glib-unix.h>
+#include <glib/gstdio.h>
+#include <unistd.h>
+
 /**
  * SECTION: fp-device
  * @title: FpDevice
@@ -53,6 +58,7 @@ enum {
   PROP_FPI_USB_DEVICE,
   PROP_FPI_UDEV_DATA_SPIDEV,
   PROP_FPI_UDEV_DATA_HIDRAW,
+  PROP_FPI_UDEV_DATA_MISC,
   PROP_FPI_DRIVER_DATA,
   N_PROPS
 };
@@ -237,6 +243,11 @@ fp_device_finalize (GObject *object)
   g_clear_pointer (&priv->virtual_env, g_free);
   g_clear_pointer (&priv->udev_data.spidev_path, g_free);
   g_clear_pointer (&priv->udev_data.hidraw_path, g_free);
+  g_clear_pointer (&priv->udev_data.misc_path, g_free);
+
+  g_clear_fd (&priv->udev_data.spidev_fd, NULL);
+  g_clear_fd (&priv->udev_data.hidraw_fd, NULL);
+  g_clear_fd (&priv->udev_data.misc_fd, NULL);
 
   G_OBJECT_CLASS (fp_device_parent_class)->finalize (object);
 }
@@ -294,17 +305,45 @@ fp_device_get_property (GObject    *object,
       break;
 
     case PROP_FPI_UDEV_DATA_SPIDEV:
-      if (cls->type == FP_DEVICE_TYPE_UDEV)
-        g_value_set_string (value, priv->udev_data.spidev_path);
-      else
-        g_value_set_string (value, NULL);
+      if (cls->type == FP_DEVICE_TYPE_UDEV &&
+          cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_SPIDEV)
+        {
+          g_assert (!priv->udev_data.spidev_path ||
+                    strstr (priv->udev_data.spidev_path, "..") == NULL);
+          g_value_set_string (value, priv->udev_data.spidev_path);
+          break;
+        }
+
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      g_value_set_string (value, NULL);
       break;
 
     case PROP_FPI_UDEV_DATA_HIDRAW:
-      if (cls->type == FP_DEVICE_TYPE_UDEV)
-        g_value_set_string (value, priv->udev_data.hidraw_path);
-      else
-        g_value_set_string (value, NULL);
+      if (cls->type == FP_DEVICE_TYPE_UDEV &&
+          cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_HIDRAW)
+        {
+          g_assert (!priv->udev_data.hidraw_path ||
+                    strstr (priv->udev_data.hidraw_path, "..") == NULL);
+          g_value_set_string (value, priv->udev_data.hidraw_path);
+          break;
+        }
+
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      g_value_set_string (value, NULL);
+      break;
+
+    case PROP_FPI_UDEV_DATA_MISC:
+      if (cls->type == FP_DEVICE_TYPE_UDEV &&
+          cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_MISC)
+        {
+          g_assert (!priv->udev_data.misc_path ||
+                    strstr (priv->udev_data.misc_path, "..") == NULL);
+          g_value_set_string (value, priv->udev_data.misc_path);
+          break;
+        }
+
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      g_value_set_string (value, NULL);
       break;
 
     default:
@@ -340,15 +379,25 @@ fp_device_set_property (GObject      *object,
       break;
 
     case PROP_FPI_UDEV_DATA_SPIDEV:
-      if (cls->type == FP_DEVICE_TYPE_UDEV)
+      if (cls->type == FP_DEVICE_TYPE_UDEV &&
+          cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_SPIDEV)
         priv->udev_data.spidev_path = g_value_dup_string (value);
       else
         g_assert (g_value_get_string (value) == NULL);
       break;
 
     case PROP_FPI_UDEV_DATA_HIDRAW:
-      if (cls->type == FP_DEVICE_TYPE_UDEV)
+      if (cls->type == FP_DEVICE_TYPE_UDEV &&
+          cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_HIDRAW)
         priv->udev_data.hidraw_path = g_value_dup_string (value);
+      else
+        g_assert (g_value_get_string (value) == NULL);
+      break;
+
+    case PROP_FPI_UDEV_DATA_MISC:
+      if (cls->type == FP_DEVICE_TYPE_UDEV &&
+          cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_MISC)
+        priv->udev_data.misc_path = g_value_dup_string (value);
       else
         g_assert (g_value_get_string (value) == NULL);
       break;
@@ -583,6 +632,19 @@ fp_device_class_init (FpDeviceClass *klass)
                          "Private: The path to /dev/hidrawN",
                          NULL,
                          G_PARAM_STATIC_STRINGS | G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY);
+  /**
+   * FpDevice::fpi-udev-data-misc: (skip)
+   *
+   * This property is only for internal purposes.
+   *
+   * Stability: private
+   */
+  properties[PROP_FPI_UDEV_DATA_MISC] =
+    g_param_spec_string ("fpi-udev-data-misc",
+                         "Udev data: misc path",
+                         "Private: The path to /dev/{misc_name}",
+                         NULL,
+                         G_PARAM_STATIC_STRINGS | G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY);
 
   /**
    * FpDevice::fpi-driver-data: (skip)
@@ -606,6 +668,125 @@ fp_device_class_init (FpDeviceClass *klass)
 static void
 fp_device_init (FpDevice *self)
 {
+  FpDevicePrivate *priv = fp_device_get_instance_private (self);
+
+  priv->udev_data.spidev_fd = -1;
+  priv->udev_data.hidraw_fd = -1;
+  priv->udev_data.misc_fd = -1;
+}
+
+static gboolean
+fp_device_open_udev_fd (const gchar *path,
+                        gint        *fd,
+                        GError     **error)
+{
+  g_return_val_if_fail (path != NULL, FALSE);
+  g_return_val_if_fail (fd != NULL, FALSE);
+
+  *fd = g_open (path, O_RDWR, 0);
+  if (*fd < 0)
+    {
+      g_set_error (error,
+                   G_IO_ERROR,
+                   g_io_error_from_errno (errno),
+                   "Failed to open udev path %s",
+                   path);
+      return FALSE;
+    }
+
+  return TRUE;
+}
+
+static void
+open_device_thread (GTask        *task,
+                    gpointer      source_object,
+                    gpointer      task_data,
+                    GCancellable *cancellable)
+{
+  g_autoptr(GError) error = NULL;
+  FpDevice *device = FP_DEVICE (source_object);
+  FpDevicePrivate *priv = fp_device_get_instance_private (device);
+  FpDeviceClass *cls = FP_DEVICE_GET_CLASS (device);
+
+  /*
+   * It is safe to read and write priv here because:
+   *  - current_task has been set, so no other action can be started
+   *  - the transport task is the only code referencing this device
+   */
+  switch (priv->type)
+    {
+    case FP_DEVICE_TYPE_USB:
+      if (!g_usb_device_open (priv->usb_device, &error))
+        g_task_return_error (task, g_steal_pointer (&error));
+      else
+        g_task_return_boolean (task, TRUE);
+      return;
+
+    case FP_DEVICE_TYPE_VIRTUAL:
+      g_task_return_boolean (task, TRUE);
+      return;
+
+    case FP_DEVICE_TYPE_UDEV:
+      {
+        g_autofd int spidev_fd = -1;
+        g_autofd int hidraw_fd = -1;
+        g_autofd int misc_fd = -1;
+
+        if ((cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_SPIDEV) &&
+            !fp_device_open_udev_fd (priv->udev_data.spidev_path,
+                                     &spidev_fd, &error))
+          {
+            g_task_return_error (task, g_steal_pointer (&error));
+            return;
+          }
+
+        if ((cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_HIDRAW) &&
+            !fp_device_open_udev_fd (priv->udev_data.hidraw_path,
+                                     &hidraw_fd, &error))
+          {
+            g_task_return_error (task, g_steal_pointer (&error));
+            return;
+          }
+
+        if ((cls->id_table->udev_types & FPI_DEVICE_UDEV_SUBTYPE_MISC) &&
+            !fp_device_open_udev_fd (priv->udev_data.misc_path,
+                                     &misc_fd, &error))
+          {
+            g_task_return_error (task, g_steal_pointer (&error));
+            return;
+          }
+
+        priv->udev_data.spidev_fd = g_steal_fd (&spidev_fd);
+        priv->udev_data.hidraw_fd = g_steal_fd (&hidraw_fd);
+        priv->udev_data.misc_fd   = g_steal_fd (&misc_fd);
+
+        g_task_return_boolean (task, TRUE);
+      }
+      return;
+
+    default:
+      g_assert_not_reached ();
+    }
+}
+
+static void
+open_task_done (GObject      *source_object,
+                GAsyncResult *result,
+                gpointer      user_data)
+{
+  FpDevice *device = FP_DEVICE (source_object);
+  GError *error = NULL;
+
+  if (!g_task_propagate_boolean (G_TASK (result), &error))
+    {
+      fpi_device_open_complete (device, error);
+      return;
+    }
+
+  fpi_device_report_finger_status (device, FP_FINGER_STATUS_NONE);
+
+  g_assert (FP_DEVICE_GET_CLASS (device)->open);
+  FP_DEVICE_GET_CLASS (device)->open (device);
 }
 
 /**
@@ -823,8 +1004,8 @@ fp_device_open (FpDevice           *device,
                 gpointer            user_data)
 {
   g_autoptr(GTask) task = NULL;
+  g_autoptr(GTask) open_task = NULL;
   FpDevicePrivate *priv = fp_device_get_instance_private (device);
-  GError *error = NULL;
 
   task = g_task_new (device, cancellable, callback, user_data);
   if (g_task_return_error_if_cancelled (task))
@@ -844,32 +1025,13 @@ fp_device_open (FpDevice           *device,
       return;
     }
 
-  switch (priv->type)
-    {
-    case FP_DEVICE_TYPE_USB:
-      if (!g_usb_device_open (priv->usb_device, &error))
-        {
-          g_task_return_error (task, error);
-          return;
-        }
-      break;
-
-    case FP_DEVICE_TYPE_VIRTUAL:
-    case FP_DEVICE_TYPE_UDEV:
-      break;
-
-    default:
-      g_assert_not_reached ();
-      g_task_return_error (task, fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
-      return;
-    }
-
   priv->current_action = FPI_DEVICE_ACTION_OPEN;
   priv->current_task = g_steal_pointer (&task);
   setup_task_cancellable (device);
-  fpi_device_report_finger_status (device, FP_FINGER_STATUS_NONE);
 
-  FP_DEVICE_GET_CLASS (device)->open (device);
+  open_task = g_task_new (device, NULL, open_task_done, NULL);
+  g_task_set_source_tag (open_task, fp_device_open);
+  g_task_run_in_thread (open_task, open_device_thread);
 }
 
 /**
@@ -933,6 +1095,7 @@ fp_device_close (FpDevice           *device,
   priv->current_task = g_steal_pointer (&task);
   setup_task_cancellable (device);
 
+  g_assert (FP_DEVICE_GET_CLASS (device)->close);
   FP_DEVICE_GET_CLASS (device)->close (device);
 }
 
@@ -1842,14 +2005,6 @@ fp_device_clear_storage (FpDevice           *device,
     {
       g_task_return_error (task,
                            fpi_device_error_new (FP_DEVICE_ERROR_BUSY));
-      return;
-    }
-
-  if (!(priv->features & FP_DEVICE_FEATURE_STORAGE))
-    {
-      g_task_return_error (task,
-                           fpi_device_error_new_msg (FP_DEVICE_ERROR_NOT_SUPPORTED,
-                                                     "Device has no storage."));
       return;
     }
 

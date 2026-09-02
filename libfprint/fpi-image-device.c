@@ -56,6 +56,8 @@ fpi_image_device_activate (FpImageDevice *self)
 
   fp_dbg ("Activating image device");
   fp_image_device_change_state (self, FPI_IMAGE_DEVICE_STATE_ACTIVATING);
+
+  g_assert (cls->activate);
   cls->activate (self);
 }
 
@@ -78,6 +80,8 @@ fpi_image_device_deactivate (FpImageDevice *self, gboolean cancelling)
 
   fp_dbg ("Deactivating image device");
   fp_image_device_change_state (self, FPI_IMAGE_DEVICE_STATE_DEACTIVATING);
+
+  g_assert (cls->deactivate);
   cls->deactivate (self);
 }
 

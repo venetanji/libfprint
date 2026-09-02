@@ -22,7 +22,12 @@
 #include <math.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <unistd.h>
 #include <gmodule.h>
+
+#include <glib-unix.h>
+
+#include <glib/gstdio.h>
 
 #include "fpi-log.h"
 
@@ -521,10 +526,52 @@ fpi_device_get_udev_data (FpDevice *device, FpiDeviceUdevSubtypeFlags subtype)
     case FPI_DEVICE_UDEV_SUBTYPE_SPIDEV:
       return priv->udev_data.spidev_path;
 
+    case FPI_DEVICE_UDEV_SUBTYPE_MISC:
+      return priv->udev_data.misc_path;
+
     default:
       g_return_val_if_reached (NULL);
       return NULL;
     }
+}
+
+/**
+ * fpi_device_get_udev_fd:
+ * @device: The #FpDevice
+ * @subtype: Which subtype to get a file descriptor for
+ *
+ * Get an open subtype-specific file descriptor for this #FpDevice. Only
+ * permissible to call if the #FpDevice is opened and of type
+ * %FP_DEVICE_TYPE_UDEV.
+ *
+ * Returns: A file descriptor or -1 if not available for @subtype.
+ */
+gint
+fpi_device_get_udev_fd (FpDevice *device, FpiDeviceUdevSubtypeFlags subtype)
+{
+  FpDevicePrivate *priv = fp_device_get_instance_private (device);
+
+  g_return_val_if_fail (FP_IS_DEVICE (device), -1);
+  g_return_val_if_fail (priv->is_open ||
+                        priv->current_action == FPI_DEVICE_ACTION_OPEN, -1);
+  g_return_val_if_fail (priv->type == FP_DEVICE_TYPE_UDEV, -1);
+
+  switch (subtype)
+    {
+    case FPI_DEVICE_UDEV_SUBTYPE_HIDRAW:
+      g_return_val_if_fail (priv->udev_data.hidraw_fd >= 0, -1);
+      return priv->udev_data.hidraw_fd;
+
+    case FPI_DEVICE_UDEV_SUBTYPE_SPIDEV:
+      g_return_val_if_fail (priv->udev_data.spidev_fd >= 0, -1);
+      return priv->udev_data.spidev_fd;
+
+    case FPI_DEVICE_UDEV_SUBTYPE_MISC:
+      g_return_val_if_fail (priv->udev_data.misc_fd >= 0, -1);
+      return priv->udev_data.misc_fd;
+    }
+
+  g_return_val_if_reached (-1);
 }
 
 /**
@@ -1279,21 +1326,118 @@ fpi_device_open_complete (FpDevice *device, GError *error)
     fpi_device_return_task_in_idle (device, FP_DEVICE_TASK_RETURN_ERROR, error);
 }
 
-/**
- * fpi_device_close_complete:
- * @device: The #FpDevice
- * @error: (nullable) (transfer full): The #GError or %NULL on success
- *
- * Finish an ongoing close operation. If error is %NULL success is assumed.
- */
+static void
+close_device_thread (GTask        *task,
+                     gpointer      source_object,
+                     gpointer      task_data,
+                     GCancellable *cancellable)
+{
+  FpDevice *device = FP_DEVICE (source_object);
+  FpDevicePrivate *priv = fp_device_get_instance_private (device);
+  GError *error = NULL;
+
+  switch (priv->type)
+    {
+    case FP_DEVICE_TYPE_USB:
+      if (!g_usb_device_close (priv->usb_device, &error))
+        g_task_return_error (task, error);
+      else
+        g_task_return_boolean (task, TRUE);
+      return;
+
+    case FP_DEVICE_TYPE_VIRTUAL:
+      g_task_return_boolean (task, TRUE);
+      return;
+
+    case FP_DEVICE_TYPE_UDEV:
+      {
+        g_autoptr(GError) nested_error = NULL;
+        g_autofd int spidev_fd = g_steal_fd (&priv->udev_data.spidev_fd);
+        g_autofd int hidraw_fd = g_steal_fd (&priv->udev_data.hidraw_fd);
+        g_autofd int misc_fd = g_steal_fd (&priv->udev_data.misc_fd);
+
+        if (!g_clear_fd (&spidev_fd, &nested_error))
+          {
+            if (error == NULL)
+              g_propagate_prefixed_error (&error, nested_error, "Failed to close spidev fd: ");
+            else
+              g_warning ("Failed to close spidev fd: %s", nested_error->message);
+          }
+
+        if (!g_clear_fd (&hidraw_fd, &nested_error))
+          {
+            if (error == NULL)
+              g_propagate_prefixed_error (&error, nested_error, "Failed to close hidraw fd: ");
+            else
+              g_warning ("Failed to close hidraw fd: %s", nested_error->message);
+          }
+
+        if (!g_clear_fd (&misc_fd, &nested_error))
+          {
+            if (error == NULL)
+              g_propagate_prefixed_error (&error, nested_error, "Failed to close misc fd: ");
+            else
+              g_warning ("Failed to close misc fd: %s", nested_error->message);
+          }
+
+        if (error)
+          g_task_return_error (task, error);
+        else
+          g_task_return_boolean (task, TRUE);
+      }
+      return;
+
+    default:
+      g_assert_not_reached ();
+    }
+}
+
+static void
+close_device_done (GObject      *source_object,
+                   GAsyncResult *result,
+                   gpointer      user_data)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GError) driver_error = g_steal_pointer (&user_data);
+  FpDevice *device = FP_DEVICE (source_object);
+  FpDevicePrivate *priv = fp_device_get_instance_private (device);
+
+  priv->is_closing = FALSE;
+
+  if (!g_task_propagate_boolean (G_TASK (result), &error))
+    {
+      if (driver_error)
+        {
+          g_warning ("Transport close error: %s", error->message);
+          fpi_device_return_task_in_idle (device, FP_DEVICE_TASK_RETURN_ERROR,
+                                          g_steal_pointer (&driver_error));
+        }
+      else
+        {
+          fpi_device_return_task_in_idle (device, FP_DEVICE_TASK_RETURN_ERROR,
+                                          g_steal_pointer (&error));
+        }
+
+      return;
+    }
+
+  if (driver_error)
+    fpi_device_return_task_in_idle (device, FP_DEVICE_TASK_RETURN_ERROR,
+                                    g_steal_pointer (&driver_error));
+  else
+    fpi_device_return_task_in_idle (device, FP_DEVICE_TASK_RETURN_BOOL,
+                                    GUINT_TO_POINTER (TRUE));
+}
+
 void
 fpi_device_close_complete (FpDevice *device, GError *error)
 {
-  g_autoptr(GError) nested_error = NULL;
+  g_autoptr(GTask) close_task = NULL;
   FpDevicePrivate *priv = fp_device_get_instance_private (device);
 
   g_return_if_fail (FP_IS_DEVICE (device));
   g_return_if_fail (priv->current_action == FPI_DEVICE_ACTION_CLOSE);
+  g_return_if_fail (!priv->is_closing);
 
   if (!g_log_writer_default_would_drop (G_LOG_LEVEL_DEBUG, G_LOG_DOMAIN))
     {
@@ -1302,38 +1446,17 @@ fpi_device_close_complete (FpDevice *device, GError *error)
       g_debug ("Device reported close completion (error: %s)", error_str);
     }
 
+  priv->is_closing = TRUE;
+
   clear_device_cancel_action (device);
   fpi_device_report_finger_status (device, FP_FINGER_STATUS_NONE);
 
-  switch (priv->type)
-    {
-    case FP_DEVICE_TYPE_USB:
-      if (!g_usb_device_close (priv->usb_device, &nested_error))
-        {
-          if (error == NULL)
-            error = g_steal_pointer (&nested_error);
+  clear_device_cancel_action (device);
+  fpi_device_report_finger_status (device, FP_FINGER_STATUS_NONE);
 
-          fpi_device_return_task_in_idle (device, FP_DEVICE_TASK_RETURN_ERROR, error);
-          return;
-        }
-      break;
-
-    case FP_DEVICE_TYPE_VIRTUAL:
-    case FP_DEVICE_TYPE_UDEV:
-      break;
-
-    default:
-      g_assert_not_reached ();
-      fpi_device_return_task_in_idle (device, FP_DEVICE_TASK_RETURN_ERROR,
-                                      fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
-      return;
-    }
-
-  if (!error)
-    fpi_device_return_task_in_idle (device, FP_DEVICE_TASK_RETURN_BOOL,
-                                    GUINT_TO_POINTER (TRUE));
-  else
-    fpi_device_return_task_in_idle (device, FP_DEVICE_TASK_RETURN_ERROR, error);
+  close_task = g_task_new (device, NULL, close_device_done, error);
+  g_task_set_source_tag (close_task, fpi_device_close_complete);
+  g_task_run_in_thread (close_task, close_device_thread);
 }
 
 /**
