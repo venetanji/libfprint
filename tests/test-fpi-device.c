@@ -3848,6 +3848,44 @@ test_driver_add_timeout (void)
   g_assert (fake_dev->last_called_function == test_driver_add_timeout_func);
 }
 
+typedef struct
+{
+  FpDevice *device;
+  gint64    armed_at;
+} TestDriverLateArmData;
+
+static gboolean
+test_driver_add_timeout_late_arm_cb (gpointer user_data)
+{
+  TestDriverLateArmData *data = user_data;
+
+  /* Stall while the context is dispatching us: its cached time stops moving
+   * here, and a timeout armed afterwards must still get its full interval. */
+  g_usleep (100 * 1000);
+
+  data->armed_at = g_get_monotonic_time ();
+  fpi_device_add_timeout (data->device, 50, test_driver_add_timeout_func,
+                          NULL, NULL);
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+test_driver_add_timeout_late_arm (void)
+{
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  FpiDeviceFake *fake_dev = FPI_DEVICE_FAKE (device);
+  TestDriverLateArmData data = { .device = device };
+
+  g_timeout_add (1, test_driver_add_timeout_late_arm_cb, &data);
+
+  while (!fake_dev->last_called_function)
+    g_main_context_iteration (NULL, TRUE);
+
+  g_assert (fake_dev->last_called_function == test_driver_add_timeout_func);
+  g_assert_cmpint (g_get_monotonic_time () - data.armed_at, >=, 50 * 1000);
+}
+
 static gboolean
 test_driver_add_timeout_cancelled_timeout (gpointer data)
 {
@@ -4187,6 +4225,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/driver/action_error/fail", test_driver_action_error_fallback_all);
 
   g_test_add_func ("/driver/timeout", test_driver_add_timeout);
+  g_test_add_func ("/driver/timeout/late_arm", test_driver_add_timeout_late_arm);
   g_test_add_func ("/driver/timeout/cancelled", test_driver_add_timeout_cancelled);
 
   g_test_add_func ("/driver/error_types", test_driver_error_types);
