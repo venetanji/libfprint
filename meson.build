@@ -128,6 +128,7 @@ drivers_info = {
     'vfs101': {},
     'vfs301': { 'endian_dependent': true },
     'vfs0050': { 'endian_dependent': true },
+    'vfs0090': { 'endian_dependent': true, 'helper': ['openssl', 'pixman'] },
     'etes603': {},
     'egis0570': {},
     'egismoc': {},

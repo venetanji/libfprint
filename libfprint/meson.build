@@ -119,6 +119,7 @@ driver_sources = {
     'egismoc' : files('drivers/egismoc/egismoc.c'),
     'egis_etu905' : files('drivers/egismoc/egis_etu905.c'),
     'vfs0050' : files('drivers/vfs0050.c'),
+    'vfs0090' : files('drivers/vfs0090.c'),
     'elan' : files('drivers/elan.c'),
     'elanmoc' : files('drivers/elanmoc/elanmoc.c'),
     'elanspi' : files('drivers/elanspi.c'),
