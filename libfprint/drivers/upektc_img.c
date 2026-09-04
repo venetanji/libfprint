@@ -26,6 +26,54 @@
 static void start_capture (FpImageDevice *dev);
 static void start_deactivation (FpImageDevice *dev);
 
+/* Enhance image for better minutiae detection on small swipe sensors.
+ * Applies contrast stretching and 2x nearest-neighbor upscale.
+ * Returns a new FpImage; caller is responsible for the original. */
+static FpImage *
+upektc_img_enhance (FpImage *orig)
+{
+  guint w = orig->width;
+  guint h = orig->height;
+  guint new_w = w * 2;
+  guint new_h = h * 2;
+  guchar *src = orig->data;
+  FpImage *enhanced;
+  guchar *dst;
+  guint i, x, y;
+
+  /* Step 1: contrast stretch (histogram stretch to full 0-255 range) */
+  guchar min_val = 255, max_val = 0;
+
+  for (i = 0; i < w * h; i++)
+    {
+      if (src[i] < min_val)
+        min_val = src[i];
+      if (src[i] > max_val)
+        max_val = src[i];
+    }
+
+  if (max_val > min_val)
+    {
+      guint range = max_val - min_val;
+      for (i = 0; i < w * h; i++)
+        src[i] = (guchar) (((guint) (src[i] - min_val) * 255) / range);
+    }
+
+  /* Step 2: 2x nearest-neighbor upscale */
+  enhanced = fp_image_new (new_w, new_h);
+  enhanced->flags = orig->flags;
+  dst = enhanced->data;
+
+  for (y = 0; y < new_h; y++)
+    {
+      guint sy = y / 2;
+      for (x = 0; x < new_w; x++)
+        dst[y * new_w + x] = src[sy * w + x / 2];
+    }
+
+  return enhanced;
+}
+
 #define EP_IN (1 | FPI_USB_ENDPOINT_IN)
 #define EP_OUT (2 | FPI_USB_ENDPOINT_OUT)
 #define CTRL_TIMEOUT 4000
@@ -355,9 +403,13 @@ capture_read_data_cb (FpiUsbTransfer *transfer, FpDevice *device,
           fp_dbg ("Image size is %lu",
                   (gulong) self->image_size);
           img = fp_image_new (img_class->img_width, img_class->img_height);
-          img->flags |= FPI_IMAGE_PARTIAL;
           memcpy (img->data, self->image_bits,
                   self->image_size);
+          {
+            FpImage *enhanced = upektc_img_enhance (img);
+            g_object_unref (img);
+            img = enhanced;
+          }
           fpi_image_device_image_captured (dev, img);
           fpi_image_device_report_finger_status (dev,
                                                  FALSE);
@@ -790,6 +842,7 @@ fpi_device_upektc_img_class_init (FpiDeviceUpektcImgClass *klass)
   dev_class->type = FP_DEVICE_TYPE_USB;
   dev_class->id_table = id_table;
   dev_class->scan_type = FP_SCAN_TYPE_SWIPE;
+  dev_class->nr_enroll_stages = 10;
   dev_class->usb_discover = discover;
 
   img_class->img_open = dev_init;

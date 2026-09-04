@@ -1489,6 +1489,7 @@ fpi_device_upeksonly_class_init (FpiDeviceUpeksonlyClass *klass)
   dev_class->type = FP_DEVICE_TYPE_USB;
   dev_class->id_table = id_table;
   dev_class->scan_type = FP_SCAN_TYPE_SWIPE;
+  dev_class->nr_enroll_stages = 10;
 
   dev_class->usb_discover = dev_discover;
 
@@ -1546,6 +1547,11 @@ dev_init (FpImageDevice *dev)
     case UPEKSONLY_2016:
       self->img_width = IMG_WIDTH_2016;
       self->assembling_ctx.line_width = IMG_WIDTH_2016;
+
+      /* The sensor resolution is too low for the normal threshold.
+         Note that this case is only called for rev1
+         of the sensor and upektc_img for rev2! */
+      fpi_image_device_set_bz3_threshold (dev, 20);
       break;
 
     default:
