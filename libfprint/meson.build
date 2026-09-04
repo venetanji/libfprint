@@ -139,6 +139,7 @@ driver_sources = {
     'focaltech_moc' : files('drivers/focaltech_moc/focaltech_moc.c'),
     'mafpmoc' : files('drivers/mafpmoc/mafpmoc.c'),
     'secugen' : files('drivers/secugen.c'),
+    'samsung730b' : files('drivers/samsung730b.c'),
 }
 
 helper_sources = {
