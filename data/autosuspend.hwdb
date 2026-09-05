@@ -286,6 +286,11 @@ usb:v1162p2200*
  ID_AUTOSUSPEND=1
  ID_PERSIST=0
 
+# Supported by libfprint driver secugen_u20al
+usb:v1162p2370*
+ ID_AUTOSUSPEND=1
+ ID_PERSIST=0
+
 # Supported by libfprint driver synaptics
 usb:v06CBp00BD*
 usb:v06CBp00C2*
