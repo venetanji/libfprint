@@ -143,6 +143,7 @@ drivers_info = {
     'goodixmoc': {},
     'nb1010': {},
     'fpcmoc': {},
+    'omsmoc': {},
     'realtek': {},
     'focaltech_moc': {},
     'mafpmoc': {},
