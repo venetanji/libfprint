@@ -135,6 +135,7 @@ drivers_info = {
     'vcom5s': {},
     'synaptics': {},
     'elan': { 'endian_dependent': true },
+    'elanpress': { 'endian_dependent': true },
     'elanmoc': {},
     'uru4000': { 'helper': ['openssl'] },
     'upektc': {},
