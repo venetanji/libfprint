@@ -142,6 +142,7 @@ drivers_info = {
     'upekts': {},
     'goodixmoc': {},
     'nb1010': {},
+    'futronic': {},
     'fpcmoc': {},
     'realtek': {},
     'focaltech_moc': {},
