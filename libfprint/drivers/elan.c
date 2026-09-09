@@ -557,11 +557,16 @@ capture_run_state (FpiSsm *ssm, FpDevice *dev)
           fpi_image_device_report_finger_status (idev, TRUE);
           elan_run_cmd (ssm, dev, &get_image_cmd, ELAN_CMD_TIMEOUT);
         }
-      else if (self->dev_type == ELAN_0C58 && self->last_read &&
+      else if (self->last_read &&
                (self->last_read[0] == 0x00 || self->last_read[0] == 0xaf))
         {
           /* 0x00 - not ready
-           * 0xaf - finger removed or sensor busy (seen on 0x0c58) */
+           * 0xaf - finger removed or sensor busy
+           *
+           * These are transient states, not errors. They were first seen on
+           * 0x0c58, but 0x0c6e reports them too while the sensor settles.
+           * Retrying regardless of the model avoids turning a normal "not
+           * ready yet" answer into a fatal protocol error. */
           fpi_ssm_jump_to_state_delayed (ssm, CAPTURE_WAIT_FINGER, 10);
         }
       else
