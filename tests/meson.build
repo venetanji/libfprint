@@ -48,6 +48,7 @@ drivers_tests = {
     'vfs301': {},
     'vfs5011': {},
     'vfs7552': {},
+    'futronic': {},
     'goodixmoc': {},
     'nb1010': {},
     'egis0570': {},
