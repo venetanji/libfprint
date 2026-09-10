@@ -216,6 +216,11 @@ usb:v10A5p9B24*
  ID_AUTOSUSPEND=1
  ID_PERSIST=0
 
+# Supported by libfprint driver futronic
+usb:v1491p0088*
+ ID_AUTOSUSPEND=1
+ ID_PERSIST=0
+
 # Supported by libfprint driver goodixmoc
 usb:v27C6p5840*
 usb:v27C6p6014*
@@ -502,7 +507,6 @@ usb:v138Ap009D*
 usb:v138Ap00A6*
 usb:v138Ap00AB*
 usb:v147Ep1002*
-usb:v1491p0088*
 usb:v16D1p1027*
 usb:v1C7Ap0300*
 usb:v1C7Ap0575*
