@@ -424,14 +424,15 @@ static gboolean
 ft9201_score_against_print (FpPrint      *print,
                             const guint8 *probe,
                             double       *out_best,
-                            double       *out_second)
+                            int          *out_confirms)
 {
   g_autoptr(GVariant) var_data = NULL;
   g_autoptr(GVariant) var_images = NULL;
   GVariantIter iter;
   GVariant *img_var;
   guint8 version;
-  double best = -1.0, second = -1.0;
+  double best = -1.0;
+  int confirms = 0;
   int idx = 0;
 
   g_object_get (print, "fpi-data", &var_data, NULL);
@@ -458,14 +459,9 @@ ft9201_score_against_print (FpPrint      *print,
 
           fp_dbg ("NCC template %d: %.4f", idx, score);
           if (score > best)
-            {
-              second = best;
-              best = score;
-            }
-          else if (score > second)
-            {
-              second = score;
-            }
+            best = score;
+          if (score >= FT9201_NCC_CONFIRM)
+            confirms++;
         }
 
       g_variant_unref (img_var);
@@ -473,16 +469,15 @@ ft9201_score_against_print (FpPrint      *print,
     }
 
   *out_best = best;
-  *out_second = second;
+  *out_confirms = confirms;
   return TRUE;
 }
 
-/* See FT9201_NCC_STRONG. out_second <= out_best always, so the corroborated
- * branch needs no separate bound on the best score. */
+/* See FT9201_NCC_STRONG. */
 static gboolean
-ft9201_accept (double best, double second)
+ft9201_accept (double best, int confirms)
 {
-  return best >= FT9201_NCC_STRONG || second >= FT9201_NCC_CORROBORATED;
+  return best >= FT9201_NCC_STRONG || confirms >= FT9201_NCC_MIN_CONFIRM;
 }
 
 /* ------------------------------------------------------------------ */
@@ -622,7 +617,8 @@ verify_ssm_handler (FpiSsm *ssm, FpDevice *dev)
       {
         FpPrint *print = NULL;
         guint8 preprocessed[FT9201_RAW_SIZE];
-        double best = -1.0, second = -1.0;
+        double best = -1.0;
+        int confirms = 0;
         int unique;
 
         fpi_device_report_finger_status_changes (dev,
@@ -646,7 +642,7 @@ verify_ssm_handler (FpiSsm *ssm, FpDevice *dev)
 
         fpi_device_get_verify_data (dev, &print);
 
-        if (!ft9201_score_against_print (print, preprocessed, &best, &second))
+        if (!ft9201_score_against_print (print, preprocessed, &best, &confirms))
           {
             fpi_device_verify_report (dev, FPI_MATCH_ERROR, NULL,
                                       fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
@@ -655,10 +651,11 @@ verify_ssm_handler (FpiSsm *ssm, FpDevice *dev)
             return;
           }
 
-        fp_info ("Verify best %.4f second %.4f (strong %.2f / corroborated %.2f)",
-                 best, second, FT9201_NCC_STRONG, FT9201_NCC_CORROBORATED);
+        fp_info ("Verify best %.4f, %d/%d templates over %.2f (strong %.2f, need %d)",
+                 best, confirms, FT9201_NUM_ENROLL_STAGES, FT9201_NCC_CONFIRM,
+                 FT9201_NCC_STRONG, FT9201_NCC_MIN_CONFIRM);
 
-        if (ft9201_accept (best, second))
+        if (ft9201_accept (best, confirms))
           fpi_device_verify_report (dev, FPI_MATCH_SUCCESS, print, NULL);
         else
           fpi_device_verify_report (dev, FPI_MATCH_FAIL, NULL, NULL);
@@ -751,25 +748,25 @@ identify_ssm_handler (FpiSsm *ssm, FpDevice *dev)
         for (i = 0; prints != NULL && i < prints->len; i++)
           {
             FpPrint *candidate = g_ptr_array_index (prints, i);
-            double best = -1.0, second = -1.0;
+            double best = -1.0;
+            int confirms = 0;
 
-            if (!ft9201_score_against_print (candidate, preprocessed, &best, &second))
+            if (!ft9201_score_against_print (candidate, preprocessed, &best, &confirms))
               {
                 fp_dbg ("Gallery print %u carries no usable template data", i);
                 continue;
               }
 
-            fp_dbg ("Gallery print %u: best %.4f second %.4f", i, best, second);
+            fp_dbg ("Gallery print %u: best %.4f, %d confirming", i, best, confirms);
 
-            if (ft9201_accept (best, second) && best > best_score)
+            if (ft9201_accept (best, confirms) && best > best_score)
               {
                 best_score = best;
                 best_match = candidate;
               }
           }
 
-        fp_info ("Identify best accepted score: %.4f (strong %.2f / corroborated %.2f)",
-                 best_score, FT9201_NCC_STRONG, FT9201_NCC_CORROBORATED);
+        fp_info ("Identify best accepted score: %.4f", best_score);
 
         if (best_match != NULL)
           fpi_device_identify_report (dev, best_match, NULL, NULL);
