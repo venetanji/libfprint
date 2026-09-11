@@ -43,6 +43,7 @@ static const FpIdEntry id_table[] = {
   { .vid = 0x2808,  .pid = 0x079A,  },
   { .vid = 0x2808,  .pid = 0x5158,  },
   { .vid = 0x2808,  .pid = 0x6553,  .driver_data = FOCALTECH_QUIRK_SINGLE_SLOT, },
+  { .vid = 0x2808,  .pid = 0xa573,  .driver_data = FOCALTECH_QUIRK_SINGLE_SLOT, },
   { .vid = 0,  .pid = 0,  .driver_data = 0 },   /* terminating entry */
 };
 
