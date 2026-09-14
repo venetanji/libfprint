@@ -216,7 +216,8 @@ ft9201_ctrl_out (FpDevice *dev,
                                  G_USB_DEVICE_REQUEST_TYPE_VENDOR,
                                  G_USB_DEVICE_RECIPIENT_DEVICE,
                                  request, value, index, 0);
-  fpi_usb_transfer_submit (transfer, FT9201_CMD_TIMEOUT, NULL,
+  fpi_usb_transfer_submit (transfer, FT9201_CMD_TIMEOUT,
+                           fpi_device_get_cancellable (dev),
                            fpi_ssm_usb_transfer_cb, NULL);
 }
 
@@ -255,6 +256,22 @@ finger_poll_cb (FpiUsbTransfer *transfer,
           transfer->buffer[0], transfer->buffer[1],
           transfer->buffer[2], transfer->buffer[3],
           transfer->actual_length);
+
+  /* Finger detection re-arms itself indefinitely, so a cancelled task would
+   * otherwise keep polling the bus forever. Note this does NOT fix the
+   * reported fprintd shutdown hang: measurement showed nothing cancels the
+   * action in that path, so there is no cancellation for this to observe. It
+   * is here because libfprint requires drivers to honour cancellation on long
+   * running operations, and it does shorten teardown when a client cancels. */
+  if (fpi_device_action_is_cancelled (dev))
+    {
+      GError *cancelled = NULL;
+
+      g_cancellable_set_error_if_cancelled (fpi_device_get_cancellable (dev),
+                                            &cancelled);
+      fpi_ssm_mark_failed (transfer->ssm, cancelled);
+      return;
+    }
 
   if (fpi_ssm_get_cur_state (transfer->ssm) == CAPTURE_WAIT_FINGER_UP)
     {
@@ -326,7 +343,8 @@ capture_ssm_handler (FpiSsm *ssm, FpDevice *dev)
         fpi_usb_transfer_fill_bulk (transfer, FT9201_EP_IN, 32);
         transfer->short_is_error = FALSE;
         transfer->ssm = ssm;
-        fpi_usb_transfer_submit (transfer, FT9201_CMD_TIMEOUT, NULL,
+        fpi_usb_transfer_submit (transfer, FT9201_CMD_TIMEOUT,
+                                 fpi_device_get_cancellable (dev),
                                  capture_read_cb, NULL);
         self->warmup_done = TRUE;
         fp_dbg ("Warmup bulk read submitted");
@@ -344,7 +362,8 @@ capture_ssm_handler (FpiSsm *ssm, FpDevice *dev)
                                        G_USB_DEVICE_RECIPIENT_DEVICE,
                                        FT9201_REQ_INT_STATUS, 0, 0, 4);
         transfer->ssm = ssm;
-        fpi_usb_transfer_submit (transfer, FT9201_CMD_TIMEOUT, NULL,
+        fpi_usb_transfer_submit (transfer, FT9201_CMD_TIMEOUT,
+                                 fpi_device_get_cancellable (dev),
                                  finger_poll_cb, NULL);
       }
       break;
@@ -380,7 +399,8 @@ capture_ssm_handler (FpiSsm *ssm, FpDevice *dev)
         fpi_usb_transfer_fill_bulk (transfer, FT9201_EP_IN, 32);
         transfer->short_is_error = FALSE;
         transfer->ssm = ssm;
-        fpi_usb_transfer_submit (transfer, FT9201_CMD_TIMEOUT, NULL,
+        fpi_usb_transfer_submit (transfer, FT9201_CMD_TIMEOUT,
+                                 fpi_device_get_cancellable (dev),
                                  capture_read_cb, NULL);
       }
       break;
@@ -407,7 +427,8 @@ capture_ssm_handler (FpiSsm *ssm, FpDevice *dev)
                                          NULL);
         transfer->short_is_error = FALSE;
         transfer->ssm = ssm;
-        fpi_usb_transfer_submit (transfer, FT9201_CMD_TIMEOUT, NULL,
+        fpi_usb_transfer_submit (transfer, FT9201_CMD_TIMEOUT,
+                                 fpi_device_get_cancellable (dev),
                                  capture_read_cb, NULL);
       }
       break;
