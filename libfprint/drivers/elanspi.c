@@ -1687,8 +1687,8 @@ fpi_device_elanspi_class_init (FpiDeviceElanSpiClass *klass)
   dev_class->type = FP_DEVICE_TYPE_UDEV;
   dev_class->id_table = elanspi_id_table;
   dev_class->scan_type = FP_SCAN_TYPE_SWIPE;
-  dev_class->nr_enroll_stages = 7;       /* these sensors are very hit or miss, may as well record a few extras */
-  dev_class->temp_hot_seconds = -1;      /* SPI swipe sensor, no thermal limit */
+  dev_class->nr_enroll_stages = 7;
+  dev_class->temp_hot_seconds = -1;
 
   img_class->bz3_threshold = 24;
   img_class->img_open = elanspi_open;
