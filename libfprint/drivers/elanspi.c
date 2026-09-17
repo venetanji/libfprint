@@ -1397,7 +1397,7 @@ elanspi_fp_frame_handler (FpiSsm *ssm, FpiDeviceElanSpi *self)
     case ELANSPI_GUESS_EMPTY:
       self->fp_empty_counter += 1;
       fp_dbg ("<fp_frame> got empty");
-      if (self->fp_empty_counter > 1)
+      if (self->fp_empty_counter >= ELANSPI_MIN_FRAMES_DEBOUNCE)
         {
           fp_dbg ("<fp_frame> have enough debounce");
           if (g_slist_length (self->fp_frame_list) >= ELANSPI_MIN_FRAMES_SWIPE)
@@ -1415,20 +1415,7 @@ elanspi_fp_frame_handler (FpiSsm *ssm, FpiDeviceElanSpi *self)
       break;
 
     case ELANSPI_GUESS_FINGERPRINT:
-      if (self->fp_empty_counter && self->fp_frame_list)
-        {
-          if (self->fp_empty_counter < 1)
-            {
-              fp_dbg ("<fp_frame> possible bounced fp");
-              break;
-            }
-          else
-            {
-              fp_dbg ("<fp_frame> too many empties, clearing list");
-              g_slist_free_full (g_steal_pointer (&self->fp_frame_list), g_free);
-              self->fp_empty_counter = 0;
-            }
-        }
+      self->fp_empty_counter = 0;
 
       if (g_slist_length (self->fp_frame_list) > ELANSPI_MAX_FRAMES_SWIPE)
         {
@@ -1700,7 +1687,8 @@ fpi_device_elanspi_class_init (FpiDeviceElanSpiClass *klass)
   dev_class->type = FP_DEVICE_TYPE_UDEV;
   dev_class->id_table = elanspi_id_table;
   dev_class->scan_type = FP_SCAN_TYPE_SWIPE;
-  dev_class->nr_enroll_stages = 7;       /* these sensors are very hit or miss, may as well record a few extras */
+  dev_class->nr_enroll_stages = 7;
+  dev_class->temp_hot_seconds = -1;
 
   img_class->bz3_threshold = 24;
   img_class->img_open = elanspi_open;
