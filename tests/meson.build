@@ -57,6 +57,7 @@ drivers_tests = {
     'egismoc-0586': {},
     'egismoc-0587': {},
     'fpcmoc': {},
+    'omsmoc': {},
 	'realtek': {},
 	'realtek-5816': {},
 	'realtek-storage-errors': {},
