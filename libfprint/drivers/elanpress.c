@@ -274,9 +274,9 @@ elanpress_print_get_images (FpiDeviceElanPress *self, FpPrint *print)
   return images;
 }
 
-/* Matching is spread over the CPUs: each worker takes every n-th template
- * image and scores all probes against it; the first worker to reach the
- * threshold flags the others to stop. */
+/* Matching is spread over the CPUs: each worker takes every n-th image of
+ * the pooled gallery and scores all probes against it; the first worker to
+ * reach the threshold flags the others to stop. */
 typedef struct
 {
   GPtrArray           *probes;   /* ElanpressProbe*, shared read-only */
@@ -295,6 +295,7 @@ elanpress_match_worker (gpointer data)
   MatchJob *job = data;
 
   job->best = -1.0;
+  job->best_image = -1;
   for (guint i = job->start; i < job->images->len; i += job->step)
     {
       for (guint p = 0; p < job->probes->len; p++)
@@ -323,23 +324,59 @@ elanpress_match_worker (gpointer data)
   return NULL;
 }
 
-/* best score of any probe image against any image of the print; stops as
- * soon as the threshold is reached. Returns -1 if the print is unusable. */
+/* Best score of any probe image against any image of any print in the
+ * gallery, stopping as soon as the threshold is reached. The gallery's
+ * images are pooled and interleaved print by print, so with several
+ * fingers enrolled the search reaches every finger's images early instead
+ * of exhausting one template before trying the next. Returns -1 when no
+ * print in the gallery is usable; *matched receives the print the best
+ * score came from. */
 static double
-elanpress_match_print (FpiDeviceElanPress *self, GPtrArray *probe_imgs,
-                       FpPrint *print, ElanpressMatchResult *best_res)
+elanpress_match_gallery (FpiDeviceElanPress *self, GPtrArray *probe_imgs,
+                         GPtrArray *gallery, FpPrint **matched,
+                         ElanpressMatchResult *best_res)
 {
-  g_autoptr(GPtrArray) images = elanpress_print_get_images (self, print);
+  g_autoptr(GPtrArray) images = g_ptr_array_new ();
+  g_autoptr(GPtrArray) owners = g_ptr_array_new ();
+  g_autoptr(GPtrArray) usable = g_ptr_array_new ();
+  g_autoptr(GPtrArray) per_print = g_ptr_array_new_with_free_func ((GDestroyNotify) g_ptr_array_unref);
   g_autoptr(GPtrArray) probes = g_ptr_array_new_with_free_func ((GDestroyNotify) elanpress_probe_free);
-  guint n_threads;
+  guint n_threads, longest = 0;
   MatchJob *jobs;
   GThread **threads;
   volatile gint done = 0;
   double best = -1.0;
   gint64 t0 = g_get_monotonic_time ();
 
-  if (!images)
+  if (matched)
+    *matched = NULL;
+
+  for (guint g = 0; g < gallery->len; g++)
+    {
+      FpPrint *print = g_ptr_array_index (gallery, g);
+      GPtrArray *imgs = elanpress_print_get_images (self, print);
+
+      if (!imgs)
+        continue;
+      longest = MAX (longest, imgs->len);
+      g_ptr_array_add (per_print, imgs);
+      g_ptr_array_add (usable, print);
+    }
+  if (per_print->len == 0)
     return -1.0;
+
+  /* interleave: image 0 of every print, then image 1 of every print, ... */
+  for (guint i = 0; i < longest; i++)
+    for (guint g = 0; g < per_print->len; g++)
+      {
+        GPtrArray *imgs = g_ptr_array_index (per_print, g);
+
+        if (i < imgs->len)
+          {
+            g_ptr_array_add (images, g_ptr_array_index (imgs, i));
+            g_ptr_array_add (owners, g_ptr_array_index (usable, g));
+          }
+      }
 
   for (guint p = 0; p < probe_imgs->len; p++)
     g_ptr_array_add (probes, elanpress_probe_new (g_ptr_array_index (probe_imgs, p),
@@ -364,19 +401,18 @@ elanpress_match_print (FpiDeviceElanPress *self, GPtrArray *probe_imgs,
   for (guint t = 0; t < n_threads; t++)
     {
       g_thread_join (threads[t]);
-      if (jobs[t].best > best)
+      if (jobs[t].best_image >= 0 && jobs[t].best > best)
         {
           best = jobs[t].best;
           if (best_res)
             *best_res = jobs[t].res;
-          fp_dbg ("best so far: probe %d vs image %d: %.3f (dx %d dy %d rot %.0f n %d)",
-                  jobs[t].best_probe, jobs[t].best_image, best, jobs[t].res.dx,
-                  jobs[t].res.dy, jobs[t].res.rot, jobs[t].res.overlap);
+          if (matched)
+            *matched = g_ptr_array_index (owners, jobs[t].best_image);
         }
     }
-  fp_dbg ("matched %u probes against %u images on %u threads in %.0f ms",
-          probes->len, images->len, n_threads,
-          (g_get_monotonic_time () - t0) / 1000.0);
+  fp_dbg ("matched %u probes against %u images from %u prints on %u threads in %.0f ms: best %.3f",
+          probes->len, images->len, per_print->len, n_threads,
+          (g_get_monotonic_time () - t0) / 1000.0, best);
 
   g_free (jobs);
   g_free (threads);
@@ -804,28 +840,14 @@ elanpress_match_touch_done (FpiSsm *ssm, FpDevice *dev, GError *error)
     {
       GPtrArray *gallery = NULL;
       FpPrint *best_print = NULL;
-      double best = -1.0;
+      double best;
 
       fpi_device_get_identify_data (dev, &gallery);
-      for (guint i = 0; i < gallery->len; i++)
-        {
-          FpPrint *print = g_ptr_array_index (gallery, i);
-          ElanpressMatchResult r;
-          double c = elanpress_match_print (self, probes, print, &r);
-
-          if (c > best)
-            {
-              best = c;
-              best_print = print;
-              res = r;
-            }
-          if (best >= self->params.threshold)
-            break;
-        }
+      best = elanpress_match_gallery (self, probes, gallery, &best_print, &res);
 
       fp_dbg ("identify: best %.3f (threshold %.2f) dx %d dy %d rot %.0f",
               best, self->params.threshold, res.dx, res.dy, res.rot);
-      if (best >= self->params.threshold)
+      if (best >= self->params.threshold && best_print)
         fpi_device_identify_report (dev, best_print, NULL, NULL);
       else
         fpi_device_identify_report (dev, NULL, NULL, NULL);
@@ -836,8 +858,11 @@ elanpress_match_touch_done (FpiSsm *ssm, FpDevice *dev, GError *error)
       FpPrint *print = NULL;
       double c;
 
+      g_autoptr(GPtrArray) gallery = g_ptr_array_new ();
+
       fpi_device_get_verify_data (dev, &print);
-      c = elanpress_match_print (self, probes, print, &res);
+      g_ptr_array_add (gallery, print);
+      c = elanpress_match_gallery (self, probes, gallery, NULL, &res);
       fp_dbg ("verify: best %.3f (threshold %.2f) dx %d dy %d rot %.0f n %d",
               c, self->params.threshold, res.dx, res.dy, res.rot, res.overlap);
 
