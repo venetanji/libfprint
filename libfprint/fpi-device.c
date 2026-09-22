@@ -1878,13 +1878,17 @@ fpi_device_configure_wakeup (FpDevice *device, gboolean enabled)
 
         /* Persist means that the kernel tries to keep the USB device open
          * in case it is "replugged" due to suspend.
-         * This is not helpful, as it will receive a reset and will be in a bad
-         * state. Instead, seeing an unplug and a new device makes more sense.
+         * For devices supporting suspend/resume, keep persist enabled ("1").
+         * For other devices, seeing an unplug and a new device makes more sense ("0").
          */
         sysfs_persist = g_strdup_printf ("/sys/bus/usb/devices/%d-%s/power/persist", bus, ports->str);
-        res = update_attr (sysfs_persist, "0");
+        if (FP_DEVICE_GET_CLASS (device)->suspend &&
+            g_strcmp0 (FP_DEVICE_GET_CLASS (device)->id, "synaptics") != 0)
+          res = update_attr (sysfs_persist, "1");
+        else
+          res = update_attr (sysfs_persist, "0");
         if (res < 0)
-          g_warning ("Failed to disable USB persist by writing to %s", sysfs_persist);
+          g_warning ("Failed to update USB persist by writing to %s", sysfs_persist);
 
         break;
       }
