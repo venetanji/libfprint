@@ -51,6 +51,7 @@ elanpress_match_params_default (ElanpressMatchParams *p)
   p->score_mode = 0;
   p->sidelobe_r = 4;
   p->block_weight = 0.0;
+  p->rot_prefilter = 3;
   p->reg_thresh = 0.75;
   p->max_side = 256;
 }
@@ -95,6 +96,8 @@ elanpress_match_params_from_env (ElanpressMatchParams *p)
     p->sidelobe_r = (int) d;
   if (env_double ("FP_ELANPRESS_BLOCK_WEIGHT", &d))
     p->block_weight = CLAMP (d, 0.0, 1.0);
+  if (env_double ("FP_ELANPRESS_ROT_PREFILTER", &d) && d >= 0)
+    p->rot_prefilter = (int) d;
   if (env_double ("FP_ELANPRESS_REG_THRESH", &d))
     p->reg_thresh = d;
   if (env_double ("FP_ELANPRESS_MAX_SIDE", &d) && d >= 64)
@@ -471,8 +474,9 @@ struct _ElanpressProbe
 {
   int                  w, h, n_rot;
   double              *angles;
-  Layer               *full;   /* per rotation, full resolution */
-  Layer               *half;   /* per rotation, half resolution */
+  Layer               *full;    /* per rotation, full resolution */
+  Layer               *half;    /* per rotation, half resolution */
+  Layer               *quarter; /* per rotation, quarter resolution */
   ElanpressMatchParams p;
 };
 
@@ -493,6 +497,7 @@ elanpress_probe_new (const guint8 *img, int w, int h,
   pr->angles = g_new (double, pr->n_rot);
   pr->full = g_new0 (Layer, pr->n_rot);
   pr->half = g_new0 (Layer, pr->n_rot);
+  pr->quarter = g_new0 (Layer, pr->n_rot);
   for (int i = 0; i < pr->n_rot; i++)
     {
       pr->angles[i] = (i - n_rot) * pr->p.rot_step;
@@ -501,6 +506,7 @@ elanpress_probe_new (const guint8 *img, int w, int h,
       else
         layer_rotated (&pr->full[i], img, w, h, pr->angles[i]);
       layer_half (&pr->half[i], &pr->full[i]);
+      layer_half (&pr->quarter[i], &pr->half[i]);
     }
   return pr;
 }
@@ -514,9 +520,11 @@ elanpress_probe_free (ElanpressProbe *pr)
     {
       layer_clear (&pr->full[i]);
       layer_clear (&pr->half[i]);
+      layer_clear (&pr->quarter[i]);
     }
   g_free (pr->full);
   g_free (pr->half);
+  g_free (pr->quarter);
   g_free (pr->angles);
   g_free (pr);
 }
@@ -594,11 +602,60 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
       cands[i].dx = cands[i].dy = 0;
     }
 
-  /* coarse: every rotation, every translation, at half resolution.
+  /* Rotation pre-selection: score every rotation at quarter resolution
+   * (about 16x cheaper than the half-resolution pass) and keep only the
+   * best few for the real search. Ranking is all that is needed here. */
+  gboolean *use_rot = g_new (gboolean, pr->n_rot);
+  int keep = pr->p.rot_prefilter;
+
+  for (int r = 0; r < pr->n_rot; r++)
+    use_rot[r] = TRUE;
+  if (keep > 0 && keep < pr->n_rot)
+    {
+      Layer tquarter;
+      double *qbest = g_new (double, pr->n_rot);
+      int qw, qh, min_n_quarter;
+
+      layer_half (&tquarter, &thalf);
+      qw = tquarter.w;
+      qh = tquarter.h;
+      min_n_quarter = (int) (pr->p.min_overlap * pr->quarter[0].w * pr->quarter[0].h);
+      for (int r = 0; r < pr->n_rot; r++)
+        {
+          const Layer *p_q = &pr->quarter[r];
+
+          qbest[r] = -2.0;
+          for (int dy = -(qh - 1); dy <= p_q->h - 1; dy++)
+            for (int dx = -(qw - 1); dx <= p_q->w - 1; dx++)
+              {
+                double s = layer_ncc (p_q, &tquarter, dx, dy, min_n_quarter, NULL);
+                if (s > qbest[r])
+                  qbest[r] = s;
+              }
+          use_rot[r] = FALSE;
+        }
+      for (int n = 0; n < keep; n++)
+        {
+          int bi = -1;
+
+          for (int r = 0; r < pr->n_rot; r++)
+            if (!use_rot[r] && (bi < 0 || qbest[r] > qbest[bi]))
+              bi = r;
+          if (bi >= 0)
+            use_rot[bi] = TRUE;
+        }
+      g_free (qbest);
+      layer_clear (&tquarter);
+    }
+
+  /* coarse: selected rotations, every translation, at half resolution.
    * probe(x, y) pairs with canvas(x - dx, y - dy). */
   for (int r = 0; r < pr->n_rot; r++)
     {
       const Layer *p_h = &pr->half[r];
+
+      if (!use_rot[r])
+        continue;
 
       for (int dy = -(hh - 1); dy <= ph - 1; dy++)
         for (int dx = -(hw - 1); dx <= pw - 1; dx++)
@@ -683,6 +740,7 @@ elanpress_probe_match_canvas (const ElanpressProbe *pr, const guint8 *px,
     best.score = (1.0 - pr->p.block_weight) * best.score +
                  pr->p.block_weight * best.block_min;
 
+  g_free (use_rot);
   g_free (maps);
   g_free (cands);
   layer_clear (&tfull);

@@ -41,6 +41,8 @@ typedef struct
   int    score_mode;   /* 0 peak NCC, 1 peak - sidelobe, 2 peak / sidelobe */
   int    sidelobe_r;   /* half-res px excluded around the peak for the sidelobe */
   double block_weight; /* score = (1-w) * peak + w * block_min */
+  int    rot_prefilter; /* rank rotations at quarter resolution, search only
+                         * the best this many at half/full; 0 = all */
   double reg_thresh;   /* mosaic: registration score needed to merge an image */
   int    max_side;     /* mosaic: canvas side limit, px */
 } ElanpressMatchParams;
