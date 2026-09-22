@@ -58,7 +58,8 @@ struct _FpiDeviceGoodixMoc
   GPtrArray         *list_result;
   guint8             template_id[TEMPLATE_ID_SIZE];
   gboolean           is_power_button_shield_on;
-
+  GCancellable      *transfer_cancellable;
+  gboolean           cmd_suspended;
 };
 
 G_DEFINE_TYPE (FpiDeviceGoodixMoc, fpi_device_goodixmoc, FP_TYPE_DEVICE)
@@ -140,6 +141,18 @@ fp_cmd_receive_cb (FpiUsbTransfer *transfer,
 
   if (error)
     {
+      if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED) && self->cmd_suspended)
+        {
+          fp_dbg ("USB transfer cancelled for suspend, jumping to SUSPENDED");
+          g_error_free (error);
+
+          g_clear_object (&self->transfer_cancellable);
+          self->transfer_cancellable = g_cancellable_new ();
+
+          fpi_ssm_jump_to_state (transfer->ssm, GOODIX_CMD_SUSPENDED);
+          return;
+        }
+
       fpi_ssm_mark_failed (transfer->ssm, error);
       return;
     }
@@ -273,14 +286,30 @@ fp_cmd_run_state (FpiSsm   *ssm,
       break;
 
     case GOODIX_CMD_GET_DATA:
+      if (self->cmd_suspended)
+        {
+          fp_dbg ("cmd_ssm entered GET_DATA while suspended, jumping to SUSPENDED");
+          fpi_ssm_jump_to_state (ssm, GOODIX_CMD_SUSPENDED);
+          break;
+        }
       transfer = fpi_usb_transfer_new (dev);
       transfer->ssm = ssm;
       fpi_usb_transfer_fill_bulk (transfer, EP_IN, EP_IN_MAX_BUF_SIZE);
       fpi_usb_transfer_submit (transfer,
                                self->cmd_cancelable ? 0 : DATA_TIMEOUT,
-                               self->cmd_cancelable ? fpi_device_get_cancellable (dev) : NULL,
+                               self->cmd_cancelable ? self->transfer_cancellable : NULL,
                                fp_cmd_receive_cb,
                                fpi_ssm_get_data (ssm));
+      break;
+
+    case GOODIX_CMD_SUSPENDED:
+      fp_dbg ("cmd_ssm in SUSPENDED state, completing suspend");
+      fpi_device_suspend_complete (dev, NULL);
+      break;
+
+    case GOODIX_CMD_RESUME:
+      fp_dbg ("cmd_ssm in RESUME state, returning to GET_DATA");
+      fpi_ssm_jump_to_state (ssm, GOODIX_CMD_GET_DATA);
       break;
     }
 
@@ -354,6 +383,15 @@ goodix_sensor_cmd (FpiDeviceGoodixMoc *self,
 
   data->cmd = cmd0;
   data->callback = callback;
+
+  if (bwait_data_delay)
+    {
+      if (!self->transfer_cancellable || g_cancellable_is_cancelled (self->transfer_cancellable))
+        {
+          g_clear_object (&self->transfer_cancellable);
+          self->transfer_cancellable = g_cancellable_new ();
+        }
+    }
 
   self->cmd_transfer = g_steal_pointer (&transfer);
   self->cmd_cancelable = bwait_data_delay;
@@ -569,12 +607,15 @@ fp_identify_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
 
   fp_info ("Verify complete!");
 
+  self->task_ssm = NULL;
+
+  g_clear_object (&self->transfer_cancellable);
+  self->transfer_cancellable = g_cancellable_new ();
+
   if (error && error->domain == FP_DEVICE_RETRY)
     fpi_device_identify_report (dev, NULL, NULL, g_steal_pointer (&error));
 
   fpi_device_identify_complete (dev, error);
-
-  self->task_ssm = NULL;
 }
 
 
@@ -1015,6 +1056,11 @@ fp_enroll_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
   FpiDeviceGoodixMoc *self = FPI_DEVICE_GOODIXMOC (dev);
   FpPrint *print = NULL;
 
+  self->task_ssm = NULL;
+
+  g_clear_object (&self->transfer_cancellable);
+  self->transfer_cancellable = g_cancellable_new ();
+
   if (error)
     {
       fpi_device_enroll_complete (dev, NULL, error);
@@ -1025,8 +1071,6 @@ fp_enroll_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
   fpi_device_get_enroll_data (FP_DEVICE (self), &print);
 
   fpi_device_enroll_complete (FP_DEVICE (self), g_object_ref (print), NULL);
-
-  self->task_ssm = NULL;
 }
 /******************************************************************************
  *
@@ -1495,6 +1539,14 @@ gx_fp_release_interface (FpiDeviceGoodixMoc *self,
 {
   g_autoptr(GError) release_error = NULL;
 
+  if (self->transfer_cancellable)
+    {
+      g_cancellable_cancel (self->transfer_cancellable);
+      g_clear_object (&self->transfer_cancellable);
+    }
+  self->transfer_cancellable = g_cancellable_new ();
+  self->cmd_suspended = FALSE;
+
   g_clear_pointer (&self->sensorcfg, g_free);
 
   /* Release usb interface */
@@ -1652,7 +1704,18 @@ gx_fp_template_delete_all (FpDevice *device)
 static void
 fpi_device_goodixmoc_init (FpiDeviceGoodixMoc *self)
 {
+  self->transfer_cancellable = g_cancellable_new ();
+  self->cmd_suspended = FALSE;
+}
 
+static void
+fpi_device_goodixmoc_finalize (GObject *object)
+{
+  FpiDeviceGoodixMoc *self = FPI_DEVICE_GOODIXMOC (object);
+
+  g_clear_object (&self->transfer_cancellable);
+
+  G_OBJECT_CLASS (fpi_device_goodixmoc_parent_class)->finalize (object);
 }
 
 static const FpIdEntry id_table[] = {
@@ -1703,9 +1766,94 @@ static const FpIdEntry id_table[] = {
 
 
 static void
+gx_fp_cancel (FpDevice *device)
+{
+  FpiDeviceGoodixMoc *self = FPI_DEVICE_GOODIXMOC (device);
+
+  fp_dbg ("Cancel");
+  self->cmd_suspended = FALSE;
+  if (self->transfer_cancellable)
+    g_cancellable_cancel (self->transfer_cancellable);
+  g_cancellable_cancel (fpi_device_get_cancellable (device));
+}
+
+static void
+gx_fp_suspend (FpDevice *device)
+{
+  FpiDeviceGoodixMoc *self = FPI_DEVICE_GOODIXMOC (device);
+  FpiDeviceAction action = fpi_device_get_current_action (device);
+
+  fp_dbg ("Suspend called, action: %d", action);
+
+  if (action == FPI_DEVICE_ACTION_NONE)
+    {
+      fpi_device_suspend_complete (device, NULL);
+      return;
+    }
+
+  if (action != FPI_DEVICE_ACTION_IDENTIFY && action != FPI_DEVICE_ACTION_VERIFY)
+    {
+      fpi_device_suspend_complete (device, fpi_device_error_new (FP_DEVICE_ERROR_NOT_SUPPORTED));
+      return;
+    }
+
+  self->cmd_suspended = TRUE;
+
+  if (self->cmd_ssm && self->cmd_cancelable &&
+      fpi_ssm_get_cur_state (self->cmd_ssm) == GOODIX_CMD_GET_DATA)
+    {
+      fp_dbg ("Cancelling bulk read for suspend");
+      g_cancellable_cancel (self->transfer_cancellable);
+      return;
+    }
+
+  if (!self->cmd_ssm || !self->cmd_cancelable)
+    {
+      fp_dbg ("No cancellable transfer active, completing suspend");
+      fpi_device_suspend_complete (device, NULL);
+    }
+}
+
+static void
+gx_fp_resume (FpDevice *device)
+{
+  FpiDeviceGoodixMoc *self = FPI_DEVICE_GOODIXMOC (device);
+  FpiDeviceAction action = fpi_device_get_current_action (device);
+
+  fp_dbg ("Resume called, action: %d", action);
+
+  if (action == FPI_DEVICE_ACTION_NONE)
+    {
+      fpi_device_resume_complete (device, NULL);
+      return;
+    }
+
+  if (action != FPI_DEVICE_ACTION_IDENTIFY && action != FPI_DEVICE_ACTION_VERIFY)
+    {
+      fpi_device_resume_complete (device, fpi_device_error_new (FP_DEVICE_ERROR_NOT_SUPPORTED));
+      return;
+    }
+
+  if (self->cmd_suspended)
+    {
+      self->cmd_suspended = FALSE;
+
+      if (self->cmd_ssm && fpi_ssm_get_cur_state (self->cmd_ssm) == GOODIX_CMD_SUSPENDED)
+        {
+          fp_dbg ("Resuming cmd_ssm from SUSPENDED");
+          fpi_ssm_jump_to_state (self->cmd_ssm, GOODIX_CMD_RESUME);
+        }
+    }
+
+  fpi_device_resume_complete (device, NULL);
+}
+
+static void
 fpi_device_goodixmoc_class_init (FpiDeviceGoodixMocClass *klass)
 {
   FpDeviceClass *dev_class = FP_DEVICE_CLASS (klass);
+
+  G_OBJECT_CLASS (klass)->finalize = fpi_device_goodixmoc_finalize;
 
   dev_class->id = "goodixmoc";
   dev_class->full_name = "Goodix MOC Fingerprint Sensor";
@@ -1723,6 +1871,9 @@ fpi_device_goodixmoc_class_init (FpiDeviceGoodixMocClass *klass)
   dev_class->clear_storage = gx_fp_template_delete_all;
   dev_class->list   = gx_fp_template_list;
   dev_class->identify = gx_fp_identify;
+  dev_class->cancel   = gx_fp_cancel;
+  dev_class->suspend  = gx_fp_suspend;
+  dev_class->resume   = gx_fp_resume;
 
   fpi_device_class_auto_initialize_features (dev_class);
   dev_class->features |= FP_DEVICE_FEATURE_DUPLICATES_CHECK;
