@@ -152,7 +152,6 @@ usb:v04F3p0C42*
 usb:v04F3p0C4B*
 usb:v04F3p0C4D*
 usb:v04F3p0C4F*
-usb:v04F3p0C63*
 usb:v04F3p0C6E*
 usb:v04F3p0C58*
  ID_AUTOSUSPEND=1
@@ -181,6 +180,7 @@ usb:v04F3p0CB6*
 
 # Supported by libfprint driver elanpress
 usb:v04F3p0C3D*
+usb:v04F3p0C63*
  ID_AUTOSUSPEND=1
  ID_PERSIST=0
 

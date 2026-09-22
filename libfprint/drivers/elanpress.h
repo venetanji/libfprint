@@ -72,7 +72,10 @@
 #define ELANPRESS_MIN_CALIBRATION_FW 0x0138
 
 /* quality gates on a frame; raw sensor units. A finger raises the mean by
- * roughly 1500 on the 0c3d pad. Both are env-tunable, see elanpress.c */
+ * roughly 1500 on the 0c3d pad. The coverage gate rejects a finger that
+ * only half landed on the small 0c3d pad; on larger pads (0c63, 80x80)
+ * every full press saturates it at 1.00, which is expected, not a signal.
+ * All are env-tunable, see elanpress.c */
 #define ELANPRESS_MIN_MEAN 150.0
 #define ELANPRESS_MIN_CONTRAST 40.0
 #define ELANPRESS_MIN_COVERAGE 0.35
@@ -80,7 +83,16 @@
 G_DECLARE_FINAL_TYPE (FpiDeviceElanPress, fpi_device_elanpress, FPI,
                       DEVICE_ELANPRESS, FpDevice);
 
+/* driver_data carries the per-device accept threshold x 1000. Both values
+ * are provisional: each was calibrated on one physical pad. 0c3d: 140-image
+ * pool, one subject (0/91 impostor images accepted, ~60% of genuine
+ * touches). 0c63: two subjects on one 80x80 pad; 0.76 admitted an unenrolled
+ * finger there, 0.85 did not (see the merge request discussion).
+ * FP_ELANPRESS_THRESHOLD overrides either at runtime. */
+#define ELANPRESS_THRESHOLD(t) ((guint64) ((t) * 1000 + 0.5))
+
 static const FpIdEntry elanpress_id_table[] = {
-  {.vid = ELANPRESS_VEND_ID, .pid = 0x0c3d, },
+  {.vid = ELANPRESS_VEND_ID, .pid = 0x0c3d, .driver_data = ELANPRESS_THRESHOLD (0.76), },
+  {.vid = ELANPRESS_VEND_ID, .pid = 0x0c63, .driver_data = ELANPRESS_THRESHOLD (0.85), },
   {.vid = 0, .pid = 0, },
 };

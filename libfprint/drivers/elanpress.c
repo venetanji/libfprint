@@ -990,6 +990,8 @@ elanpress_open (FpDevice *dev)
     }
 
   elanpress_match_params_from_env (&self->params);
+  if (fpi_device_get_driver_data (dev) != 0 && !g_getenv ("FP_ELANPRESS_THRESHOLD"))
+    self->params.threshold = fpi_device_get_driver_data (dev) / 1000.0;
   self->min_mean = env_double_default ("FP_ELANPRESS_MIN_MEAN", ELANPRESS_MIN_MEAN);
   self->min_contrast = env_double_default ("FP_ELANPRESS_MIN_CONTRAST", ELANPRESS_MIN_CONTRAST);
   self->min_coverage = env_double_default ("FP_ELANPRESS_MIN_COVERAGE", ELANPRESS_MIN_COVERAGE);

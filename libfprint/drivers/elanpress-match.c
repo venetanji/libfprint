@@ -40,7 +40,9 @@
 void
 elanpress_match_params_default (ElanpressMatchParams *p)
 {
-  p->rot_range = 20.0;
+  /* +/-30: on an 80x80 pad a second subject's genuine presses pinned at
+   * the old +/-20 limit, all on one side */
+  p->rot_range = 30.0;
   p->rot_step = 4.0;
   p->min_overlap = 0.40;
   p->threshold = 0.76;
