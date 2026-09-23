@@ -129,7 +129,8 @@ drivers_info = {
     'vfs301': { 'endian_dependent': true },
     'vfs0050': { 'endian_dependent': true },
     'etes603': {},
-    'egis0570': {},
+    'egis0570': { 'helper': ['pixman'] },
+    'egis0570touch': { 'helper': ['egis-touch-opencv'] },
     'egismoc': {},
     'egis_etu905': {},
     'vcom5s': {},
@@ -228,7 +229,23 @@ foreach i : driver_helpers
         endif
     endforeach
 
-    if i == 'pixman'
+    if i == 'egis-touch-opencv'
+        opencv = dependency('opencv5', required: false)
+        if not opencv.found()
+            opencv = dependency('opencv4')
+        endif
+        optional_deps += declare_dependency(include_directories: include_directories(opencv.get_variable(pkgconfig: 'includedir'), is_system: true))
+        foreach module : ['core', 'imgproc', 'features', 'calib', 'geometry', 'flann']
+            if opencv.version().version_compare('<5') and module == 'features'
+                module = 'features2d'
+            elif opencv.version().version_compare('<5') and module == 'calib'
+                module = 'calib3d'
+            elif opencv.version().version_compare('<5') and module == 'geometry'
+                continue
+            endif
+            optional_deps += cpp.find_library('opencv_' + module)
+        endforeach
+    elif i == 'pixman'
         imaging_dep = dependency('pixman-1', required: false)
         if not imaging_dep.found()
             error('pixman is required for @0@ and possibly others'.format(driver))
