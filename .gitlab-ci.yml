@@ -20,10 +20,10 @@ default:
 variables:
   extends: .libfprint_common_variables
   FDO_DISTRIBUTION_TAG: $LIBFPRINT_IMAGE_TAG
-  FDO_DISTRIBUTION_VERSION: rawhide
+  FDO_DISTRIBUTION_VERSION: '44'
   FDO_UPSTREAM_REPO: "libfprint/$CI_PROJECT_NAME"
-  FEDORA_IMAGE: "registry.freedesktop.org/libfprint/$CI_PROJECT_NAME/fedora/$FDO_DISTRIBUTION_VERSION:$FDO_DISTRIBUTION_TAG"
-  FEDORA_IMAGE_S390X: "registry.freedesktop.org/libfprint/$CI_PROJECT_NAME/fedora/$FDO_DISTRIBUTION_VERSION-s390x:$LIBFPRINT_IMAGE_TAG"
+  FEDORA_IMAGE: "$CI_REGISTRY_IMAGE/fedora/$FDO_DISTRIBUTION_VERSION:$FDO_DISTRIBUTION_TAG"
+  FEDORA_IMAGE_S390X: "$CI_REGISTRY_IMAGE/fedora/$FDO_DISTRIBUTION_VERSION-s390x:$LIBFPRINT_IMAGE_TAG"
   LAST_ABI_BREAK: "056ea541ddc97f5806cffbd99a12dc87e4da3546"
 
 workflow:
@@ -114,7 +114,7 @@ test_valgrind:
   script:
     - meson setup _build -Ddrivers=all
     - meson compile -C _build
-    - meson test -C _build --print-errorlogs --no-stdsplit --setup=valgrind
+    - meson test -C _build --print-errorlogs --no-stdsplit --setup=valgrind --timeout-multiplier 40
   artifacts:
     reports:
       junit: "_build/meson-logs/testlog-valgrind.junit.xml"
@@ -278,7 +278,7 @@ container_fedora_build_manual:
 
 .container_fedora_build_on_deps_changed_rules:
   rules:
-    - if: $CI_PROJECT_NAMESPACE == "libfprint" && $CI_PIPELINE_SOURCE != "schedule"
+    - if: $CI_PIPELINE_SOURCE != "schedule"
       changes:
         compare_to: 'refs/heads/master'
         paths:
