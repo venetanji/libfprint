@@ -410,7 +410,6 @@ dev_deactivate (FpImageDevice *dev)
  */
 
 static const FpIdEntry id_table[] = {
-  { .vid = 0x1c7a, .pid = 0x0570, },
   { .vid = 0x1c7a, .pid = 0x0571, },
   { .vid = 0,      .pid = 0, },
 };

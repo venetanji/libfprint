@@ -194,6 +194,11 @@ if get_option('introspection')
 
     driver_tests_enabled = false
     foreach driver_test, args: drivers_tests
+        # The old 0570 capture trace cannot exercise the replacement touch driver.
+        if driver_test == 'egis0570' and 'egis0570touch' in drivers
+            continue
+        endif
+
         driver_name = driver_test.split('-')[0]
         driver_envs = envs
         driver_envs.set('FP_DRIVERS_ALLOWLIST', driver_name)
@@ -468,4 +473,18 @@ if valgrind.found() and libfprint_sanitizers.length() == 0
             'FP_VIRTUAL_DEVICE_HOT_SECONDS=-1',
             'LIBFPRINT_TEST_WRAPPER=' + ' '.join(libfprint_wrapper),
         ])
+endif
+
+if 'egis0570touch' in drivers
+    egis_touch_test = executable('test-egis0570touch',
+        'test-egis0570touch.cpp',
+        dependencies: libfprint_private_dep,
+        link_with: libfprint_drivers,
+        override_options: ['cpp_std=c++17'])
+    test('egis0570touch-storage', egis_touch_test, suite: 'unit-tests')
+    egis_driver_test = executable('test-egis0570touch-driver',
+        'test-egis0570touch-driver.c',
+        dependencies: libfprint_private_dep,
+        link_with: libfprint_drivers)
+    test('egis0570touch-driver', egis_driver_test, suite: 'unit-tests')
 endif

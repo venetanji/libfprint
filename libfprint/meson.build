@@ -88,6 +88,7 @@ nbis_sources = [
 ]
 
 driver_sources = {
+    'egis0570touch': files('drivers/egis0570touch.c', 'drivers/egis0570touch-match.cpp'),
     'upekts' : files(
         'drivers/upekts.c',
         'drivers/upek_proto.c',
@@ -142,6 +143,7 @@ driver_sources = {
 }
 
 helper_sources = {
+    'egis-touch-opencv': files(),
     'aeslib': files('drivers/aeslib.c'),
     'aesx660': files('drivers/aesx660.c'),
     'aes3k': files('drivers/aes3k.c'),
@@ -253,6 +255,7 @@ libfprint_private = static_library('fprint-private',
 libfprint_drivers = static_library('fprint-drivers',
     sources: drivers_sources,
     c_args: drivers_cflags,
+    override_options: ['cpp_std=c++17'],
     dependencies: deps,
     link_with: libfprint_private,
     install: false)

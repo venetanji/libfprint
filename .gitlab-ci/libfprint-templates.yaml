@@ -25,6 +25,7 @@
     libX11-devel
     libXv-devel
     meson
+    opencv-devel
     openssl-devel
     pixman-devel
     podman
