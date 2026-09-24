@@ -63,6 +63,7 @@ drivers_tests = {
     'focaltech_moc-6553': {},
     'mafpmoc': {},
     'secugen': {},
+    'syna0082': { 'timeout': 30 },
 }
 
 if get_option('introspection')
