@@ -221,6 +221,15 @@ syna0082_matcher_extract (const guint8 *pixels,
                         keypoints,
                         descriptors);
 
+  /* OpenCV's SIFT nfeatures cap is not always strictly enforced (ties at the
+   * response cutoff can yield nfeatures+1); truncate defensively so encoded
+   * references never violate decode_features()'s maximum_features bound. */
+  if (keypoints.size () > maximum_features)
+    {
+      keypoints.resize (maximum_features);
+      descriptors = descriptors.rowRange (0, maximum_features);
+    }
+
   if (keypoints.size () < minimum_features || descriptors.empty ())
     {
       g_set_error_literal (error,
