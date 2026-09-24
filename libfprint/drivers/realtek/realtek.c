@@ -460,8 +460,8 @@ fp_get_delete_pos_cb (FpiDeviceRealtek *self,
   if (self->host_bound &&
       (!realtek_load_host_uuid (self->host_uuid) ||
        !realtek_host_index_from_records (buffer_in, self->trans_data_len,
-                                        self->template_num,
-                                        self->host_uuid, &self->host_index)))
+                                         self->template_num,
+                                         self->host_uuid, &self->host_index)))
     {
       fpi_ssm_mark_failed (self->task_ssm,
                            fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
@@ -482,7 +482,9 @@ fp_get_delete_pos_cb (FpiDeviceRealtek *self,
                 continue;
             }
           else if (g_strcmp0 (fp_print_get_description (print), (const char *) temp_userid) != 0)
-            continue;
+            {
+              continue;
+            }
           self->pos_index = i;
           found = TRUE;
           break;
@@ -552,10 +554,10 @@ fp_enroll_get_template_cb (FpiDeviceRealtek *self,
     }
 
   if (self->host_bound && !realtek_host_index_from_records (buffer_in,
-                                                             self->trans_data_len,
-                                                             self->template_num,
-                                                             self->host_uuid,
-                                                             &self->host_index))
+                                                            self->trans_data_len,
+                                                            self->template_num,
+                                                            self->host_uuid,
+                                                            &self->host_index))
     {
       fpi_ssm_mark_failed (self->task_ssm,
                            fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
