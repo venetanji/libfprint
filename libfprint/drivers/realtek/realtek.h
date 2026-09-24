@@ -20,6 +20,7 @@
 
 #include "fpi-device.h"
 #include "fpi-ssm.h"
+#include "realtek-kensington.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,6 +38,9 @@
 #define FP_RTK_CMD_BULK_DATA_LEN 2
 
 #define TEMPLATE_LEN_COMMON 35
+#define TEMPLATE_LEN_HOST_BOUND REALTEK_HOST_RECORD_SIZE
+#define UID_PAYLOAD_LEN_HOST_BOUND REALTEK_HOST_COMMIT_SIZE
+#define HOST_UUID_LEN REALTEK_HOST_UUID_SIZE
 
 #define SUBFACTOR_OFFSET 2
 #define UID_OFFSET 3
@@ -65,6 +69,7 @@ typedef void (*SynCmdMsgCallback) (FpiDeviceRealtek *self,
 typedef struct
 {
   SynCmdMsgCallback callback;
+  gboolean          identify_without_status;
 } CommandData;
 
 typedef enum {
@@ -154,13 +159,20 @@ struct _FpiDeviceRealtek
   FpRtkMsgType    message_type;
   gboolean        cmd_cancellable;
   gint            enroll_stage;
+  guint           final_scan_retries;
   gint            max_enroll_stage;
+  gint64          capture_deadline_us;
   guchar         *read_data;
   gsize           trans_data_len;
+  guint           empty_reads;
   FpRtkPurpose    fp_purpose;
   gint            pos_index;
   gint            template_num;
   gint            template_len;
+  gboolean        kensington;
+  gboolean        host_bound;
+  guint8          host_uuid[HOST_UUID_LEN];
+  guint8          host_index;
 };
 
 struct rtk_cmd_bulk
