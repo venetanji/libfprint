@@ -31,11 +31,22 @@ static const FpIdEntry id_table[] = {
   { .vid = 0x0bda,  .pid = 0x5816,  },
   { .vid = 0x2541,  .pid = 0xfa03,  },
   { .vid = 0x3274,  .pid = 0x9003,  },
+  { .vid = 0x047d,  .pid = 0x8228,  }, /* Kensington VeriMark Desktop 2.0 */
   { .vid = 0,  .pid = 0,  .driver_data = 0 },   /* terminating entry */
 };
 
 static gboolean
+realtek_load_host_uuid (guint8 uuid[HOST_UUID_LEN])
+{
+  g_autofree gchar *text = NULL;
+
+  return g_file_get_contents ("/sys/class/dmi/id/product_uuid", &text, NULL, NULL) &&
+         realtek_parse_host_uuid (g_strstrip (text), uuid);
+}
+
+static gboolean
 parse_print_data (GVariant      *data,
+                  gboolean       kensington,
                   guint8        *finger,
                   const guint8 **user_id,
                   gsize         *user_id_len)
@@ -63,6 +74,9 @@ parse_print_data (GVariant      *data,
 
   if (*user_id_len == 0 || *user_id_len > DEFAULT_UID_LEN)
     return FALSE;
+
+  if (kensington && *finger == 0xf5)
+    return *user_id_len == DEFAULT_UID_LEN;
 
   if (*user_id[0] == '\0' || *user_id[0] == ' ')
     return FALSE;
@@ -107,6 +121,9 @@ fp_get_device_info_cb (FpiDeviceRealtek *self,
     }
 
   self->template_len = TEMPLATE_LEN_COMMON;
+  self->host_bound = self->kensington && (buffer_in[0] & 1);
+  if (self->host_bound)
+    self->template_len = TEMPLATE_LEN_HOST_BOUND;
 
   fpi_ssm_next_state (self->task_ssm);
 }
@@ -161,6 +178,14 @@ fp_finish_capture_cb (FpiDeviceRealtek *self,
     }
 
   gint capture_status = buffer_in[0];
+  if (self->kensington && capture_status != FP_RTK_SUCCESS &&
+      g_get_monotonic_time () >= self->capture_deadline_us)
+    {
+      fpi_ssm_mark_failed (self->task_ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                                     "Finger capture timed out"));
+      return;
+    }
   if (capture_status == 0)
     {
       fpi_device_report_finger_status_changes (FP_DEVICE (self),
@@ -170,8 +195,12 @@ fp_finish_capture_cb (FpiDeviceRealtek *self,
     }
   else
     {
-      fpi_ssm_jump_to_state (self->task_ssm,
-                             fpi_ssm_get_cur_state (self->task_ssm));
+      if (self->kensington)
+        fpi_ssm_jump_to_state_delayed (self->task_ssm,
+                                       fpi_ssm_get_cur_state (self->task_ssm), 200);
+      else
+        fpi_ssm_jump_to_state (self->task_ssm,
+                               fpi_ssm_get_cur_state (self->task_ssm));
     }
 }
 
@@ -235,7 +264,17 @@ fp_accept_sample_cb (FpiDeviceRealtek *self,
           return;
         }
 
-      if (in_status != FP_RTK_SUCCESS)
+      if (self->kensington && in_status != FP_RTK_SUCCESS &&
+          in_status >= FP_RTK_TOO_HIGH && in_status <= FP_RTK_MERGE_FAILURE &&
+          self->final_scan_retries++ < 5)
+        {
+          fpi_device_enroll_progress (FP_DEVICE (self), self->enroll_stage,
+                                      NULL, fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL));
+          fpi_ssm_jump_to_state (self->task_ssm, FP_RTK_ENROLL_CAPTURE);
+          return;
+        }
+
+      if (self->kensington && in_status != FP_RTK_SUCCESS)
         {
           fpi_ssm_mark_failed (self->task_ssm,
                                fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
@@ -262,6 +301,18 @@ fp_print_from_data (FpiDeviceRealtek *self, uint8_t *buffer)
   finger = *(buffer);
 
   print = fp_print_new (FP_DEVICE (self));
+  if (self->kensington && finger == 0xf5)
+    {
+      /* Legacy device records contain opaque, non-textual identifiers. */
+      uid = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
+                                       buffer + 1, DEFAULT_UID_LEN, 1);
+      data = g_variant_new ("(y@ay)", finger, uid);
+      fpi_print_set_type (print, FPI_PRINT_RAW);
+      fpi_print_set_device_stored (print, TRUE);
+      g_object_set (print, "fpi-data", data,
+                    "description", "Kensington device print", NULL);
+      return print;
+    }
   userid_len = MIN (DEFAULT_UID_LEN, strlen (userid));
 
   uid = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
@@ -351,7 +402,10 @@ fp_identify_feature_cb (FpiDeviceRealtek *self,
           if (current_action == FPI_DEVICE_ACTION_VERIFY)
             {
               fpi_device_verify_report (device, FPI_MATCH_SUCCESS, match, error);
-              fpi_ssm_next_state (self->task_ssm);
+              if (self->kensington)
+                fpi_ssm_jump_to_state (self->task_ssm, FP_RTK_VERIFY_NUM_STATES);
+              else
+                fpi_ssm_next_state (self->task_ssm);
             }
           else
             {
@@ -396,10 +450,21 @@ fp_get_delete_pos_cb (FpiDeviceRealtek *self,
   fpi_device_get_delete_data (FP_DEVICE (self), &print);
   g_object_get (print, "fpi-data", &data, NULL);
 
-  if (!parse_print_data (data, &finger, &user_id, &user_id_len))
+  if (!parse_print_data (data, self->kensington, &finger, &user_id, &user_id_len))
     {
-      fpi_device_delete_complete (FP_DEVICE (self),
-                                  fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
+      fpi_ssm_mark_failed (self->task_ssm,
+                           fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
+      return;
+    }
+
+  if (self->host_bound &&
+      (!realtek_load_host_uuid (self->host_uuid) ||
+       !realtek_host_index_from_records (buffer_in, self->trans_data_len,
+                                        self->template_num,
+                                        self->host_uuid, &self->host_index)))
+    {
+      fpi_ssm_mark_failed (self->task_ssm,
+                           fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
       return;
     }
 
@@ -408,12 +473,19 @@ fp_get_delete_pos_cb (FpiDeviceRealtek *self,
       if (buffer_in[i * self->template_len] != 0)
         {
           memcpy (temp_userid, buffer_in + i * self->template_len + UID_OFFSET, DEFAULT_UID_LEN);
-          if (g_strcmp0 (fp_print_get_description (print), (const char *) temp_userid) == 0)
+          if (self->kensington && finger == 0xf5)
             {
-              self->pos_index = i;
-              found = TRUE;
-              break;
+              if (buffer_in[i * self->template_len + SUBFACTOR_OFFSET] != finger ||
+                  user_id_len != DEFAULT_UID_LEN ||
+                  memcmp (buffer_in + i * self->template_len + UID_OFFSET,
+                          user_id, user_id_len) != 0)
+                continue;
             }
+          else if (g_strcmp0 (fp_print_get_description (print), (const char *) temp_userid) != 0)
+            continue;
+          self->pos_index = i;
+          found = TRUE;
+          break;
         }
     }
 
@@ -439,6 +511,14 @@ fp_get_enroll_num_cb (FpiDeviceRealtek *self,
       return;
     }
 
+  if (!buffer_in || (self->kensington && buffer_in[1] == 0) ||
+      (gsize) buffer_in[1] * self->template_len > EP_IN_MAX_BUF_SIZE)
+    {
+      fpi_ssm_mark_failed (self->task_ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
+                                                     "Invalid template count"));
+      return;
+    }
   self->template_num = buffer_in[1];
 
   fpi_ssm_next_state (self->task_ssm);
@@ -463,12 +543,23 @@ fp_enroll_get_template_cb (FpiDeviceRealtek *self,
                            uint8_t          *buffer_in,
                            GError           *error)
 {
-  g_autofree guchar *seq_list = NULL;
   gboolean found = FALSE;
 
   if (error)
     {
       fpi_ssm_mark_failed (self->task_ssm, error);
+      return;
+    }
+
+  if (self->host_bound && !realtek_host_index_from_records (buffer_in,
+                                                             self->trans_data_len,
+                                                             self->template_num,
+                                                             self->host_uuid,
+                                                             &self->host_index))
+    {
+      fpi_ssm_mark_failed (self->task_ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
+                                                     "Foreign or inconsistent host-bound print"));
       return;
     }
 
@@ -553,13 +644,26 @@ fp_list_cb (FpiDeviceRealtek *self,
       if (buffer_in[i * self->template_len] != 0)
         {
           FpPrint *print = NULL;
+          guint8 finger = buffer_in[i * self->template_len + SUBFACTOR_OFFSET];
+
+          if (self->kensington &&
+              (buffer_in[i * self->template_len] != 1 ||
+               (finger != SUB_FINGER_01 && finger != 0xf5) ||
+               (finger == SUB_FINGER_01 &&
+                (buffer_in[i * self->template_len + UID_OFFSET] == 0 ||
+                 buffer_in[i * self->template_len + UID_OFFSET] == ' '))))
+            {
+              fpi_device_list_complete (FP_DEVICE (self), NULL,
+                                        fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
+              return;
+            }
           print = fp_print_from_data (self, buffer_in + i * self->template_len + SUBFACTOR_OFFSET);
           g_ptr_array_add (list_result, g_object_ref_sink (print));
           found = TRUE;
         }
     }
 
-  if (!found)
+  if (!found && !self->kensington)
     {
       fpi_device_list_complete (FP_DEVICE (self),
                                 g_steal_pointer (&list_result),
@@ -639,16 +743,26 @@ fp_cmd_receive_cb (FpiUsbTransfer *transfer,
   /* skip zero length package */
   if (transfer->actual_length == 0)
     {
+      if (self->kensington && ++self->empty_reads > 3)
+        {
+          fpi_ssm_mark_failed (transfer->ssm,
+                               fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                                         "Repeated empty Kensington responses"));
+          return;
+        }
       fpi_ssm_jump_to_state (transfer->ssm, ssm_state);
       return;
     }
+  self->empty_reads = 0;
 
   /* get data */
   if (ssm_state == FP_RTK_CMD_TRANS_DATA)
     {
       g_autofree guchar *read_buf = NULL;
 
-      if ((gsize) transfer->actual_length < self->trans_data_len)
+      if (self->trans_data_len == 0 ||
+          self->trans_data_len > EP_IN_MAX_BUF_SIZE ||
+          (gsize) transfer->actual_length < self->trans_data_len)
         {
           fpi_ssm_mark_failed (transfer->ssm,
                                fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
@@ -660,11 +774,26 @@ fp_cmd_receive_cb (FpiUsbTransfer *transfer,
       memcpy (read_buf, transfer->buffer, self->trans_data_len);
       self->read_data = g_steal_pointer (&read_buf);
 
+      if (data->identify_without_status)
+        {
+          if (data->callback)
+            data->callback (self, self->read_data, NULL);
+          g_clear_pointer (&self->read_data, g_free);
+          fpi_ssm_mark_completed (transfer->ssm);
+          return;
+        }
+
       fpi_ssm_next_state (transfer->ssm);
       return;
     }
 
   /* get status */
+  if (transfer->actual_length < 1)
+    {
+      fpi_ssm_mark_failed (transfer->ssm,
+                           fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+      return;
+    }
   status_flag = parse_status (transfer->buffer, self->message_type);
   if (status_flag != 0)
     {
@@ -764,6 +893,7 @@ fp_cmd_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
   CommandData *data = fpi_ssm_get_data (ssm);
 
   self->cmd_ssm = NULL;
+  g_clear_pointer (&self->read_data, g_free);
 
   if (error)
     {
@@ -820,7 +950,8 @@ fp_ctrl_cmd_cb (FpiUsbTransfer *transfer,
     }
   else
     {
-      if (transfer->actual_length == 0)
+      if (transfer->actual_length == 0 ||
+          (self->kensington && transfer->actual_length != get_device_info.len))
         {
           fp_info ("Control transfer receive data failed!");
           fpi_ssm_mark_failed (transfer->ssm,
@@ -882,6 +1013,7 @@ rtk_sensor_bulk_cmd (FpiDeviceRealtek *self,
   self->message_type = message_type;
   self->trans_data_len = GET_TRANS_DATA_LEN (cmd[11], cmd[10]);
   self->cmd_cancellable = bwait_data_delay;
+  self->empty_reads = 0;
 
   cmd_transfer = prepare_bulk_transfer (FP_DEVICE (self), cmd, FP_RTK_CMD_BULK_TOTAL_LEN, NULL);
   self->cmd_transfer = g_steal_pointer (&cmd_transfer);
@@ -897,6 +1029,8 @@ rtk_sensor_bulk_cmd (FpiDeviceRealtek *self,
                                FP_RTK_CMD_NUM_STATES);
 
   data->callback = callback;
+  data->identify_without_status = self->kensington &&
+                                  cmd[0] == 0x45 && cmd[1] == 0x22;
   fpi_ssm_set_data (self->cmd_ssm, data, (GDestroyNotify) fp_cmd_ssm_done_data_free);
 
   fpi_ssm_start (self->cmd_ssm, fp_cmd_ssm_done);
@@ -991,10 +1125,12 @@ fp_verify_sm_run_state (FpiSsm *ssm, FpDevice *device)
       break;
 
     case FP_RTK_VERIFY_CAPTURE:
+      self->capture_deadline_us = g_get_monotonic_time () + 30 * G_USEC_PER_SEC;
       fpi_device_report_finger_status_changes (device,
                                                FP_FINGER_STATUS_NEEDED,
                                                FP_FINGER_STATUS_NONE);
 
+      co_start_capture.param[0] = self->kensington ? self->fp_purpose : 0;
       cmd_buf = (guint8 *) &co_start_capture;
       rtk_sensor_bulk_cmd (self, cmd_buf, NULL, FP_RTK_MSG_DEFAULT, 0, fp_task_ssm_generic_cb);
       break;
@@ -1052,6 +1188,14 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
           break;
         }
 
+      if (self->host_bound && !realtek_load_host_uuid (self->host_uuid))
+        {
+          fpi_ssm_mark_failed (ssm,
+                               fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
+                                                         "Cannot read a valid host UUID"));
+          break;
+        }
+
       co_get_template.data_len[0] = GET_LEN_L (self->template_len * self->template_num);
       co_get_template.data_len[1] = GET_LEN_H (self->template_len * self->template_num);
 
@@ -1066,10 +1210,12 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
       break;
 
     case FP_RTK_ENROLL_CAPTURE:
+      self->capture_deadline_us = g_get_monotonic_time () + 30 * G_USEC_PER_SEC;
       fpi_device_report_finger_status_changes (device,
                                                FP_FINGER_STATUS_NEEDED,
                                                FP_FINGER_STATUS_NONE);
 
+      co_start_capture.param[0] = self->kensington ? self->fp_purpose : 0;
       cmd_buf = (guint8 *) &co_start_capture;
       rtk_sensor_bulk_cmd (self, cmd_buf, NULL, FP_RTK_MSG_DEFAULT, 0, fp_task_ssm_generic_cb);
       break;
@@ -1094,7 +1240,7 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
       gchar *valid_uid = NULL;
       gint payload_len;
 
-      payload_len = UID_PAYLOAD_LEN_DEFAULT;
+      payload_len = self->host_bound ? UID_PAYLOAD_LEN_HOST_BOUND : UID_PAYLOAD_LEN_DEFAULT;
 
       fpi_device_get_enroll_data (device, &print);
       user_id = fpi_print_generate_user_id (print);
@@ -1102,6 +1248,8 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
 
       payload = g_malloc0 (payload_len);
       memcpy (payload, user_id, user_id_len);
+      if (self->host_bound)
+        realtek_fill_host_bound_commit (payload, self->host_index, self->host_uuid);
       valid_uid = (gchar *) payload;
 
       finger = SUB_FINGER_01;
@@ -1118,7 +1266,8 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
       g_object_set (print, "fpi-data", data, NULL);
       g_object_set (print, "description", valid_uid, NULL);
 
-      g_debug ("user_id: %s, finger: 0x%x", user_id, finger);
+      if (!self->kensington)
+        g_debug ("user_id: %s, finger: 0x%x", user_id, finger);
 
       nor_enroll_commit.param[0] = SUB_FINGER_01;
       nor_enroll_commit.data_len[0] = GET_LEN_L (payload_len);
@@ -1226,6 +1375,7 @@ enroll (FpDevice *device)
 
   G_DEBUG_HERE ();
   self->enroll_stage = 0;
+  self->final_scan_retries = 0;
   self->fp_purpose = FP_RTK_PURPOSE_ENROLL;
 
   g_assert (!self->task_ssm);
@@ -1278,6 +1428,8 @@ dev_probe (FpDevice *device)
     fp_dbg ("Device name: %s", product);
 
   self->max_enroll_stage = MAX_ENROLL_SAMPLES;
+  self->kensington = g_usb_device_get_vid (usb_dev) == 0x047d &&
+                     g_usb_device_get_pid (usb_dev) == 0x8228;
   fpi_device_set_nr_enroll_stages (device, self->max_enroll_stage);
 
   g_usb_device_release_interface (fpi_device_get_usb_device (FP_DEVICE (device)), 0, 0, NULL);

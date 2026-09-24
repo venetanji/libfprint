@@ -60,11 +60,19 @@ drivers_tests = {
 	'realtek': {},
 	'realtek-5816': {},
 	'realtek-storage-errors': {},
+	'realtek-kensington': {},
     'focaltech_moc': { 'timeout': 30 },
     'focaltech_moc-6553': {},
     'mafpmoc': {},
     'secugen': {},
 }
+
+if 'realtek' in drivers
+  realtek_kensington_test = executable('test-realtek-kensington',
+      'test-realtek-kensington.c',
+      dependencies: glib_dep)
+  test('realtek-kensington', realtek_kensington_test, suite: 'drivers', env: envs)
+endif
 
 if get_option('introspection')
   conf = configuration_data()
