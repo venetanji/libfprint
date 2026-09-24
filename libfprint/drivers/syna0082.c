@@ -705,15 +705,16 @@ dev_extract_print (FpImageDevice *image_device,
                    FpPrint      **print,
                    GError       **error)
 {
+  FpiDeviceSyna0082 *self = FPI_DEVICE_SYNA0082 (image_device);
   g_autoptr(GBytes) features = NULL;
   g_autoptr(GVariant) data = NULL;
   gconstpointer bytes;
   gsize length;
 
   features = syna0082_matcher_extract (image->data,
-                                      image->width,
-                                      image->height,
-                                      error);
+                                       image->width,
+                                       image->height,
+                                       error);
   if (!features)
     {
       g_autofree gchar *message = g_strdup ((*error)->message);
@@ -722,6 +723,18 @@ dev_extract_print (FpImageDevice *image_device,
       *error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_GENERAL, "%s", message);
       return FALSE;
     }
+
+  /* On the final enrollment stage the framework synchronously processes the
+   * print inside image_captured() and deactivates the device while the state
+   * machine is still in AWAIT_FINGER_OFF. Report the finger as removed now so
+   * that deactivation happens from IDLE instead; without this the process
+   * warns "Deactivating image device while it is not idle", which the
+   * regression harness turns fatal via G_DEBUG=fatal-warnings. Earlier stages
+   * keep the delayed finger-off so a held finger cannot satisfy a second
+   * stage. */
+  if (fpi_device_get_current_action (FP_DEVICE (image_device)) == FPI_DEVICE_ACTION_ENROLL &&
+      self->capture_count == (guint) fp_device_get_nr_enroll_stages (FP_DEVICE (image_device)))
+    fpi_image_device_report_finger_status (FP_IMAGE_DEVICE (image_device), FALSE);
 
   bytes = g_bytes_get_data (features, &length);
   data = g_variant_ref_sink (
