@@ -120,6 +120,7 @@ driver_sources = {
     'egis_etu905' : files('drivers/egismoc/egis_etu905.c'),
     'vfs0050' : files('drivers/vfs0050.c'),
     'elan' : files('drivers/elan.c'),
+    'elanpress' : files('drivers/elanpress.c', 'drivers/elanpress-match.c'),
     'elanmoc' : files('drivers/elanmoc/elanmoc.c'),
     'elanspi' : files('drivers/elanspi.c'),
     'nb1010' : files('drivers/nb1010.c'),

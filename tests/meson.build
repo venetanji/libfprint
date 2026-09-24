@@ -38,6 +38,7 @@ drivers_tests = {
     'elan': {},
     'elan-cobo': {},
     'elanmoc': {},
+    'elanpress': { 'timeout': 90 },
     'elanspi': { 'timeout': 30 },
     'synaptics': {},
     'upektc_img': {},
