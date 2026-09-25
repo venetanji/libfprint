@@ -20,5 +20,7 @@ Changes from upstream:
   programs, which are not needed to build the SIFT core against raw pixel
   buffers.
 
-Everything else is byte-identical to upstream. Upstream's own header notes
+The vendored sources are reformatted with the project's uncrustify config
+(whitespace/brace style only; no code changes) so the `test_indent` CI check
+passes. Code is otherwise identical to upstream. Upstream's own header notes
 that SIFT was patented (US 6,711,293); that patent expired in March 2020.

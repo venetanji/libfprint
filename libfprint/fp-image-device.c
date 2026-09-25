@@ -127,8 +127,10 @@ fp_image_device_start_capture_action (FpDevice *device)
       fpi_device_get_enroll_data (device, &enroll_print);
       g_object_get (enroll_print, "fpi-type", &print_type, NULL);
       if (print_type == FPI_PRINT_UNDEFINED)
-        fpi_print_set_type (enroll_print,
-                            cls->extract_print ? FPI_PRINT_RAW : FPI_PRINT_NBIS);
+        {
+          fpi_print_set_type (enroll_print,
+                              cls->extract_print ? FPI_PRINT_RAW : FPI_PRINT_NBIS);
+        }
       else if (print_type != (cls->extract_print ? FPI_PRINT_RAW : FPI_PRINT_NBIS))
         {
           fpi_device_action_error (

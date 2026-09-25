@@ -20,7 +20,7 @@
    Revision history:
       September, 15, 2013: initial version.
       July 8th, 2014, re-organized source code.
-*/
+ */
 
 #ifndef EZSIFT_H
 #define EZSIFT_H
@@ -115,118 +115,137 @@ static const int SIFT_FIXPT_SCALE = 1;
  * Definitions
  ***************************************/
 #define DEGREE_OF_DESCRIPTORS (128)
-struct SiftKeypoint {
-    int octave;   // octave number
-    int layer;    // layer number
-    float rlayer; // real number of layer number
+struct SiftKeypoint
+{
+  int   octave;   // octave number
+  int   layer;    // layer number
+  float rlayer;   // real number of layer number
 
-    float r;     // normalized row coordinate
-    float c;     // normalized col coordinate
-    float scale; // normalized scale
+  float r;       // normalized row coordinate
+  float c;       // normalized col coordinate
+  float scale;   // normalized scale
 
-    float ri;          // row coordinate in that layer.
-    float ci;          // column coordinate in that layer.
-    float layer_scale; // the scale of that layer
+  float ri;            // row coordinate in that layer.
+  float ci;            // column coordinate in that layer.
+  float layer_scale;   // the scale of that layer
 
-    float ori; // orientation in degrees.
-    float mag; // magnitude
+  float ori;   // orientation in degrees.
+  float mag;   // magnitude
 
-    float descriptors[DEGREE_OF_DESCRIPTORS];
+  float descriptors[DEGREE_OF_DESCRIPTORS];
 };
 
 // Match pair structure. Use for interest point matching.
-struct MatchPair {
-    int r1;
-    int c1;
-    int r2;
-    int c2;
+struct MatchPair
+{
+  int r1;
+  int c1;
+  int r2;
+  int c2;
 };
 
 /****************************************
  *  SIFT Processing Functions
  ***************************************/
 // Initialize SIFT parameters.
-void init_sift_parameters(bool doubleFirstOctave = true,
-                          float contrast_threshold = 8.0f,
-                          float edge_threshold = 10.0f,
-                          float match_NDDR_threshold = 0.6f);
+void init_sift_parameters (bool  doubleFirstOctave = true,
+                           float contrast_threshold = 8.0f,
+                           float edge_threshold = 10.0f,
+                           float match_NDDR_threshold = 0.6f);
 
 // Enable doubling of original image.
-void double_original_image(bool doubleFirstOctave);
+void double_original_image (bool doubleFirstOctave);
 
 // Efficient Gaussian Blur function.
 // 1. Use row buf to handle border pixel.
 // 2. hori processing and transpose
-int gaussian_blur(const Image<float> &in_image, Image<float> &out_image,
-                  std::vector<float> coef1d);
+int gaussian_blur (const Image<float> &in_image,
+                   Image<float>       &out_image,
+                   std::vector<float>  coef1d);
 
 // Row filter and then transpose
-int row_filter_transpose(float *src, float *dst, int w, int h, float *coef1d,
-                         int gR);
+int row_filter_transpose (float *src,
+                          float *dst,
+                          int    w,
+                          int    h,
+                          float *coef1d,
+                          int    gR);
 
 // Build image octaves during the initialization.
-int build_octaves(const Image<unsigned char> &image,
-                  std::vector<Image<unsigned char>> &octaves, int firstOctave,
-                  int nOctaves);
+int build_octaves (const Image<unsigned char>         &image,
+                   std::vector<Image<unsigned char> > &octaves,
+                   int                                 firstOctave,
+                   int                                 nOctaves);
 
 // Compute Gaussian filter coefficients for Gaussian Blur.
-std::vector<std::vector<float>> compute_gaussian_coefs(int nOctaves,
-                                                       int nGpyrLayers);
+std::vector<std::vector<float> > compute_gaussian_coefs (int nOctaves,
+                                                         int nGpyrLayers);
 
 // Build Gaussian pyramid.
-int build_gaussian_pyramid(std::vector<Image<unsigned char>> &octaves,
-                           std::vector<Image<float>> &gpyr, int nOctaves,
-                           int nGpyrLayers);
+int build_gaussian_pyramid (std::vector<Image<unsigned char> > &octaves,
+                            std::vector<Image<float> >         &gpyr,
+                            int                                 nOctaves,
+                            int                                 nGpyrLayers);
 
 // Build DoG pyramid.
-int build_dog_pyr(std::vector<Image<float>> &gpyr,
-                  std::vector<Image<float>> &dogPyr, int nOctaves,
-                  int nDogLayers);
+int build_dog_pyr (std::vector<Image<float> > &gpyr,
+                   std::vector<Image<float> > &dogPyr,
+                   int                         nOctaves,
+                   int                         nDogLayers);
 
 // Build gradient and rotation pyramid.
-int build_grd_rot_pyr(std::vector<Image<float>> &gpyr,
-                      std::vector<Image<float>> &grdPyr,
-                      std::vector<Image<float>> &rotPyr, int nOctaves,
-                      int nLayers);
+int build_grd_rot_pyr (std::vector<Image<float> > &gpyr,
+                       std::vector<Image<float> > &grdPyr,
+                       std::vector<Image<float> > &rotPyr,
+                       int                         nOctaves,
+                       int                         nLayers);
 
 // Refine local extrema.
-bool refine_local_extrema(std::vector<Image<float>> &dogPyr, int nOctaves,
-                          int nDogLayers, SiftKeypoint &kpt);
+bool refine_local_extrema (std::vector<Image<float> > &dogPyr,
+                           int                         nOctaves,
+                           int                         nDogLayers,
+                           SiftKeypoint               &kpt);
 
 // Export keypoint list to a file.
-int export_kpt_list_to_file(const char *filename,
-                            std::list<SiftKeypoint> &kpt_list,
-                            bool bIncludeDescpritor);
+int export_kpt_list_to_file (const char              *filename,
+                             std::list<SiftKeypoint> &kpt_list,
+                             bool                     bIncludeDescpritor);
 
 // Compute orientation histogram.
-float compute_orientation_hist(const Image<float> &image, SiftKeypoint &kpt,
-                               float *&hist);
+float compute_orientation_hist (const Image<float> &image,
+                                SiftKeypoint       &kpt,
+                                float *            &hist);
 
 /****************************************
  *  SIFT Core Functions
  ***************************************/
 // Detect keypoints.
-int detect_keypoints(std::vector<Image<float>> &dogPyr,
-                     std::vector<Image<float>> &grdPyr,
-                     std::vector<Image<float>> &rotPyr, int nOctaves,
-                     int nDogLayers, std::list<SiftKeypoint> &kpt_list);
+int detect_keypoints (std::vector<Image<float> > &dogPyr,
+                      std::vector<Image<float> > &grdPyr,
+                      std::vector<Image<float> > &rotPyr,
+                      int                         nOctaves,
+                      int                         nDogLayers,
+                      std::list<SiftKeypoint>    &kpt_list);
 
 // Extract descriptor.
-int extract_descriptor(std::vector<Image<float>> &grdPyr,
-                       std::vector<Image<float>> &rotPyr, int nOctaves,
-                       int nGpyrLayers, std::list<SiftKeypoint> &kpt_list);
+int extract_descriptor (std::vector<Image<float> > &grdPyr,
+                        std::vector<Image<float> > &rotPyr,
+                        int                         nOctaves,
+                        int                         nGpyrLayers,
+                        std::list<SiftKeypoint>    &kpt_list);
 
 /****************************************
  *  SIFT Interface Functions
  ***************************************/
 // Detect keypoints and extract descriptor.
-int sift_cpu(const Image<unsigned char> &image,
-             std::list<SiftKeypoint> &kpt_list, bool bExtractDescriptors);
+int sift_cpu (const Image<unsigned char> &image,
+              std::list<SiftKeypoint>    &kpt_list,
+              bool                        bExtractDescriptors);
 
 // Match keypoints from two keypoint lists.
-int match_keypoints(std::list<SiftKeypoint> &kpt_list1,
-                    std::list<SiftKeypoint> &kpt_list2,
-                    std::list<MatchPair> &match_list);
+int match_keypoints (std::list<SiftKeypoint> &kpt_list1,
+                     std::list<SiftKeypoint> &kpt_list2,
+                     std::list<MatchPair>    &match_list);
 
 } // end namespace ezsift
 

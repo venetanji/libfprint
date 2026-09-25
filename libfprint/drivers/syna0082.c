@@ -32,15 +32,15 @@ struct _FpiDeviceSyna0082
 {
   FpImageDevice parent;
 
-  guint8         config_39[CONFIG_39_LENGTH];
-  guint8        *config_06;
-  guint8        *scan_02;
-  gsize          init_stage;
-  gsize          rearm_stage;
-  guint          capture_count;
-  gboolean       deactivating;
-  gboolean       awaiting_release;
-  gboolean       wake_retry_used;
+  guint8        config_39[CONFIG_39_LENGTH];
+  guint8       *config_06;
+  guint8       *scan_02;
+  gsize         init_stage;
+  gsize         rearm_stage;
+  guint         capture_count;
+  gboolean      deactivating;
+  gboolean      awaiting_release;
+  gboolean      wake_retry_used;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceSyna0082, fpi_device_syna0082,
@@ -90,12 +90,12 @@ read_le32 (const guint8 *data)
 }
 
 static gboolean
-load_blob (const gchar  *directory,
-           const gchar  *name,
-           gsize         expected_length,
-           guint8        expected_command,
-           guint8      **contents,
-           GError      **error)
+load_blob (const gchar *directory,
+           const gchar *name,
+           gsize        expected_length,
+           guint8       expected_command,
+           guint8     **contents,
+           GError     **error)
 {
   g_autofree gchar *path = g_build_filename (directory, name, NULL);
   gsize length = 0;
@@ -127,7 +127,7 @@ complete_deactivation (FpiDeviceSyna0082 *self)
 
 static void
 fail_session_or_deactivate (FpiDeviceSyna0082 *self,
-                            GError             *error)
+                            GError            *error)
 {
   if (self->deactivating)
     {
@@ -135,7 +135,9 @@ fail_session_or_deactivate (FpiDeviceSyna0082 *self,
       complete_deactivation (self);
     }
   else
-    fpi_image_device_session_error (FP_IMAGE_DEVICE (self), error);
+    {
+      fpi_image_device_session_error (FP_IMAGE_DEVICE (self), error);
+    }
 }
 
 static void
@@ -279,7 +281,9 @@ interrupt_cb (FpiUsbTransfer *transfer,
       transfer->buffer[2] == 0x04)
     {
       if (self->awaiting_release)
-        start_interrupt (self);
+        {
+          start_interrupt (self);
+        }
       else
         {
           fpi_image_device_report_finger_status (FP_IMAGE_DEVICE (self), TRUE);
@@ -287,7 +291,9 @@ interrupt_cb (FpiUsbTransfer *transfer,
         }
     }
   else
-    start_interrupt (self);
+    {
+      start_interrupt (self);
+    }
 }
 
 static void
@@ -322,8 +328,7 @@ static void init_send_stage (FpiDeviceSyna0082 *self);
  * wait for the reconnect to settle and restart the activation once. */
 #define WAKE_RETRY_DELAY_SECONDS 2
 
-static gboolean
-wake_retry_timeout_cb (gpointer user_data);
+static gboolean wake_retry_timeout_cb (gpointer user_data);
 
 static gboolean
 wake_retry_or_fail (FpiDeviceSyna0082 *self, GError **error)
@@ -358,9 +363,7 @@ init_read_cb (FpiUsbTransfer *transfer,
     }
   self->init_stage++;
   if (self->init_stage == 7)
-    {
-      fpi_image_device_activate_complete (FP_IMAGE_DEVICE (self), NULL);
-    }
+    fpi_image_device_activate_complete (FP_IMAGE_DEVICE (self), NULL);
   else
     init_send_stage (self);
 }
@@ -615,7 +618,9 @@ dev_change_state (FpImageDevice      *image_device,
   if (state != FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON)
     return;
   if (self->capture_count == 0)
-    start_interrupt (self);
+    {
+      start_interrupt (self);
+    }
   else
     {
       self->rearm_stage = 0;
@@ -715,6 +720,7 @@ dev_extract_print (FpImageDevice *image_device,
                    GError       **error)
 {
   FpiDeviceSyna0082 *self = FPI_DEVICE_SYNA0082 (image_device);
+
   g_autoptr(GBytes) features = NULL;
   g_autoptr(GVariant) data = NULL;
   gconstpointer bytes;
@@ -824,11 +830,11 @@ dev_match_print (FpImageDevice *image_device,
                                                    &reference_length,
                                                    1);
       if (!syna0082_matcher_compare (reference_bytes,
-                                    reference_length,
-                                    scan_bytes,
-                                    scan_length,
-                                    &score,
-                                    error))
+                                     reference_length,
+                                     scan_bytes,
+                                     scan_length,
+                                     &score,
+                                     error))
         return FPI_MATCH_ERROR;
 
       fp_dbg ("gallery[%" G_GSIZE_FORMAT "]: matches=%u inliers=%u "

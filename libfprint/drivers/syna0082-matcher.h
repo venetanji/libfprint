@@ -12,12 +12,12 @@ G_BEGIN_DECLS
 
 typedef struct
 {
-  guint   matches;
-  guint   inliers;
-  gdouble inlier_ratio;
-  gdouble scale;
-  gdouble rotation;
-  gdouble coverage;
+  guint    matches;
+  guint    inliers;
+  gdouble  inlier_ratio;
+  gdouble  scale;
+  gdouble  rotation;
+  gdouble  coverage;
   gboolean accepted;
 } Syna0082MatchScore;
 
@@ -31,6 +31,6 @@ gboolean syna0082_matcher_compare (const guint8       *reference,
                                    const guint8       *probe,
                                    gsize               probe_length,
                                    Syna0082MatchScore *score,
-                                   GError             **error);
+                                   GError            **error);
 
 G_END_DECLS
