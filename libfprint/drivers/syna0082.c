@@ -788,10 +788,15 @@ dev_append_print (FpImageDevice *image_device,
 
   g_variant_builder_init (&builder, G_VARIANT_TYPE ("aay"));
   if (gallery)
-    for (gsize index = 0; index < g_variant_n_children (gallery); index++)
-      g_variant_builder_add_value (&builder,
-                                   g_variant_get_child_value (gallery, index));
-  g_variant_builder_add_value (&builder, g_variant_ref (scan));
+    {
+      for (gsize index = 0; index < g_variant_n_children (gallery); index++)
+        {
+          g_autoptr(GVariant) child =
+            g_variant_get_child_value (gallery, index);
+          g_variant_builder_add_value (&builder, child);
+        }
+    }
+  g_variant_builder_add_value (&builder, scan);
   result = g_variant_ref_sink (g_variant_builder_end (&builder));
 
   g_object_set (enroll_print, "fpi-data", result, NULL);
