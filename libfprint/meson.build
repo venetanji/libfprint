@@ -150,7 +150,6 @@ helper_sources = {
     'aesx660': files('drivers/aesx660.c'),
     'aes3k': files('drivers/aes3k.c'),
     'openssl': files(),
-    'opencv': files(),
     'pixman': files(),
     'udev': files(),
     'virtual': files('drivers/virtual-device-listener.c'),
@@ -231,6 +230,7 @@ deps += declare_dependency(include_directories: [
     root_inc,
     include_directories('nbis/include'),
     include_directories('nbis/libfprint-include'),
+    include_directories('ezsift'),
 ])
 
 libnbis = static_library('nbis',
@@ -242,6 +242,15 @@ libnbis = static_library('nbis',
         '-Wno-discarded-qualifiers',
         '-Wno-array-bounds',
         '-Wno-array-parameter',
+        '-Wno-unused-but-set-variable',
+    ]),
+    install: false)
+
+libezsift = static_library('ezsift',
+    'ezsift/ezsift.cpp',
+    dependencies: deps,
+    cpp_args: cpp.get_supported_arguments([
+        '-Wno-unused-parameter',
         '-Wno-unused-but-set-variable',
     ]),
     install: false)
@@ -259,7 +268,7 @@ libfprint_drivers = static_library('fprint-drivers',
     sources: drivers_sources,
     c_args: drivers_cflags,
     dependencies: deps,
-    link_with: libfprint_private,
+    link_with: [libfprint_private, libezsift],
     install: false)
 
 mapfile = files('libfprint.ver')[0]

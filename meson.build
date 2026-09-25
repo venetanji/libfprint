@@ -135,7 +135,7 @@ drivers_info = {
     'egis_etu905': {},
     'vcom5s': {},
     'synaptics': {},
-    'syna0082': { 'helper': ['opencv'] },
+    'syna0082': {},
     'elan': { 'endian_dependent': true },
     'elanmoc': {},
     'uru4000': { 'helper': ['openssl'] },
@@ -245,46 +245,6 @@ foreach i : driver_helpers
         endif
 
         optional_deps += openssl_dep
-    elif i == 'opencv'
-        opencv_pkg_dep = dependency('opencv5', required: false)
-        opencv_features_dep = cpp.find_library('opencv_features', required: false)
-        opencv_calib_dep = cpp.find_library('opencv_calib', required: false)
-        if not opencv_pkg_dep.found()
-            opencv_pkg_dep = dependency('opencv4', required: false)
-            opencv_features_dep = cpp.find_library('opencv_features2d', required: false)
-            opencv_calib_dep = cpp.find_library('opencv_calib3d', required: false)
-        endif
-        opencv_core_dep = cpp.find_library('opencv_core', required: false)
-        opencv_imgproc_dep = cpp.find_library('opencv_imgproc', required: false)
-        opencv_flann_dep = cpp.find_library('opencv_flann', required: false)
-        opencv_geometry_dep = cpp.find_library('opencv_geometry', required: false)
-        if not opencv_pkg_dep.found() or not opencv_core_dep.found() or not opencv_imgproc_dep.found() or not opencv_features_dep.found() or not opencv_calib_dep.found() or not opencv_flann_dep.found()
-            error('OpenCV is required for @0@ and possibly others'.format(driver))
-        endif
-
-        # The aggregate OpenCV pkg-config file pulls in optional modules such
-        # as VTK and HDF. Keep its include flags, but link only what this
-        # matcher actually uses.
-        opencv_module_deps = [
-            opencv_core_dep,
-            opencv_imgproc_dep,
-            opencv_features_dep,
-            opencv_calib_dep,
-            opencv_flann_dep,
-        ]
-        if opencv_geometry_dep.found()
-            opencv_module_deps += opencv_geometry_dep
-        endif
-        opencv_include = include_directories(
-            opencv_pkg_dep.get_variable(pkgconfig: 'includedir'),
-            is_system: true,
-        )
-        opencv_dep = declare_dependency(
-            include_directories: opencv_include,
-            dependencies: opencv_module_deps,
-        )
-
-        optional_deps += opencv_dep
     elif i == 'udev'
         install_udev_rules = true
 

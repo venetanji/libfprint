@@ -24,6 +24,9 @@ envs.set('FP_DRIVERS_ALLOWLIST', ':'.join([
 
 envs.set('FP_PRINTS_PATH', meson.project_source_root() / 'examples' / 'prints')
 
+# Provision the device-specific init blobs used by the syna0082 driver test
+envs.set('LIBFPRINT_SYNA0082_BLOB_DIR', meson.current_source_dir() / 'syna0082')
+
 envs.set('NO_AT_BRIDGE', '1')
 
 installed_tests = get_option('installed-tests')
