@@ -644,6 +644,15 @@ dev_open (FpImageDevice *image_device)
   if (directory == NULL || *directory == '\0')
     directory = "/var/lib/libfprint/syna0082";
 
+  /* The sensor only answers the init handshake in full once it has seen a
+   * USB port reset; without this it silently acks the final init write
+   * with a 2-byte stub instead of the expected scan configuration. */
+  if (!g_usb_device_reset (fpi_device_get_usb_device (device), &error))
+    {
+      fpi_image_device_open_complete (image_device, error);
+      return;
+    }
+
   build_scan_config_v1 (self->config_39);
   if (!load_blob (directory, "config-06.bin", CONFIG_06_LENGTH, 0x06,
                   &self->config_06, &error) ||
