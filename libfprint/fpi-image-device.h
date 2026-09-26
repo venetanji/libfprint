@@ -114,6 +114,21 @@ struct _FpImageDeviceClass
   void          (*change_state) (FpImageDevice      *dev,
                                  FpiImageDeviceState state);
   void          (*deactivate)   (FpImageDevice *dev);
+
+  /* Optional feature extraction and matching hooks for image sensors whose
+   * geometry is not suitable for the generic NBIS pipeline. */
+  gboolean (*extract_print) (FpImageDevice *dev,
+                             FpImage       *image,
+                             FpPrint      **print,
+                             GError       **error);
+  gboolean (*append_print)  (FpImageDevice *dev,
+                             FpPrint       *enroll_print,
+                             FpPrint       *scan_print,
+                             GError       **error);
+  FpiMatchResult (*match_print)   (FpImageDevice *dev,
+                                   FpPrint       *template_print,
+                                   FpPrint       *scan_print,
+                                   GError       **error);
 };
 
 void fpi_image_device_set_bz3_threshold (FpImageDevice *self,

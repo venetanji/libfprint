@@ -286,6 +286,11 @@ usb:v1162p2200*
  ID_AUTOSUSPEND=1
  ID_PERSIST=0
 
+# Supported by libfprint driver syna0082
+usb:v06CBp0082*
+ ID_AUTOSUSPEND=1
+ ID_PERSIST=0
+
 # Supported by libfprint driver synaptics
 usb:v06CBp00BD*
 usb:v06CBp00C2*

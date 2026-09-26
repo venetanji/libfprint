@@ -1,0 +1,26 @@
+# Vendored ezSIFT
+
+This directory vendors a trimmed copy of [ezSIFT](https://github.com/robertwgh/ezSIFT),
+a self-contained, dependency-free SIFT implementation (Apache-2.0).
+
+Upstream version: master @ 2018-07-10 (`robertwgh/ezSIFT`, no tagged releases).
+
+Changes from upstream:
+
+* `vvector.h` reduced from the full upstream macro library (1448 lines) to
+  just the three macros used by `ezsift.cpp` (`MAT_DOT_VEC_3X3`,
+  `DETERMINANT_3X3`, `SCALE_ADJOINT_3X3`).
+* `ezsift.cpp`: dropped the `#include "timer.h"` and the unused
+  `#include "vvector.h"` (now the trimmed header).
+* `ezsift.h`/`ezsift.cpp`: the SIFT parameter globals are `extern` in the
+  header and defined once in `ezsift.cpp`, so multiple translation units
+  (the vendored core and the driver's matcher) share a single instance
+  instead of getting per-TU `static` copies.
+* Removed `timer.h`, `image_utility.cpp` (PGM/PPM I/O) and the example
+  programs, which are not needed to build the SIFT core against raw pixel
+  buffers.
+
+The vendored sources are reformatted with the project's uncrustify config
+(whitespace/brace style only; no code changes) so the `test_indent` CI check
+passes. Code is otherwise identical to upstream. Upstream's own header notes
+that SIFT was patented (US 6,711,293); that patent expired in March 2020.

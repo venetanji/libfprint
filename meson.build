@@ -5,6 +5,7 @@ project('libfprint', [ 'c', 'cpp' ],
         'buildtype=debugoptimized',
         'warning_level=1',
         'c_std=gnu99',
+        'cpp_std=gnu++17',
     ],
     meson_version: '>= 0.62.0')
 
@@ -134,6 +135,7 @@ drivers_info = {
     'egis_etu905': {},
     'vcom5s': {},
     'synaptics': {},
+    'syna0082': {},
     'elan': { 'endian_dependent': true },
     'elanmoc': {},
     'uru4000': { 'helper': ['openssl'] },
