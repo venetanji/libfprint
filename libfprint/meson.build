@@ -139,6 +139,20 @@ driver_sources = {
     'focaltech_moc' : files('drivers/focaltech_moc/focaltech_moc.c'),
     'mafpmoc' : files('drivers/mafpmoc/mafpmoc.c'),
     'secugen' : files('drivers/secugen.c'),
+    'validity' : files(
+        'drivers/validity/validity.c',
+        'drivers/validity/vcsfw_protocol.c',
+        'drivers/validity/validity_tls.c',
+        'drivers/validity/validity_fwext.c',
+        'drivers/validity/validity_sensor.c',
+        'drivers/validity/validity_capture.c',
+        'drivers/validity/validity_db.c',
+        'drivers/validity/validity_enroll.c',
+        'drivers/validity/validity_verify.c',
+        'drivers/validity/validity_hal.c',
+        'drivers/validity/validity_pair.c',
+        'drivers/validity/validity_data.c',
+    ),
 }
 
 helper_sources = {

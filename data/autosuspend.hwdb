@@ -353,6 +353,18 @@ usb:v05BAp000A*
  ID_AUTOSUSPEND=1
  ID_PERSIST=0
 
+# Supported by libfprint driver validity
+usb:v138Ap0090*
+usb:v138Ap0097*
+usb:v06CBp009A*
+usb:v138Ap009D*
+usb:v138Ap00AB*
+usb:v06CBp00CB*
+usb:v06CBp00B7*
+usb:v06CBp00D2*
+ ID_AUTOSUSPEND=1
+ ID_PERSIST=0
+
 # Supported by libfprint driver vcom5s
 usb:v061Ap0110*
  ID_AUTOSUSPEND=1
@@ -438,18 +450,15 @@ usb:v06CBp0051*
 usb:v06CBp0081*
 usb:v06CBp0088*
 usb:v06CBp008A*
-usb:v06CBp009A*
 usb:v06CBp009B*
 usb:v06CBp00A1*
 usb:v06CBp00A2*
 usb:v06CBp00A8*
-usb:v06CBp00B7*
 usb:v06CBp00BB*
 usb:v06CBp00BC*
 usb:v06CBp00BE*
 usb:v06CBp00C7*
 usb:v06CBp00C9*
-usb:v06CBp00CB*
 usb:v06CBp00D8*
 usb:v06CBp00DA*
 usb:v06CBp00DC*
@@ -494,13 +503,9 @@ usb:v138Ap003A*
 usb:v138Ap003C*
 usb:v138Ap003D*
 usb:v138Ap003F*
-usb:v138Ap0090*
 usb:v138Ap0092*
 usb:v138Ap0094*
-usb:v138Ap0097*
-usb:v138Ap009D*
 usb:v138Ap00A6*
-usb:v138Ap00AB*
 usb:v147Ep1002*
 usb:v1491p0088*
 usb:v16D1p1027*

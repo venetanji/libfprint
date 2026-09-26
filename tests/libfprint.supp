@@ -33,3 +33,19 @@
    ...
    fun:libusb_init_context
 }
+
+{
+   <ignore-openssl-sha256-stack-uninitialised-value8>
+   Memcheck:Value8
+   fun:gchecksum_digest_to_string
+   fun:*sha256*
+   fun:g_checksum_get_digest
+}
+
+{
+   <ignore-openssl-sha256-stack-uninitialised-cond>
+   Memcheck:Cond
+   fun:gchecksum_digest_to_string
+   fun:*sha256*
+   fun:g_checksum_get_digest
+}

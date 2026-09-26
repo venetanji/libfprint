@@ -64,6 +64,7 @@ drivers_tests = {
     'focaltech_moc-6553': {},
     'mafpmoc': {},
     'secugen': {},
+    'validity': {},
 }
 
 if get_option('introspection')
@@ -322,7 +323,17 @@ if 'virtual_image' in drivers
     ]
 endif
 
+if 'validity' in drivers
+    unit_tests += [
+        'validity',
+    ]
+endif
+
 unit_tests_deps = { 'fpi-assembling' : [cairo_dep] }
+
+# Unit tests that call driver-internal functions directly need the driver
+# object files linked in (the default recipe only links core fprint-private).
+unit_tests_link = { 'validity' : [libfprint_drivers] }
 
 foreach test_name: unit_tests
     if unit_tests_deps.has_key(test_name)
@@ -349,12 +360,19 @@ foreach test_name: unit_tests
         extra_deps = []
     endif
 
+    if unit_tests_link.has_key(test_name)
+        extra_link = unit_tests_link[test_name]
+    else
+        extra_link = []
+    endif
+
     basename = 'test-' + test_name
     test_exe = executable(basename,
         sources: basename + '.c',
         dependencies: [ libfprint_private_dep ] + extra_deps,
         c_args: common_cflags,
         link_whole: test_utils,
+        link_with: extra_link,
         install: installed_tests,
         install_dir: installed_tests_execdir,
     )

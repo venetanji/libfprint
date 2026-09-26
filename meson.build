@@ -147,6 +147,7 @@ drivers_info = {
     'focaltech_moc': {},
     'mafpmoc': {},
     'secugen': {},
+    'validity': { 'helper': ['openssl'] },
 
     # SPI driver (non-optional if SPI is available)
     'elanspi': { 'spi': true, 'helper': ['udev'], 'optional': not have_spi },
