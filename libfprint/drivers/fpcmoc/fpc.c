@@ -74,6 +74,7 @@ static const FpIdEntry id_table[] = {
   { .vid = 0x10A5,  .pid = 0x9524,  },
   { .vid = 0x10A5,  .pid = 0x9544,  },
   { .vid = 0x10A5,  .pid = 0xC844,  },
+  { .vid = 0x10A5,  .pid = 0x9924,  },
   { .vid = 0x10A5,  .pid = 0x9B24,  },
   /* terminating entry */
   { .vid = 0,  .pid = 0,  .driver_data = 0 },
@@ -1836,6 +1837,7 @@ fpc_dev_probe (FpDevice *device)
     case 0x9524:
     case 0x9544:
     case 0xC844:
+    case 0x9924:
       self->max_enroll_stage = MAX_ENROLL_SAMPLES;
       break;
 
@@ -1858,7 +1860,10 @@ fpc_dev_open (FpDevice *device)
   GError *error = NULL;
 
   fp_dbg ("%s enter -->", G_STRFUNC);
-  if (!g_usb_device_reset (fpi_device_get_usb_device (device), &error))
+  /* A USB reset makes the 10a5:9924 firmware restart and re-enumerate as a
+   * new device, which invalidates this handle, so skip it there. */
+  if (g_usb_device_get_pid (fpi_device_get_usb_device (device)) != 0x9924 &&
+      !g_usb_device_reset (fpi_device_get_usb_device (device), &error))
     {
       fpi_device_open_complete (FP_DEVICE (self), error);
       return;
