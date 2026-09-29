@@ -42,6 +42,7 @@ static const FpIdEntry id_table[] = {
   { .vid = 0x04f3,  .pid = 0x0cb0,  },
   { .vid = 0x04f3,  .pid = 0x0cb2,  },
   { .vid = 0x04f3,  .pid = 0x0cb6,  },
+  { .vid = 0x04f3,  .pid = 0x0c5a,  .driver_data = ELANMOC_QUIRK_LEGACY_CMDS },
   { .vid = 0,  .pid = 0,  .driver_data = 0 },   /* terminating entry */
 };
 
@@ -1157,6 +1158,10 @@ elanmoc_open (FpDevice *device)
 
     case 0x0c8d:
       self->max_moc_enroll_time = 17;
+      break;
+
+    case 0x0c5a:
+      self->max_moc_enroll_time = ELAN_LEGACY_ENROLL_TIMES;
       break;
 
     default:
