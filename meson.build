@@ -141,6 +141,7 @@ drivers_info = {
     'upeksonly': {},
     'upekts': {},
     'goodixmoc': {},
+    'goodix5125': { 'helper': ['openssl'] },
     'nb1010': {},
     'fpcmoc': {},
     'realtek': {},
