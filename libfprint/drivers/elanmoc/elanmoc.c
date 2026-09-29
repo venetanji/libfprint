@@ -42,6 +42,7 @@ static const FpIdEntry id_table[] = {
   { .vid = 0x04f3,  .pid = 0x0cb0,  },
   { .vid = 0x04f3,  .pid = 0x0cb2,  },
   { .vid = 0x04f3,  .pid = 0x0cb6,  },
+  { .vid = 0x04f3,  .pid = 0x0c5a,  .driver_data = ELANMOC_QUIRK_LEGACY_CMDS },
   { .vid = 0,  .pid = 0,  .driver_data = 0 },   /* terminating entry */
 };
 
@@ -69,6 +70,19 @@ elanmoc_compose_cmd (
     memcpy (cmd_buf, &cmd_info->cmd_header, ELAN_MAX_HDR_LEN);
 
   return g_steal_pointer (&cmd_buf);
+}
+
+static gsize
+elanmoc_max_user_id_len (FpiDeviceElanmoc *self)
+{
+  return self->legacy_cmds ? ELAN_LEGACY_MAX_USER_ID_LEN : ELAN_MAX_USER_ID_LEN;
+}
+
+/* Reply byte 0 of a user id read: 0x43 for 0x43 0x21, 0x40 for legacy 0x12. */
+static guint8
+elanmoc_userid_rsp_hdr (FpiDeviceElanmoc *self)
+{
+  return self->legacy_cmds ? 0x40 : 0x43;
 }
 
 static void
@@ -179,7 +193,9 @@ fp_cmd_run_state (FpiSsm   *ssm,
         }
       transfer = fpi_usb_transfer_new (dev);
       transfer->ssm = ssm;
-      fpi_usb_transfer_fill_bulk (transfer, self->cmd_cancelable ? ELAN_EP_MOC_CMD_IN : ELAN_EP_CMD_IN, self->cmd_len_in);
+      fpi_usb_transfer_fill_bulk (transfer,
+                                  self->cmd_cancelable && !self->legacy_cmds ? ELAN_EP_MOC_CMD_IN : ELAN_EP_CMD_IN,
+                                  self->cmd_len_in);
       fpi_usb_transfer_submit (transfer,
                                self->cmd_cancelable ? 0 : ELAN_MOC_CMD_TIMEOUT,
                                self->cmd_cancelable ? fpi_device_get_cancellable (dev) : NULL,
@@ -455,6 +471,18 @@ elan_enroll_run_state (FpiSsm *ssm, FpDevice *dev)
       break;
 
     case MOC_ENROLL_REENROLL_CHECK:
+      if (self->legacy_cmds)
+        {
+          /* No 0x22 on this firmware: it never answers. */
+          if (self->curr_enrolled > ELAN_MAX_ENROLL_NUM)
+            {
+              fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_DATA_FULL));
+              break;
+            }
+          self->num_frames = 0;
+          fpi_ssm_next_state (ssm);
+          break;
+        }
       data = fpi_ssm_get_data (ssm);
       cmd_buf = elanmoc_compose_cmd (&elanmoc_check_reenroll_cmd);
       memcpy (cmd_buf + 3, data, ELAN_USERDATE_SIZE);
@@ -471,6 +499,14 @@ elan_enroll_run_state (FpiSsm *ssm, FpDevice *dev)
 
     case MOC_ENROLL_COMMIT_RESULT:
       data = fpi_ssm_get_data (ssm);
+      if (self->legacy_cmds)
+        {
+          cmd_buf = elanmoc_compose_cmd (&elanmoc_legacy_enroll_commit_cmd);
+          cmd_buf[3] = ELAN_LEGACY_USERDATA_MARK;
+          memcpy (cmd_buf + 4, data, ELAN_LEGACY_USERDATA_SIZE);
+          elanmoc_get_cmd (dev, cmd_buf, elanmoc_legacy_enroll_commit_cmd.cmd_len, elanmoc_legacy_enroll_commit_cmd.resp_len, 0, elanmoc_commit_cb);
+          break;
+        }
       cmd_buf = elanmoc_compose_cmd (&elanmoc_enroll_commit_cmd);
       memcpy (cmd_buf + 5, data, ELAN_USERDATE_SIZE);
       elanmoc_get_cmd (dev, cmd_buf, elanmoc_enroll_commit_cmd.cmd_len, elanmoc_enroll_commit_cmd.resp_len, 0, elanmoc_commit_cb);
@@ -503,7 +539,7 @@ create_print_from_response (FpiDeviceElanmoc *self,
   g_autofree gchar *userid_safe = NULL;
   int userid_len = 0;
 
-  if (buffer_in[0] != 0x43)
+  if (buffer_in[0] != elanmoc_userid_rsp_hdr (self))
     {
       g_propagate_error (error,
                          fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
@@ -566,7 +602,7 @@ elanmoc_get_userid_cb (FpiDeviceElanmoc *self,
       return;
     }
 
-  if (buffer_in[0] != 0x43)
+  if (buffer_in[0] != elanmoc_userid_rsp_hdr (self))
     {
       fpi_ssm_mark_failed (self->task_ssm,
                            fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
@@ -576,8 +612,9 @@ elanmoc_get_userid_cb (FpiDeviceElanmoc *self,
 
   self->list_index++;
 
-  /* Skip 0xfe messages */
-  if (buffer_in[1] != 0xfe)
+  /* Skip 0xfe messages; on legacy firmware also slots without a user id */
+  if (buffer_in[1] != 0xfe &&
+      !(self->legacy_cmds && (buffer_in[1] != ELAN_MSG_OK || length_in < 5 || buffer_in[4] == 0)))
     {
       print = create_print_from_response (self, buffer_in, length_in, &error);
 
@@ -616,6 +653,13 @@ elan_list_run_state (FpiSsm *ssm, FpDevice *dev)
       break;
 
     case MOC_LIST_GET_FINGER:
+      if (self->legacy_cmds)
+        {
+          cmd_buf = elanmoc_compose_cmd (&elanmoc_legacy_get_userid_cmd);
+          cmd_buf[3] = self->list_index;
+          elanmoc_get_cmd (dev, cmd_buf, elanmoc_legacy_get_userid_cmd.cmd_len, elanmoc_legacy_get_userid_cmd.resp_len, 0, elanmoc_get_userid_cb);
+          break;
+        }
       cmd_buf = elanmoc_compose_cmd (&elanmoc_get_userid_cmd);
       cmd_buf[2] = self->list_index;
       elanmoc_get_cmd (dev, cmd_buf, elanmoc_get_userid_cmd.cmd_len, elanmoc_get_userid_cmd.resp_len, 0, elanmoc_get_userid_cb);
@@ -659,7 +703,7 @@ elanmoc_match_report_cb (FpiDeviceElanmoc *self,
       return;
     }
 
-  if (buffer_in[0] != 0x43)
+  if (buffer_in[0] != elanmoc_userid_rsp_hdr (self))
     {
       fpi_ssm_mark_failed (self->task_ssm,
                            fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
@@ -739,6 +783,13 @@ identify_status_report (FpiDeviceElanmoc *self, int verify_status_id,
     case RSP_VERIFY_OK:
       {
         fp_dbg ("Identify was successful! for user: %d mesg_code: %d ", data, verify_status_id);
+        if (self->legacy_cmds)
+          {
+            cmd_buf = elanmoc_compose_cmd (&elanmoc_legacy_get_userid_cmd);
+            cmd_buf[3] = data;
+            elanmoc_get_cmd (device, cmd_buf, elanmoc_legacy_get_userid_cmd.cmd_len, elanmoc_legacy_get_userid_cmd.resp_len, 0, elanmoc_match_report_cb);
+            break;
+          }
         cmd_buf = elanmoc_compose_cmd (&elanmoc_get_userid_cmd);
         cmd_buf[2] = data;
         elanmoc_get_cmd (device, cmd_buf, elanmoc_get_userid_cmd.cmd_len, elanmoc_get_userid_cmd.resp_len, 0, elanmoc_match_report_cb);
@@ -779,6 +830,7 @@ elanmoc_identify_cb (FpiDeviceElanmoc *self,
 static void
 elan_identify_run_state (FpiSsm *ssm, FpDevice *dev)
 {
+  FpiDeviceElanmoc *self = FPI_DEVICE_ELANMOC (dev);
   guint8 *cmd_buf = NULL;
 
   fp_info ("elanmoc %s ", __func__);
@@ -787,12 +839,18 @@ elan_identify_run_state (FpiSsm *ssm, FpDevice *dev)
     case IDENTIFY_SET_MODE:
       fp_info ("elanmoc %s IDENTIFY_SET_MODE", __func__);
       cmd_buf = elanmoc_compose_cmd (&elanmoc_set_mod_cmd);
-      cmd_buf[3] = 0x03;
+      cmd_buf[3] = self->legacy_cmds ? 0x00 : 0x03;
       elanmoc_get_cmd (dev, cmd_buf, elanmoc_set_mod_cmd.cmd_len, elanmoc_set_mod_cmd.resp_len, 0, elanmoc_cmd_ack_cb);
       break;
 
     case IDENTIFY_WAIT_FINGER:
       fp_info ("elanmoc %s IDENTIFY_WAIT_FINGER", __func__);
+      if (self->legacy_cmds)
+        {
+          cmd_buf = elanmoc_compose_cmd (&elanmoc_legacy_verify_cmd);
+          elanmoc_get_cmd (dev, cmd_buf, elanmoc_legacy_verify_cmd.cmd_len, elanmoc_legacy_verify_cmd.resp_len, 1, elanmoc_identify_cb);
+          break;
+        }
       cmd_buf = elanmoc_compose_cmd (&elanmoc_verify_cmd);
       elanmoc_get_cmd (dev, cmd_buf, elanmoc_verify_cmd.cmd_len, elanmoc_verify_cmd.resp_len, 1, elanmoc_identify_cb);
       break;
@@ -813,7 +871,7 @@ elanmoc_enroll (FpDevice *device)
   fpi_device_get_enroll_data (device, &print);
   user_id = fpi_print_generate_user_id (print);
   user_id_len = strlen (user_id);
-  user_id_len = MIN (ELAN_MAX_USER_ID_LEN, user_id_len);
+  user_id_len = MIN (elanmoc_max_user_id_len (self), user_id_len);
 
   uid = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
                                    user_id,
@@ -867,12 +925,21 @@ elanmoc_delete_cb (FpiDeviceElanmoc *self,
 static void
 elan_delete_run_state (FpiSsm *ssm, FpDevice *dev)
 {
+  FpiDeviceElanmoc *self = FPI_DEVICE_ELANMOC (dev);
   guint8 *cmd_buf = NULL;
   guint8 *data = fpi_ssm_get_data (ssm);
 
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case DELETE_SEND_CMD:
+      if (self->legacy_cmds)
+        {
+          cmd_buf = elanmoc_compose_cmd (&elanmoc_legacy_delete_cmd);
+          cmd_buf[3] = ELAN_LEGACY_USERDATA_MARK;
+          memcpy (cmd_buf + 4, data, ELAN_LEGACY_USERDATA_SIZE);
+          elanmoc_get_cmd (dev, cmd_buf, elanmoc_legacy_delete_cmd.cmd_len, elanmoc_legacy_delete_cmd.resp_len, 0, elanmoc_delete_cb);
+          break;
+        }
       cmd_buf = elanmoc_compose_cmd (&elanmoc_delete_cmd);
       memcpy (cmd_buf + 3, data, ELAN_USERDATE_SIZE);
       elanmoc_get_cmd (dev, cmd_buf, elanmoc_delete_cmd.cmd_len, elanmoc_delete_cmd.resp_len, 0, elanmoc_delete_cb);
@@ -911,7 +978,7 @@ elanmoc_delete_print (FpDevice *device)
                  &user_id_var);
   user_id = g_variant_get_fixed_array (user_id_var, &user_id_len, 1);
   user_id_safe = g_strndup ((const char *) user_id, user_id_len);
-  user_id_len = MIN (ELAN_MAX_USER_ID_LEN, user_id_len);
+  user_id_len = MIN (elanmoc_max_user_id_len (self), user_id_len);
   userid_buf[2] = user_id_len;
   memcpy (userid_buf + 3, user_id, user_id_len);
 
@@ -1031,7 +1098,8 @@ dev_init_handler (FpiSsm *ssm, FpDevice *dev)
 
     case DEV_SET_MODE:
       cmd_buf = elanmoc_compose_cmd (&elanmoc_set_mod_cmd);
-      cmd_buf[3] = 0x03;
+      /* Mode 0x03 leaves 0x0c5a unable to match: 0x03 answers 0xfd at once */
+      cmd_buf[3] = self->legacy_cmds ? 0x00 : 0x03;
       elanmoc_get_cmd (dev, cmd_buf, elanmoc_set_mod_cmd.cmd_len, elanmoc_set_mod_cmd.resp_len, 0, elanmoc_cmd_ack_cb);
       break;
 
@@ -1051,6 +1119,17 @@ dev_init_handler (FpiSsm *ssm, FpDevice *dev)
       break;
 
     }
+}
+
+static void
+elanmoc_probe (FpDevice *device)
+{
+  /* Without a list command, fprintd would take the storage for empty and
+   * delete every print it holds for this device. */
+  if (fpi_device_get_driver_data (device) & ELANMOC_QUIRK_LEGACY_CMDS)
+    fpi_device_update_features (device, FP_DEVICE_FEATURE_STORAGE_LIST, 0);
+
+  fpi_device_probe_complete (device, NULL, NULL, NULL);
 }
 
 static void
@@ -1081,11 +1160,16 @@ elanmoc_open (FpDevice *device)
       self->max_moc_enroll_time = 17;
       break;
 
+    case 0x0c5a:
+      self->max_moc_enroll_time = ELAN_LEGACY_ENROLL_TIMES;
+      break;
+
     default:
       self->max_moc_enroll_time = ELAN_MOC_ENROLL_TIMES;
       break;
     }
 
+  self->legacy_cmds = (fpi_device_get_driver_data (device) & ELANMOC_QUIRK_LEGACY_CMDS) != 0;
   fpi_device_set_nr_enroll_stages (device, self->max_moc_enroll_time);
 
   self->task_ssm = fpi_ssm_new (FP_DEVICE (self), dev_init_handler, DEV_INIT_STATES);
@@ -1150,6 +1234,7 @@ fpi_device_elanmoc_class_init (FpiDeviceElanmocClass *klass)
   dev_class->nr_enroll_stages = ELAN_MOC_ENROLL_TIMES;
   dev_class->temp_hot_seconds = -1;
 
+  dev_class->probe = elanmoc_probe;
   dev_class->open = elanmoc_open;
   dev_class->close = elanmoc_close;
   dev_class->enroll = elanmoc_enroll;
