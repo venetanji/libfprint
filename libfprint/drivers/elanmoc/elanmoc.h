@@ -52,6 +52,18 @@ G_DECLARE_FINAL_TYPE (FpiDeviceElanmoc, fpi_device_elanmoc, FPI, DEVICE_ELANMOC,
 #define ELAN_MAX_HDR_LEN 3
 #define ELAN_USERDATE_SIZE (ELAN_MAX_USER_ID_LEN + 3)
 
+/* 04f3:0c5a (Surface Laptop Go, FW 0x0710) speaks an older command set, the
+ * one its Windows driver uses: no re-enroll check, identify through 0x03,
+ * user data read back through 0x12, finger-wait replies on the bulk endpoint,
+ * and commit/delete carry a 0xf5 marker followed by 68 bytes of user data.
+ * 0x12 only answers right after a match, and 0x98 (remove all) does not
+ * exist: the storage can be neither listed nor cleared. */
+#define ELANMOC_QUIRK_LEGACY_CMDS (1 << 0)
+#define ELAN_LEGACY_ENROLL_TIMES 18
+#define ELAN_LEGACY_USERDATA_SIZE 68
+#define ELAN_LEGACY_MAX_USER_ID_LEN (ELAN_LEGACY_USERDATA_SIZE - 3)
+#define ELAN_LEGACY_USERDATA_MARK 0xf5
+
 #define ELAN_MSG_DRIVER_VERSION "1004"
 
 struct elanmoc_cmd
@@ -133,6 +145,30 @@ static const struct elanmoc_cmd elanmoc_set_mod_cmd = {
   .resp_len = 2,
 };
 
+static const struct elanmoc_cmd elanmoc_legacy_verify_cmd = {
+  .cmd_header = {0x40, 0xff, 0x03},
+  .cmd_len = 3,
+  .resp_len = 2,
+};
+
+static const struct elanmoc_cmd elanmoc_legacy_get_userid_cmd = {
+  .cmd_header = {0x40, 0xff, 0x12},
+  .cmd_len = 4,
+  .resp_len = 2 + ELAN_LEGACY_USERDATA_SIZE,
+};
+
+static const struct elanmoc_cmd elanmoc_legacy_enroll_commit_cmd = {
+  .cmd_header = {0x40, 0xff, 0x11},
+  .cmd_len = 4 + ELAN_LEGACY_USERDATA_SIZE,
+  .resp_len = 2,
+};
+
+static const struct elanmoc_cmd elanmoc_legacy_delete_cmd = {
+  .cmd_header = {0x40, 0xff, 0x13},
+  .cmd_len = 4 + ELAN_LEGACY_USERDATA_SIZE,
+  .resp_len = 2,
+};
+
 static const struct elanmoc_cmd elanmoc_check_reenroll_cmd = {
   .cmd_header = {0x40, 0xff, 0x22},
   .cmd_len = 3 + ELAN_USERDATE_SIZE,
@@ -193,4 +229,5 @@ struct _FpiDeviceElanmoc
   int             cmd_retry_cnt;
   int             list_index;
   GPtrArray      *list_result;
+  gboolean        legacy_cmds;
 };
