@@ -127,13 +127,13 @@
 #define CB2000_NCC_MATCH_MEAN3_DEFAULT 0.26
 #define CB2000_NCC_MATCH_GRAD1_DEFAULT 0.20
 #define CB2000_NCC_SUPPORT_MIN_DEFAULT 2
-#define CB2000_NCC_SUPPORT_INT_DEFAULT 0.20
-#define CB2000_NCC_SUPPORT_GRAD_DEFAULT 0.17
+#define CB2000_NCC_SUPPORT_INT_DEFAULT 0.22
+#define CB2000_NCC_SUPPORT_GRAD_DEFAULT 0.19
 /* Medium band for borderline same-finger attempts on tiny captures. */
-#define CB2000_NCC_MEDIUM_TOP1_DEFAULT 0.26
+#define CB2000_NCC_MEDIUM_TOP1_DEFAULT 0.28
 #define CB2000_NCC_MEDIUM_TOP2_DEFAULT 0.20
-#define CB2000_NCC_MEDIUM_MEAN3_DEFAULT 0.19
-#define CB2000_NCC_MEDIUM_GRAD1_DEFAULT 0.18
+#define CB2000_NCC_MEDIUM_MEAN3_DEFAULT 0.21
+#define CB2000_NCC_MEDIUM_GRAD1_DEFAULT 0.20
 #define CB2000_NCC_MEDIUM_SUPPORT_MIN_DEFAULT 2
 /* Dominant-match band: high top1 with coherent mean/gradient and minimum support. */
 #define CB2000_NCC_DOMINANT_TOP1_DEFAULT 0.36
@@ -146,18 +146,11 @@
  * If at least 2 enrolled samples support the captured frame,
  * accept with lower per-score thresholds.
  */
-#define CB2000_NCC_CONSISTENT_TOP1_DEFAULT 0.21
-#define CB2000_NCC_CONSISTENT_MEAN3_DEFAULT 0.17
-#define CB2000_NCC_CONSISTENT_GRAD1_DEFAULT 0.16
+#define CB2000_NCC_CONSISTENT_TOP1_DEFAULT 0.24
+#define CB2000_NCC_CONSISTENT_MEAN3_DEFAULT 0.22
+#define CB2000_NCC_CONSISTENT_GRAD1_DEFAULT 0.19
 #define CB2000_NCC_CONSISTENT_SUPPORT_MIN_DEFAULT 2
 #define CB2000_NCC_NOMATCH_TOP1_DEFAULT 0.17
-/*
- * Single-strong band:
- * allow MATCH when one enrolled sample is clearly strong and stable.
- */
-#define CB2000_NCC_SINGLE_TOP1_DEFAULT 0.21
-#define CB2000_NCC_SINGLE_GRAD1_DEFAULT 0.19
-#define CB2000_NCC_SINGLE_SUPPORT_MIN_DEFAULT 1
 /*
  * Clear no-match band:
  * avoid endless RETRY for clearly different fingers.
@@ -3865,15 +3858,6 @@ cb2000_ncc_classify (const Cb2000NccTelemetry *tel)
   guint consistent_support_min = cb2000_ncc_env_uint ("CB2000_NCC_CONSISTENT_SUPPORT_MIN",
                                                       CB2000_NCC_CONSISTENT_SUPPORT_MIN_DEFAULT,
                                                       1, CB2000_NR_ENROLL_STAGES);
-  gdouble single_top1 = cb2000_ncc_env_double ("CB2000_NCC_SINGLE_TOP1",
-                                               CB2000_NCC_SINGLE_TOP1_DEFAULT,
-                                               0.0, 1.0);
-  gdouble single_grad1 = cb2000_ncc_env_double ("CB2000_NCC_SINGLE_GRAD1",
-                                                CB2000_NCC_SINGLE_GRAD1_DEFAULT,
-                                                0.0, 1.0);
-  guint single_support_min = cb2000_ncc_env_uint ("CB2000_NCC_SINGLE_SUPPORT_MIN",
-                                                  CB2000_NCC_SINGLE_SUPPORT_MIN_DEFAULT,
-                                                  1, CB2000_NR_ENROLL_STAGES);
   gdouble nomatch_top1 = cb2000_ncc_env_double ("CB2000_NCC_NOMATCH_TOP1",
                                                 CB2000_NCC_NOMATCH_TOP1_DEFAULT,
                                                 0.0, 1.0);
@@ -3908,8 +3892,6 @@ cb2000_ncc_classify (const Cb2000NccTelemetry *tel)
       consistent_top1 = MAX (0.0, consistent_top1 - (relax * 0.60));
       consistent_mean3 = MAX (0.0, consistent_mean3 - (relax * 0.50));
       consistent_grad1 = MAX (0.0, consistent_grad1 - (relax * 0.40));
-      single_top1 = MAX (0.0, single_top1 - (relax * 0.20));
-      single_grad1 = MAX (0.0, single_grad1 - (relax * 0.20));
 
       if (adaptive_relax_support)
         {
@@ -3919,8 +3901,6 @@ cb2000_ncc_classify (const Cb2000NccTelemetry *tel)
             medium_support_min--;
           if (consistent_support_min > 1 && relax >= CB2000_NCC_ADAPTIVE_SUPPORT_RELAX_AT)
             consistent_support_min--;
-          if (single_support_min > 1 && relax >= CB2000_NCC_ADAPTIVE_SUPPORT_RELAX_AT)
-            single_support_min--;
         }
     }
 
@@ -3928,7 +3908,6 @@ cb2000_ncc_classify (const Cb2000NccTelemetry *tel)
              "medium(top1>=%.3f top2>=%.3f mean3>=%.3f grad1>=%.3f support>=%u) "
              "dominant(top1>=%.3f top2>=%.3f mean3>=%.3f grad1>=%.3f support>=%u) "
              "consistent(top1>=%.3f mean3>=%.3f grad1>=%.3f support>=%u) "
-             "single(top1>=%.3f grad1>=%.3f support>=%u) "
              "clear_nomatch(support==0 && top1<%.3f && mean3<%.3f) "
              "nomatch(top1<%.3f) "
              "adaptive(relax=%.3f relax_support=%u cohesion_mean=%.3f cohesion_min=%.3f pairs=%u)",
@@ -3936,7 +3915,6 @@ cb2000_ncc_classify (const Cb2000NccTelemetry *tel)
              medium_top1, medium_top2, medium_mean3, medium_grad1, medium_support_min,
              dominant_top1, dominant_top2, dominant_mean3, dominant_grad1, dominant_support_min,
              consistent_top1, consistent_mean3, consistent_grad1, consistent_support_min,
-             single_top1, single_grad1, single_support_min,
              clear_nomatch_top1, clear_nomatch_mean3,
              nomatch_top1,
              relax,
@@ -3973,11 +3951,6 @@ cb2000_ncc_classify (const Cb2000NccTelemetry *tel)
       tel->best_intensity >= consistent_top1 &&
       tel->mean_top3_intensity >= consistent_mean3 &&
       tel->grad_for_best_intensity >= consistent_grad1)
-    return CB2000_NCC_DECISION_MATCH;
-
-  if (tel->support_count >= single_support_min &&
-      tel->best_intensity >= single_top1 &&
-      tel->grad_for_best_intensity >= single_grad1)
     return CB2000_NCC_DECISION_MATCH;
 
   if (tel->support_count == 0 &&
