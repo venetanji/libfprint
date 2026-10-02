@@ -127,18 +127,18 @@
 #define CB2000_NCC_MATCH_MEAN3_DEFAULT      0.30
 #define CB2000_NCC_MATCH_GRAD1_DEFAULT      0.22
 #define CB2000_NCC_SUPPORT_MIN_DEFAULT      2
-#define CB2000_NCC_SUPPORT_INT_DEFAULT      0.30
-#define CB2000_NCC_SUPPORT_GRAD_DEFAULT     0.22
+#define CB2000_NCC_SUPPORT_INT_DEFAULT      0.28
+#define CB2000_NCC_SUPPORT_GRAD_DEFAULT     0.20
 /* Medium band for borderline same-finger attempts on tiny captures. */
-#define CB2000_NCC_MEDIUM_TOP1_DEFAULT      0.35
-#define CB2000_NCC_MEDIUM_TOP2_DEFAULT      0.28
-#define CB2000_NCC_MEDIUM_MEAN3_DEFAULT     0.26
+#define CB2000_NCC_MEDIUM_TOP1_DEFAULT      0.33
+#define CB2000_NCC_MEDIUM_TOP2_DEFAULT      0.27
+#define CB2000_NCC_MEDIUM_MEAN3_DEFAULT     0.24
 #define CB2000_NCC_MEDIUM_GRAD1_DEFAULT     0.20
 #define CB2000_NCC_MEDIUM_SUPPORT_MIN_DEFAULT 2
 /* Dominant-match band: high top1 with coherent mean/gradient and minimum support. */
-#define CB2000_NCC_DOMINANT_TOP1_DEFAULT    0.45
-#define CB2000_NCC_DOMINANT_TOP2_DEFAULT    0.25
-#define CB2000_NCC_DOMINANT_MEAN3_DEFAULT   0.26
+#define CB2000_NCC_DOMINANT_TOP1_DEFAULT    0.44
+#define CB2000_NCC_DOMINANT_TOP2_DEFAULT    0.20
+#define CB2000_NCC_DOMINANT_MEAN3_DEFAULT   0.24
 #define CB2000_NCC_DOMINANT_GRAD1_DEFAULT   0.24
 #define CB2000_NCC_DOMINANT_SUPPORT_MIN_DEFAULT 1
 /*
@@ -146,17 +146,17 @@
  * If at least 2 enrolled samples support the captured frame,
  * accept with lower per-score thresholds.
  */
-#define CB2000_NCC_CONSISTENT_TOP1_DEFAULT   0.32
-#define CB2000_NCC_CONSISTENT_MEAN3_DEFAULT  0.25
-#define CB2000_NCC_CONSISTENT_GRAD1_DEFAULT  0.20
+#define CB2000_NCC_CONSISTENT_TOP1_DEFAULT   0.26
+#define CB2000_NCC_CONSISTENT_MEAN3_DEFAULT  0.20
+#define CB2000_NCC_CONSISTENT_GRAD1_DEFAULT  0.18
 #define CB2000_NCC_CONSISTENT_SUPPORT_MIN_DEFAULT 2
-#define CB2000_NCC_NOMATCH_TOP1_DEFAULT      0.24
+#define CB2000_NCC_NOMATCH_TOP1_DEFAULT      0.20
 /*
  * Single-strong band:
  * allow MATCH when one enrolled sample is clearly strong and stable.
  */
-#define CB2000_NCC_SINGLE_TOP1_DEFAULT       0.44
-#define CB2000_NCC_SINGLE_TOP2_DEFAULT       0.22
+#define CB2000_NCC_SINGLE_TOP1_DEFAULT       0.42
+#define CB2000_NCC_SINGLE_TOP2_DEFAULT       0.20
 #define CB2000_NCC_SINGLE_MEAN3_DEFAULT      0.24
 #define CB2000_NCC_SINGLE_GRAD1_DEFAULT      0.22
 #define CB2000_NCC_SINGLE_SUPPORT_MIN_DEFAULT 1
@@ -164,8 +164,8 @@
  * Clear no-match band:
  * avoid endless RETRY for clearly different fingers.
  */
-#define CB2000_NCC_CLEAR_NOMATCH_TOP1_DEFAULT 0.26
-#define CB2000_NCC_CLEAR_NOMATCH_MEAN3_DEFAULT 0.18
+#define CB2000_NCC_CLEAR_NOMATCH_TOP1_DEFAULT 0.22
+#define CB2000_NCC_CLEAR_NOMATCH_MEAN3_DEFAULT 0.16
 /* Adaptive thresholding based on enroll-template cohesion. */
 #define CB2000_NCC_ADAPTIVE_ENABLED_DEFAULT 1
 #define CB2000_NCC_ADAPTIVE_MAX_RELAX_DEFAULT 0.04
@@ -3695,14 +3695,14 @@ cb2000_ncc_classify(const Cb2000NccTelemetry *tel)
         }
     }
 
-    fp_dbg("[ NCC ] classify thresholds: strong(top1>=%.3f top2>=%.3f mean3>=%.3f grad1>=%.3f support>=%u) "
-           "medium(top1>=%.3f top2>=%.3f mean3>=%.3f grad1>=%.3f support>=%u) "
-           "dominant(top1>=%.3f top2>=%.3f mean3>=%.3f grad1>=%.3f support>=%u) "
-           "consistent(top1>=%.3f mean3>=%.3f grad1>=%.3f support>=%u) "
-           "single(top1>=%.3f top2>=%.3f mean3>=%.3f grad1>=%.3f support>=%u) "
-           "clear_nomatch(support==0 && top1<%.3f && mean3<%.3f) "
-           "nomatch(top1<%.3f) "
-           "adaptive(relax=%.3f relax_support=%u cohesion_mean=%.3f cohesion_min=%.3f pairs=%u)",
+    g_message("[ NCC ] classify thresholds: strong(top1>=%.3f top2>=%.3f mean3>=%.3f grad1>=%.3f support>=%u) "
+              "medium(top1>=%.3f top2>=%.3f mean3>=%.3f grad1>=%.3f support>=%u) "
+              "dominant(top1>=%.3f top2>=%.3f mean3>=%.3f grad1>=%.3f support>=%u) "
+              "consistent(top1>=%.3f mean3>=%.3f grad1>=%.3f support>=%u) "
+              "single(top1>=%.3f top2>=%.3f mean3>=%.3f grad1>=%.3f support>=%u) "
+              "clear_nomatch(support==0 && top1<%.3f && mean3<%.3f) "
+              "nomatch(top1<%.3f) "
+              "adaptive(relax=%.3f relax_support=%u cohesion_mean=%.3f cohesion_min=%.3f pairs=%u)",
            match_top1, match_top2, match_mean3, match_grad1, support_min,
            medium_top1, medium_top2, medium_mean3, medium_grad1, medium_support_min,
            dominant_top1, dominant_top2, dominant_mean3, dominant_grad1, dominant_support_min,
@@ -3980,9 +3980,9 @@ unpack_and_match(FpPrint *print, const guint8 *captured, Cb2000NccTelemetry *tel
     if (tel->best_intensity < 0.0)
         tel->best_intensity = 0.0;
 
-    fp_info("[ NCC ] top1=%.4f top2=%.4f mean3=%.4f grad1=%.4f support=%u/%u "
-            "mask_thresh=%u min_samples=%u max_shift=%d support_min=%u "
-            "support_int=%.3f(%.3f) support_grad=%.3f(%.3f) adapt=%.3f",
+    g_message("[ NCC ] top1=%.4f top2=%.4f mean3=%.4f grad1=%.4f support=%u/%u "
+              "mask_thresh=%u min_samples=%u max_shift=%d support_min=%u "
+              "support_int=%.3f(%.3f) support_grad=%.3f(%.3f) adapt=%.3f",
             tel->best_intensity,
             tel->second_intensity,
             tel->mean_top3_intensity,
@@ -4722,10 +4722,10 @@ cycle_run_state(FpiSsm *ssm, FpDevice *dev)
                         self->verify_result = FPI_MATCH_ERROR;
                     }
 
-                    fp_info("[ NCC ] decision=%s -> result=%s",
-                            cb2000_ncc_decision_label(ncc_decision),
-                            self->verify_result == FPI_MATCH_SUCCESS ? "MATCH" :
-                            self->verify_result == FPI_MATCH_FAIL ? "NO MATCH" : "ERROR");
+                    g_message("[ NCC ] decision=%s -> result=%s",
+                              cb2000_ncc_decision_label(ncc_decision),
+                              self->verify_result == FPI_MATCH_SUCCESS ? "MATCH" :
+                              self->verify_result == FPI_MATCH_FAIL ? "NO MATCH" : "ERROR");
 
                     fpi_ssm_mark_completed(ssm);
                     return;
