@@ -122,53 +122,53 @@
  * Default NCC thresholds tuned for tiny 80x64 captures.
  * Keep multi-sample support enabled to avoid easy false accepts.
  */
-#define CB2000_NCC_MATCH_TOP1_DEFAULT       0.20
-#define CB2000_NCC_MATCH_TOP2_DEFAULT       0.15
-#define CB2000_NCC_MATCH_MEAN3_DEFAULT      0.15
-#define CB2000_NCC_MATCH_GRAD1_DEFAULT      0.15
-#define CB2000_NCC_SUPPORT_MIN_DEFAULT      1
-#define CB2000_NCC_SUPPORT_INT_DEFAULT      0.20
-#define CB2000_NCC_SUPPORT_GRAD_DEFAULT     0.15
+#define CB2000_NCC_MATCH_TOP1_DEFAULT       0.40
+#define CB2000_NCC_MATCH_TOP2_DEFAULT       0.30
+#define CB2000_NCC_MATCH_MEAN3_DEFAULT      0.30
+#define CB2000_NCC_MATCH_GRAD1_DEFAULT      0.22
+#define CB2000_NCC_SUPPORT_MIN_DEFAULT      2
+#define CB2000_NCC_SUPPORT_INT_DEFAULT      0.30
+#define CB2000_NCC_SUPPORT_GRAD_DEFAULT     0.22
 /* Medium band for borderline same-finger attempts on tiny captures. */
-#define CB2000_NCC_MEDIUM_TOP1_DEFAULT      0.18
-#define CB2000_NCC_MEDIUM_TOP2_DEFAULT      0.14
-#define CB2000_NCC_MEDIUM_MEAN3_DEFAULT     0.14
-#define CB2000_NCC_MEDIUM_GRAD1_DEFAULT     0.14
-#define CB2000_NCC_MEDIUM_SUPPORT_MIN_DEFAULT 1
+#define CB2000_NCC_MEDIUM_TOP1_DEFAULT      0.35
+#define CB2000_NCC_MEDIUM_TOP2_DEFAULT      0.28
+#define CB2000_NCC_MEDIUM_MEAN3_DEFAULT     0.26
+#define CB2000_NCC_MEDIUM_GRAD1_DEFAULT     0.20
+#define CB2000_NCC_MEDIUM_SUPPORT_MIN_DEFAULT 2
 /* Dominant-match band: high top1 with coherent mean/gradient and minimum support. */
-#define CB2000_NCC_DOMINANT_TOP1_DEFAULT    0.25
-#define CB2000_NCC_DOMINANT_TOP2_DEFAULT    0.15
-#define CB2000_NCC_DOMINANT_MEAN3_DEFAULT   0.15
-#define CB2000_NCC_DOMINANT_GRAD1_DEFAULT   0.15
-#define CB2000_NCC_DOMINANT_SUPPORT_MIN_DEFAULT 0
+#define CB2000_NCC_DOMINANT_TOP1_DEFAULT    0.45
+#define CB2000_NCC_DOMINANT_TOP2_DEFAULT    0.25
+#define CB2000_NCC_DOMINANT_MEAN3_DEFAULT   0.26
+#define CB2000_NCC_DOMINANT_GRAD1_DEFAULT   0.24
+#define CB2000_NCC_DOMINANT_SUPPORT_MIN_DEFAULT 1
 /*
  * Cross-sample consistency band:
- * If at least 1 enrolled sample supports the captured frame,
+ * If at least 2 enrolled samples support the captured frame,
  * accept with lower per-score thresholds.
  */
-#define CB2000_NCC_CONSISTENT_TOP1_DEFAULT   0.16
-#define CB2000_NCC_CONSISTENT_MEAN3_DEFAULT  0.14
-#define CB2000_NCC_CONSISTENT_GRAD1_DEFAULT  0.13
-#define CB2000_NCC_CONSISTENT_SUPPORT_MIN_DEFAULT 1
-#define CB2000_NCC_NOMATCH_TOP1_DEFAULT      0.10
+#define CB2000_NCC_CONSISTENT_TOP1_DEFAULT   0.32
+#define CB2000_NCC_CONSISTENT_MEAN3_DEFAULT  0.25
+#define CB2000_NCC_CONSISTENT_GRAD1_DEFAULT  0.20
+#define CB2000_NCC_CONSISTENT_SUPPORT_MIN_DEFAULT 2
+#define CB2000_NCC_NOMATCH_TOP1_DEFAULT      0.24
 /*
  * Single-strong band:
  * allow MATCH when one enrolled sample is clearly strong and stable.
  */
-#define CB2000_NCC_SINGLE_TOP1_DEFAULT       0.28
-#define CB2000_NCC_SINGLE_TOP2_DEFAULT       0.15
-#define CB2000_NCC_SINGLE_MEAN3_DEFAULT      0.15
-#define CB2000_NCC_SINGLE_GRAD1_DEFAULT      0.15
-#define CB2000_NCC_SINGLE_SUPPORT_MIN_DEFAULT 0
+#define CB2000_NCC_SINGLE_TOP1_DEFAULT       0.44
+#define CB2000_NCC_SINGLE_TOP2_DEFAULT       0.22
+#define CB2000_NCC_SINGLE_MEAN3_DEFAULT      0.24
+#define CB2000_NCC_SINGLE_GRAD1_DEFAULT      0.22
+#define CB2000_NCC_SINGLE_SUPPORT_MIN_DEFAULT 1
 /*
  * Clear no-match band:
  * avoid endless RETRY for clearly different fingers.
  */
-#define CB2000_NCC_CLEAR_NOMATCH_TOP1_DEFAULT 0.12
-#define CB2000_NCC_CLEAR_NOMATCH_MEAN3_DEFAULT 0.10
+#define CB2000_NCC_CLEAR_NOMATCH_TOP1_DEFAULT 0.26
+#define CB2000_NCC_CLEAR_NOMATCH_MEAN3_DEFAULT 0.18
 /* Adaptive thresholding based on enroll-template cohesion. */
 #define CB2000_NCC_ADAPTIVE_ENABLED_DEFAULT 1
-#define CB2000_NCC_ADAPTIVE_MAX_RELAX_DEFAULT 0.08
+#define CB2000_NCC_ADAPTIVE_MAX_RELAX_DEFAULT 0.04
 #define CB2000_NCC_ADAPTIVE_TARGET_MEAN_DEFAULT 0.36
 #define CB2000_NCC_ADAPTIVE_TARGET_MIN_DEFAULT 0.28
 #define CB2000_NCC_ADAPTIVE_SUPPORT_RELAX_AT 0.045
@@ -1125,15 +1125,15 @@ cb2000_get_upscale_factor(FpiDeviceAction action)
     case FPI_DEVICE_ACTION_CLEAR_STORAGE:
         break;
     case FPI_DEVICE_ACTION_VERIFY:
-        action_default = 2;
+        action_default = 1;
         v_phase = g_getenv("CB2000_VERIFY_UPSCALE");
         break;
     case FPI_DEVICE_ACTION_IDENTIFY:
-        action_default = 2;
+        action_default = 1;
         v_phase = g_getenv("CB2000_IDENTIFY_UPSCALE");
         break;
     case FPI_DEVICE_ACTION_ENROLL:
-        action_default = 2;
+        action_default = 1;
         v_phase = g_getenv("CB2000_ENROLL_UPSCALE");
         break;
     case FPI_DEVICE_ACTION_CAPTURE:
