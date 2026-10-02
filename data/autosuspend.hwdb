@@ -71,6 +71,12 @@ usb:v08FFp5501*
  ID_AUTOSUSPEND=1
  ID_PERSIST=0
 
+# Supported by libfprint driver canvasbio-cb2000
+usb:v2DF0p0003*
+usb:v2DF0p0007*
+ ID_AUTOSUSPEND=1
+ ID_PERSIST=0
+
 # Supported by libfprint driver egis0570
 usb:v1C7Ap0570*
 usb:v1C7Ap0571*
@@ -554,7 +560,6 @@ usb:v2808pA573*
 usb:v2808pA658*
 usb:v2808pC652*
 usb:v298Dp2033*
-usb:v2DF0p0003*
 usb:v3274p9008*
 usb:v3274pB012*
 usb:v33A7p2388*
