@@ -67,6 +67,7 @@ drivers_tests = {
     'cv2': {},
     # Cancels a pending interrupt read; the replay can stall under load
     'cv2-cancel': { 'is_parallel': false },
+    'cv2-retries': {},
 }
 
 if get_option('introspection')
