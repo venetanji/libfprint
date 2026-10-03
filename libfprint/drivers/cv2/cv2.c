@@ -51,10 +51,13 @@
  * samples (4 are normal; a degraded chip never finishes) */
 #define CV2_ENROLL_MAX_SAMPLES 30
 
-/* State of the operation in progress. It starts at zero, and
- * cv2_task_complete () clears it. */
+/* State of the operation in progress. cv2_start_task () sets the inputs;
+ * everything else starts at zero, and cv2_task_complete () clears it all. */
 typedef struct
 {
+  /* Inputs */
+  GArray  *templates;          /* verify, identify: guint32 handles to match */
+
   guint32  session;
   gboolean session_open;
   gboolean enrolling;          /* an enrollment is open on the chip */
@@ -340,19 +343,23 @@ static void task_ssm_done (FpiSsm   *ssm,
 static void
 cv2_op_clear (Cv2Op *op)
 {
+  g_clear_pointer (&op->templates, g_array_unref);
   memset (op, 0, sizeof (*op));
 }
 
-/* Starts an operation, with all of its state at zero. */
+/* Starts an operation. @inputs holds its inputs, the rest of it is zero;
+ * takes @inputs->templates. */
 static void
 cv2_start_task (FpiDeviceCv2         *self,
                 FpiSsmHandlerCallback handler,
                 int                   nr_states,
-                const char           *name)
+                const char           *name,
+                const Cv2Op          *inputs)
 {
   g_assert (self->task_ssm == NULL);
 
   cv2_op_clear (&self->op);
+  self->op = *inputs;
 
   self->task_ssm = fpi_ssm_new_full (FP_DEVICE (self), handler, nr_states, nr_states, name);
   fpi_ssm_start (self->task_ssm, task_ssm_done);
@@ -382,6 +389,14 @@ cv2_task_complete (FpiDeviceCv2 *self, GError *error)
       fpi_print_set_device_stored (print, TRUE);
       g_object_set (print, "fpi-data", g_variant_new ("(u)", enrolled_id), NULL);
       fpi_device_enroll_complete (dev, g_object_ref (print), NULL);
+    }
+  else if (action == FPI_DEVICE_ACTION_VERIFY)
+    {
+      fpi_device_verify_complete (dev, error);
+    }
+  else if (action == FPI_DEVICE_ACTION_IDENTIFY)
+    {
+      fpi_device_identify_complete (dev, error);
     }
   else
     {
@@ -780,7 +795,210 @@ cv2_enroll (FpDevice *dev)
       return;
     }
 
-  cv2_start_task (self, enroll_run_state, ENROLL_NUM_STATES, "cv2-enroll");
+  cv2_start_task (self, enroll_run_state, ENROLL_NUM_STATES, "cv2-enroll", &(Cv2Op){ 0 });
+}
+
+/* ---- Verify and identify ----
+ *
+ * Verify is identify against one print: one capture, then one match command
+ * with every template handle.
+ */
+
+enum {
+  MATCH_OPEN_SESSION,
+  MATCH_CAPTURE,
+  MATCH_MATCH,
+  MATCH_CANCEL_CAPTURE,
+  MATCH_CLOSE_SESSION,
+  MATCH_NUM_STATES,
+};
+
+/* Prints store the chip's template handle as "(u)". */
+static gboolean
+cv2_print_get_template (FpPrint *print, guint32 *template_id)
+{
+  g_autoptr(GVariant) data = NULL;
+
+  g_object_get (print, "fpi-data", &data, NULL);
+  if (!data || !g_variant_check_format_string (data, "(u)", FALSE))
+    return FALSE;
+
+  g_variant_get (data, "(u)", template_id);
+  return TRUE;
+}
+
+static FpPrint *
+match_print_at (FpiDeviceCv2 *self, guint pos)
+{
+  FpDevice *dev = FP_DEVICE (self);
+  GPtrArray *prints;
+  FpPrint *print;
+
+  if (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_VERIFY)
+    {
+      fpi_device_get_verify_data (dev, &print);
+      return print;
+    }
+
+  fpi_device_get_identify_data (dev, &prints);
+  return g_ptr_array_index (prints, pos);
+}
+
+/* Which template the reader matched, or -1 for a handle that was not sent */
+static gint
+match_find (const Cv2Op *op, guint32 template_id)
+{
+  for (guint i = 0; i < op->templates->len; i++)
+    if (g_array_index (op->templates, guint32, i) == template_id)
+      return i;
+
+  return -1;
+}
+
+static void
+match_report (FpiDeviceCv2 *self, FpiSsm *ssm, FpPrint *match)
+{
+  FpDevice *dev = FP_DEVICE (self);
+
+  if (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_VERIFY)
+    fpi_device_verify_report (dev, match ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL, NULL, NULL);
+  else
+    fpi_device_identify_report (dev, match, NULL, NULL);
+
+  fpi_ssm_next_state (ssm);
+}
+
+static void
+match_cb (FpiDeviceCv2   *self,
+          FpiSsm         *ssm,
+          Cv2Outcome      outcome,
+          const Cv2Reply *reply,
+          GError         *error)
+{
+  Cv2Op *op = &self->op;
+  gboolean matched = FALSE;
+  guint32 template_id = 0;
+  gint pos;
+
+  fpi_device_report_finger_status (FP_DEVICE (self), FP_FINGER_STATUS_NONE);
+
+  if (error ||
+      (outcome == CV2_OUTCOME_OK &&
+       !cv2_reply_get_match (reply, &matched, &template_id, &error)))
+    {
+      fpi_ssm_mark_failed (ssm, error);
+      return;
+    }
+
+  if (!matched)
+    {
+      match_report (self, ssm, NULL);
+      return;
+    }
+
+  pos = match_find (op, template_id);
+  if (pos < 0)
+    {
+      fpi_ssm_mark_failed (ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                                     "Reader matched template 0x%08x, which was not requested",
+                                                     template_id));
+      return;
+    }
+
+  match_report (self, ssm, match_print_at (self, pos));
+}
+
+/* The result is already reported, so a failed cancel is only logged. */
+static void
+match_cancel_capture_cb (FpiDeviceCv2   *self,
+                         FpiSsm         *ssm,
+                         Cv2Outcome      outcome,
+                         const Cv2Reply *reply,
+                         GError         *error)
+{
+  log_failure ("Canceling the capture", error);
+  fpi_ssm_next_state (ssm);
+}
+
+static void
+match_run_state (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceCv2 *self = FPI_DEVICE_CV2 (dev);
+  Cv2Op *op = &self->op;
+  GByteArray *request;
+
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case MATCH_OPEN_SESSION:
+      cv2_cmd (self, ssm, cv2_build_open_session (), open_session_cb);
+      break;
+
+    case MATCH_CAPTURE:
+      fpi_ssm_start_subsm (ssm, capture_ssm_new (self));
+      break;
+
+    case MATCH_MATCH:
+      request = cv2_build_match (op->session, (const guint32 *) op->templates->data,
+                                 op->templates->len);
+      cv2_cmd (self, ssm, request, match_cb);
+      break;
+
+    case MATCH_CANCEL_CAPTURE:
+      cv2_cmd_always (self, ssm, cv2_build_simple (CV2_CMD_CAPTURE_CANCEL), match_cancel_capture_cb);
+      break;
+
+    case MATCH_CLOSE_SESSION:
+      cv2_cmd_always (self, ssm, cv2_build_close_session (op->session), close_session_cb);
+      break;
+    }
+}
+
+static void
+cv2_verify_identify (FpDevice *dev)
+{
+  FpiDeviceCv2 *self = FPI_DEVICE_CV2 (dev);
+  gboolean verify = fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_VERIFY;
+
+  g_autoptr(GArray) templates = g_array_new (FALSE, FALSE, sizeof (guint32));
+  GPtrArray *prints = NULL;
+  FpPrint *print = NULL;
+  guint32 template_id;
+
+  if (verify)
+    {
+      fpi_device_get_verify_data (dev, &print);
+      if (!cv2_print_get_template (print, &template_id))
+        {
+          fpi_device_verify_complete (dev, fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
+          return;
+        }
+      g_array_append_val (templates, template_id);
+    }
+  else
+    {
+      fpi_device_get_identify_data (dev, &prints);
+      for (guint i = 0; i < prints->len; i++)
+        {
+          if (!cv2_print_get_template (g_ptr_array_index (prints, i), &template_id))
+            {
+              fpi_device_identify_complete (dev,
+                                            fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
+              return;
+            }
+          g_array_append_val (templates, template_id);
+        }
+
+      if (templates->len == 0)
+        {
+          fpi_device_identify_report (dev, NULL, NULL, NULL);
+          fpi_device_identify_complete (dev, NULL);
+          return;
+        }
+    }
+
+  cv2_start_task (self, match_run_state, MATCH_NUM_STATES, "cv2-match",
+                  &(Cv2Op){ .templates = g_steal_pointer (&templates) });
 }
 
 /* ---- Device open and close ----
@@ -920,6 +1138,8 @@ fpi_device_cv2_class_init (FpiDeviceCv2Class *klass)
   dev_class->open = cv2_open;
   dev_class->close = cv2_close;
   dev_class->enroll = cv2_enroll;
+  dev_class->verify = cv2_verify_identify;
+  dev_class->identify = cv2_verify_identify;
 
   fpi_device_class_auto_initialize_features (dev_class);
 }
