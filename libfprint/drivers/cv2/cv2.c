@@ -1181,12 +1181,14 @@ cv2_delete (FpDevice *dev)
 
 /* ---- Device open and close ----
  *
- * Opening reads the firmware version. A reader that does not answer (a USB
- * error) fails the open; a reply that can't be used is only logged.
+ * Opening reads the firmware version and resets the sensor. A reader that
+ * does not answer (a USB error) fails the open; a reply that can't be used
+ * is only logged.
  */
 
 enum {
   OPEN_GET_VERSION,
+  OPEN_SENSOR_RESET,
   OPEN_NUM_STATES,
 };
 
@@ -1230,6 +1232,23 @@ open_version_cb (FpiDeviceCv2   *self,
 }
 
 static void
+open_sensor_reset_cb (FpiDeviceCv2   *self,
+                      FpiSsm         *ssm,
+                      Cv2Outcome      outcome,
+                      const Cv2Reply *reply,
+                      GError         *error)
+{
+  if (is_transport_error (error))
+    {
+      fpi_ssm_mark_failed (ssm, error);
+      return;
+    }
+
+  log_failure ("Sensor reset", error);
+  fpi_ssm_next_state (ssm);
+}
+
+static void
 open_run_state (FpiSsm *ssm, FpDevice *dev)
 {
   FpiDeviceCv2 *self = FPI_DEVICE_CV2 (dev);
@@ -1238,6 +1257,14 @@ open_run_state (FpiSsm *ssm, FpDevice *dev)
     {
     case OPEN_GET_VERSION:
       cv2_cmd_always (self, ssm, cv2_build_simple (CV2_CMD_GET_VERSION), open_version_cb);
+      break;
+
+    /* After a suspend the chip can be left in a state where enrollment needs
+     * many more samples and nothing matches, with any driver. This command,
+     * which the Windows driver sends before each enrollment, restores it and
+     * keeps the stored templates. */
+    case OPEN_SENSOR_RESET:
+      cv2_cmd_always (self, ssm, cv2_build_simple (CV2_CMD_SENSOR_RESET), open_sensor_reset_cb);
       break;
     }
 }

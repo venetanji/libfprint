@@ -87,6 +87,11 @@ static const char VERSION_REQ[] =
   "0100000038000000390040040200000000000000000000000000000000000000"
   "00000000000000000c000000000000000400000000000000";
 
+/* From the Windows driver's enrollment (windows-captures/03.pcap) */
+static const char SENSOR_RESET_REQ[] =
+  "0100000038000000820040000200000000000000000000000000000000000000"
+  "00000000000000000c000000000000000400000000000000";
+
 static const char CAPTURE_ID[] = "ac27493d858230b6ace063b560297f594315db27";
 static const char FINAL_ID[] = "593f0a9481c697258513c8a921687629e44542f0";
 
@@ -216,6 +221,7 @@ test_build_requests (void)
   assert_message (cv2_build_match (SESSION, two, G_N_ELEMENTS (two)), MATCH2_REQ);
   assert_message (cv2_build_delete (SESSION, 0x0036622f), DELETE_REQ);
   assert_message (cv2_build_simple (CV2_CMD_GET_VERSION), VERSION_REQ);
+  assert_message (cv2_build_simple (CV2_CMD_SENSOR_RESET), SENSOR_RESET_REQ);
 }
 
 static GByteArray *

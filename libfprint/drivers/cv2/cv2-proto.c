@@ -50,6 +50,10 @@ cmd_flags (Cv2Command cmd)
     case CV2_CMD_DELETE:
       return 0x0442;
 
+    case CV2_CMD_SENSOR_RESET:
+      /* As the Windows driver sends it; the only form tested */
+      return 0x0040;
+
     case CV2_CMD_OPEN_SESSION:
     case CV2_CMD_CLOSE_SESSION:
     case CV2_CMD_GET_VERSION:
@@ -120,8 +124,8 @@ msg_finish (GByteArray *msg)
   return msg;
 }
 
-/* A command whose only parameter is the value 0: get version, enroll begin
- * and discard, capture cancel. */
+/* A command whose only parameter is the value 0: get version, sensor reset,
+ * enroll begin and discard, capture cancel. */
 GByteArray *
 cv2_build_simple (Cv2Command cmd)
 {

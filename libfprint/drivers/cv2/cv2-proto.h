@@ -67,6 +67,7 @@ typedef enum {
   CV2_CMD_ENROLL_SAMPLE  = 0x6c,
   CV2_CMD_ENROLL_DISCARD = 0x6d,
   CV2_CMD_ENROLL_COMMIT  = 0x6e,
+  CV2_CMD_SENSOR_RESET   = 0x82,
   CV2_CMD_ENROLL_BEGIN   = 0x8a,
 } Cv2Command;
 
