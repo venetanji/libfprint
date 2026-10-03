@@ -57,6 +57,7 @@ typedef struct
 {
   /* Inputs */
   GArray  *templates;          /* verify, identify: guint32 handles to match */
+  guint32  delete_id;          /* delete: the handle to delete */
 
   guint32  session;
   gboolean session_open;
@@ -68,6 +69,9 @@ typedef struct
   gint     enroll_stage;
   guint    accepted_samples;
   guint32  enrolled_id;        /* enroll: the new template's handle */
+  gboolean match_one_by_one;   /* only templates[match_pos] is being matched */
+  guint    match_pos;
+  guint    match_missing;      /* handles found missing one by one */
 } Cv2Op;
 
 struct _FpiDeviceCv2
@@ -397,6 +401,10 @@ cv2_task_complete (FpiDeviceCv2 *self, GError *error)
   else if (action == FPI_DEVICE_ACTION_IDENTIFY)
     {
       fpi_device_identify_complete (dev, error);
+    }
+  else if (action == FPI_DEVICE_ACTION_DELETE)
+    {
+      fpi_device_delete_complete (dev, error);
     }
   else
     {
@@ -802,6 +810,11 @@ cv2_enroll (FpDevice *dev)
  *
  * Verify is identify against one print: one capture, then one match command
  * with every template handle.
+ *
+ * If any handle is no longer on the chip (deleted elsewhere, or the chip was
+ * wiped), the reader fails the whole list. The capture stays usable, so the
+ * handles are then matched one at a time, skipping the missing ones. If none
+ * of them is on the chip, the result is DATA_NOT_FOUND, as for a single print.
  */
 
 enum {
@@ -848,6 +861,10 @@ match_print_at (FpiDeviceCv2 *self, guint pos)
 static gint
 match_find (const Cv2Op *op, guint32 template_id)
 {
+  if (op->match_one_by_one)
+    return g_array_index (op->templates, guint32, op->match_pos) == template_id ?
+           (gint) op->match_pos : -1;
+
   for (guint i = 0; i < op->templates->len; i++)
     if (g_array_index (op->templates, guint32, i) == template_id)
       return i;
@@ -868,6 +885,33 @@ match_report (FpiDeviceCv2 *self, FpiSsm *ssm, FpPrint *match)
   fpi_ssm_next_state (ssm);
 }
 
+/* Matches the next handle on its own, or ends the search once every handle
+ * has been tried. */
+static void
+match_next (FpiDeviceCv2 *self, FpiSsm *ssm)
+{
+  Cv2Op *op = &self->op;
+  guint next = op->match_one_by_one ? op->match_pos + 1 : 0;
+
+  if (next < op->templates->len)
+    {
+      op->match_one_by_one = TRUE;
+      op->match_pos = next;
+      fpi_ssm_jump_to_state (ssm, MATCH_MATCH);
+      return;
+    }
+
+  if (op->match_missing == op->templates->len)
+    {
+      fpi_ssm_mark_failed (ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_NOT_FOUND,
+                                                     "None of the templates are on the reader"));
+      return;
+    }
+
+  match_report (self, ssm, NULL);
+}
+
 static void
 match_cb (FpiDeviceCv2   *self,
           FpiSsm         *ssm,
@@ -882,6 +926,27 @@ match_cb (FpiDeviceCv2   *self,
 
   fpi_device_report_finger_status (FP_DEVICE (self), FP_FINGER_STATUS_NONE);
 
+  /* A handle is missing: skip it, or start matching one at a time. A lone
+   * handle has nothing to skip, so it fails as not found below. */
+  if (g_error_matches (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_DATA_NOT_FOUND) &&
+      op->templates->len > 1)
+    {
+      if (op->match_one_by_one)
+        {
+          fp_info ("Template 0x%08x is not on the reader, skipping it",
+                   g_array_index (op->templates, guint32, op->match_pos));
+          op->match_missing++;
+        }
+      else
+        {
+          fp_info ("A template is not on the reader, matching one at a time");
+        }
+
+      g_clear_error (&error);
+      match_next (self, ssm);
+      return;
+    }
+
   if (error ||
       (outcome == CV2_OUTCOME_OK &&
        !cv2_reply_get_match (reply, &matched, &template_id, &error)))
@@ -892,7 +957,10 @@ match_cb (FpiDeviceCv2   *self,
 
   if (!matched)
     {
-      match_report (self, ssm, NULL);
+      if (op->match_one_by_one)
+        match_next (self, ssm);
+      else
+        match_report (self, ssm, NULL);
       return;
     }
 
@@ -939,8 +1007,12 @@ match_run_state (FpiSsm *ssm, FpDevice *dev)
       break;
 
     case MATCH_MATCH:
-      request = cv2_build_match (op->session, (const guint32 *) op->templates->data,
-                                 op->templates->len);
+      if (op->match_one_by_one)
+        request = cv2_build_match (op->session,
+                                   &g_array_index (op->templates, guint32, op->match_pos), 1);
+      else
+        request = cv2_build_match (op->session, (const guint32 *) op->templates->data,
+                                   op->templates->len);
       cv2_cmd (self, ssm, request, match_cb);
       break;
 
@@ -999,6 +1071,72 @@ cv2_verify_identify (FpDevice *dev)
 
   cv2_start_task (self, match_run_state, MATCH_NUM_STATES, "cv2-match",
                   &(Cv2Op){ .templates = g_steal_pointer (&templates) });
+}
+
+/* ---- Delete ---- */
+
+enum {
+  DELETE_OPEN_SESSION,
+  DELETE_TEMPLATE,
+  DELETE_CLOSE_SESSION,
+  DELETE_NUM_STATES,
+};
+
+static void
+delete_template_cb (FpiDeviceCv2   *self,
+                    FpiSsm         *ssm,
+                    Cv2Outcome      outcome,
+                    const Cv2Reply *reply,
+                    GError         *error)
+{
+  if (error)
+    {
+      fpi_ssm_mark_failed (ssm, error);
+      return;
+    }
+
+  fp_info ("Deleted template 0x%08x", self->op.delete_id);
+  fpi_ssm_next_state (ssm);
+}
+
+static void
+delete_run_state (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceCv2 *self = FPI_DEVICE_CV2 (dev);
+
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case DELETE_OPEN_SESSION:
+      cv2_cmd (self, ssm, cv2_build_open_session (), open_session_cb);
+      break;
+
+    case DELETE_TEMPLATE:
+      cv2_cmd (self, ssm, cv2_build_delete (self->op.session, self->op.delete_id),
+               delete_template_cb);
+      break;
+
+    case DELETE_CLOSE_SESSION:
+      cv2_cmd_always (self, ssm, cv2_build_close_session (self->op.session), close_session_cb);
+      break;
+    }
+}
+
+static void
+cv2_delete (FpDevice *dev)
+{
+  FpiDeviceCv2 *self = FPI_DEVICE_CV2 (dev);
+  FpPrint *print = NULL;
+  guint32 template_id;
+
+  fpi_device_get_delete_data (dev, &print);
+  if (!cv2_print_get_template (print, &template_id))
+    {
+      fpi_device_delete_complete (dev, fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
+      return;
+    }
+
+  cv2_start_task (self, delete_run_state, DELETE_NUM_STATES, "cv2-delete",
+                  &(Cv2Op){ .delete_id = template_id });
 }
 
 /* ---- Device open and close ----
@@ -1140,6 +1278,10 @@ fpi_device_cv2_class_init (FpiDeviceCv2Class *klass)
   dev_class->enroll = cv2_enroll;
   dev_class->verify = cv2_verify_identify;
   dev_class->identify = cv2_verify_identify;
+  dev_class->delete = cv2_delete;
 
   fpi_device_class_auto_initialize_features (dev_class);
+  /* Prints live on the chip, but it can't list them; fprintd's storage is
+   * the source of truth. */
+  dev_class->features |= FP_DEVICE_FEATURE_STORAGE;
 }

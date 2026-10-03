@@ -72,6 +72,7 @@ typedef enum {
 
 typedef enum {
   CV2_STATUS_OK              = 0x00,
+  CV2_STATUS_NO_TEMPLATE     = 0x1b,
   CV2_STATUS_FW_TOO_OLD      = 0x24,
   CV2_STATUS_NO_TEMPLATES    = 0x47,
   CV2_STATUS_SAMPLE_REJECTED = 0x59,

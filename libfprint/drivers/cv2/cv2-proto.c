@@ -500,6 +500,15 @@ cv2_status_classify (guint16 cmd, guint32 status, GError **error)
       return CV2_OUTCOME_ERROR;
     }
 
+  /* A handle that is not (or no longer) on the chip, e.g. deleted */
+  if ((cmd == CV2_CMD_DELETE || cmd == CV2_CMD_MATCH) && status == CV2_STATUS_NO_TEMPLATE)
+    {
+      g_propagate_error (error,
+                         fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_NOT_FOUND,
+                                                   "The template is not on the reader"));
+      return CV2_OUTCOME_ERROR;
+    }
+
   if (cmd == CV2_CMD_DELETE)
     {
       g_propagate_error (error,

@@ -563,6 +563,8 @@ test_status_classify (void)
     { CV2_CMD_ENROLL_COMMIT, 0x8d, CV2_OUTCOME_ERROR, fp_device_error_quark, FP_DEVICE_ERROR_PROTO },
     { CV2_CMD_ENROLL_SAMPLE, 0x85, CV2_OUTCOME_ERROR, fp_device_error_quark, FP_DEVICE_ERROR_PROTO },
     { CV2_CMD_CAPTURE_START, 0x47, CV2_OUTCOME_ERROR, fp_device_error_quark, FP_DEVICE_ERROR_PROTO },
+    { CV2_CMD_DELETE, 0x1b, CV2_OUTCOME_ERROR, fp_device_error_quark, FP_DEVICE_ERROR_DATA_NOT_FOUND },
+    { CV2_CMD_MATCH, 0x1b, CV2_OUTCOME_ERROR, fp_device_error_quark, FP_DEVICE_ERROR_DATA_NOT_FOUND },
     { CV2_CMD_CLOSE_SESSION, 0x00, CV2_OUTCOME_OK, NULL, 0 },
   };
 
