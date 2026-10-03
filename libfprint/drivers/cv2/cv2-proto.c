@@ -483,6 +483,14 @@ cv2_status_classify (guint16 cmd, guint32 status, GError **error)
       return CV2_OUTCOME_RETRY;
     }
 
+  /* No usable capture, e.g. the finger was lifted too soon */
+  if ((cmd == CV2_CMD_ENROLL_SAMPLE || cmd == CV2_CMD_MATCH) &&
+      status == CV2_STATUS_NO_CAPTURE)
+    {
+      g_propagate_error (error, fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL));
+      return CV2_OUTCOME_RETRY;
+    }
+
   if (cmd == CV2_CMD_CAPTURE_START && status == CV2_STATUS_CAPTURE_PENDING)
     {
       g_propagate_error (error,

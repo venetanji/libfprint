@@ -396,10 +396,22 @@ cv2_task_complete (FpiDeviceCv2 *self, GError *error)
     }
   else if (action == FPI_DEVICE_ACTION_VERIFY)
     {
+      if (error && error->domain == FP_DEVICE_RETRY)
+        {
+          fpi_device_verify_report (dev, FPI_MATCH_ERROR, NULL, g_steal_pointer (&error));
+          fpi_device_verify_complete (dev, NULL);
+          return;
+        }
       fpi_device_verify_complete (dev, error);
     }
   else if (action == FPI_DEVICE_ACTION_IDENTIFY)
     {
+      if (error && error->domain == FP_DEVICE_RETRY)
+        {
+          fpi_device_identify_report (dev, NULL, NULL, g_steal_pointer (&error));
+          fpi_device_identify_complete (dev, NULL);
+          return;
+        }
       fpi_device_identify_complete (dev, error);
     }
   else if (action == FPI_DEVICE_ACTION_DELETE)
@@ -520,7 +532,9 @@ close_session_cb (FpiDeviceCv2   *self,
 /* ---- Capture ----
  *
  * Starts a capture and waits for a finger. A capture the chip still holds
- * (left by another client) is canceled first.
+ * (left by another client, or by a touch too short to use) is canceled
+ * first. A touch too short to use fails the capture with a retry error;
+ * the operation decides what a retry means.
  */
 
 enum {
@@ -580,6 +594,7 @@ wait_finger_cb (FpiUsbTransfer *transfer,
                 gpointer        user_data,
                 GError         *error)
 {
+  FpiDeviceCv2 *self = FPI_DEVICE_CV2 (dev);
   Cv2IntEvent event;
 
   if (error ||
@@ -603,6 +618,16 @@ wait_finger_cb (FpiUsbTransfer *transfer,
                            fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
                                                      "Expected a finger event, got interrupt type %u",
                                                      event.type));
+      return;
+    }
+
+  /* A nonzero value means the chip got no usable capture: seen when the
+   * finger touches only briefly. The chip still holds the capture. */
+  if (event.value != 0)
+    {
+      fp_info ("Finger lifted too soon (finger event value %u)", event.value);
+      self->op.capture_pending = TRUE;
+      fpi_ssm_mark_failed (transfer->ssm, fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL));
       return;
     }
 
@@ -662,13 +687,26 @@ enum {
   ENROLL_NUM_STATES,
 };
 
-/* The reader rejected the sample: ask for another press and capture again.
- * Takes the retry error. */
+/* No usable sample (a touch too short, or a rejected sample): ask for
+ * another press and capture again. Takes @error, a retry error. */
 static void
 enroll_retry (FpiDeviceCv2 *self, GError *error)
 {
   fpi_device_enroll_progress (FP_DEVICE (self), self->op.enroll_stage, NULL, error);
   fpi_ssm_jump_to_state (self->task_ssm, ENROLL_CAPTURE);
+}
+
+static void
+enroll_capture_done (FpiSsm *ssm, FpDevice *dev, GError *error)
+{
+  FpiDeviceCv2 *self = FPI_DEVICE_CV2 (dev);
+
+  if (error && error->domain == FP_DEVICE_RETRY)
+    enroll_retry (self, error);
+  else if (error)
+    fpi_ssm_mark_failed (self->task_ssm, error);
+  else
+    fpi_ssm_next_state (self->task_ssm);
 }
 
 static void
@@ -773,7 +811,8 @@ enroll_run_state (FpiSsm *ssm, FpDevice *dev)
       break;
 
     case ENROLL_CAPTURE:
-      fpi_ssm_start_subsm (ssm, capture_ssm_new (self));
+      /* Not a sub-machine: a retry error must not fail the enrollment */
+      fpi_ssm_start (capture_ssm_new (self), enroll_capture_done);
       break;
 
     case ENROLL_SAMPLE:
@@ -947,6 +986,7 @@ match_cb (FpiDeviceCv2   *self,
       return;
     }
 
+  /* Including a retry error, e.g. no usable capture */
   if (error ||
       (outcome == CV2_OUTCOME_OK &&
        !cv2_reply_get_match (reply, &matched, &template_id, &error)))

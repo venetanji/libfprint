@@ -510,6 +510,7 @@ test_int_event (void)
 {
   g_autoptr(GBytes) reply_ready = hex_bytes ("0000000050000000");
   g_autoptr(GBytes) finger = hex_bytes ("0300000000000000");
+  g_autoptr(GBytes) short_touch = hex_bytes ("0300000007000000");
   g_autoptr(GBytes) too_long = hex_bytes ("0000000065100000");
   g_autoptr(GBytes) too_short = hex_bytes ("000000000c000000");
   g_autoptr(GBytes) unknown = hex_bytes ("0700000001000000");
@@ -524,6 +525,11 @@ test_int_event (void)
   g_assert_true (cv2_int_event_parse (g_bytes_get_data (finger, NULL), 8, &event, &error));
   g_assert_cmpuint (event.type, ==, CV2_INT_FINGER);
   g_assert_cmpuint (event.value, ==, 0);
+
+  /* The finger was lifted too soon */
+  g_assert_true (cv2_int_event_parse (g_bytes_get_data (short_touch, NULL), 8, &event, &error));
+  g_assert_cmpuint (event.type, ==, CV2_INT_FINGER);
+  g_assert_cmpuint (event.value, ==, 7);
 
   /* Unknown types are for the caller to reject */
   g_assert_true (cv2_int_event_parse (g_bytes_get_data (unknown, NULL), 8, &event, &error));
@@ -565,6 +571,8 @@ test_status_classify (void)
     { CV2_CMD_CAPTURE_START, 0x47, CV2_OUTCOME_ERROR, fp_device_error_quark, FP_DEVICE_ERROR_PROTO },
     { CV2_CMD_DELETE, 0x1b, CV2_OUTCOME_ERROR, fp_device_error_quark, FP_DEVICE_ERROR_DATA_NOT_FOUND },
     { CV2_CMD_MATCH, 0x1b, CV2_OUTCOME_ERROR, fp_device_error_quark, FP_DEVICE_ERROR_DATA_NOT_FOUND },
+    { CV2_CMD_ENROLL_SAMPLE, 0x89, CV2_OUTCOME_RETRY, fp_device_retry_quark, FP_DEVICE_RETRY_GENERAL },
+    { CV2_CMD_MATCH, 0x89, CV2_OUTCOME_RETRY, fp_device_retry_quark, FP_DEVICE_RETRY_GENERAL },
     { CV2_CMD_CLOSE_SESSION, 0x00, CV2_OUTCOME_OK, NULL, 0 },
   };
 

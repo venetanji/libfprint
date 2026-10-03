@@ -77,19 +77,20 @@ typedef enum {
   CV2_STATUS_NO_TEMPLATES    = 0x47,
   CV2_STATUS_SAMPLE_REJECTED = 0x59,
   CV2_STATUS_CAPTURE_PENDING = 0x85,
+  CV2_STATUS_NO_CAPTURE      = 0x89,
 } Cv2Status;
 
 typedef enum {
   CV2_OUTCOME_OK,              /* status 0 */
   CV2_OUTCOME_NO_MATCH,        /* match with no templates: treat as no match */
-  CV2_OUTCOME_RETRY,           /* sample rejected; error is a retry error */
+  CV2_OUTCOME_RETRY,           /* no usable sample; error is a retry error */
   CV2_OUTCOME_CAPTURE_PENDING, /* cancel the capture and retry once; error is BUSY */
   CV2_OUTCOME_ERROR,           /* error is set */
 } Cv2Outcome;
 
 typedef enum {
   CV2_INT_REPLY  = 0,  /* value: length of the reply waiting on bulk IN */
-  CV2_INT_FINGER = 3,  /* a finger touched the sensor */
+  CV2_INT_FINGER = 3,  /* value: nonzero if the chip got no usable capture */
 } Cv2IntType;
 
 typedef struct
