@@ -64,6 +64,9 @@ drivers_tests = {
     'focaltech_moc-6553': {},
     'mafpmoc': {},
     'secugen': {},
+    'cv2': {},
+    # Cancels a pending interrupt read; the replay can stall under load
+    'cv2-cancel': { 'is_parallel': false },
 }
 
 if get_option('introspection')
