@@ -23,6 +23,10 @@
 #include "fpi-device.h"
 #include "cv2-proto.h"
 
+/* The first parameter's length and data */
+#define PARAM0_LEN (CV2_HEADER_LEN + 4)
+#define PARAM0_DATA (CV2_HEADER_LEN + CV2_PARAM_HEADER_LEN)
+
 #define SESSION 0x14019c8c
 
 static const char OPEN_REQ[] =
@@ -86,6 +90,85 @@ static const char VERSION_REQ[] =
 static const char CAPTURE_ID[] = "ac27493d858230b6ace063b560297f594315db27";
 static const char FINAL_ID[] = "593f0a9481c697258513c8a921687629e44542f0";
 
+static const char OPEN_REPLY[] =
+  "010000003800000002004005020000008c9c0114000000000000000000000000"
+  "00000000000000000c00000000000000040000008c9c0114";
+
+static const char CAPTURE_START_REPLY[] =
+  "010000004800000066004205020000008c9c0114000000000000000000000000"
+  "00000000000000001c0000000000000014000000ac27493d858230b6ace063b5"
+  "60297f594315db27";
+
+static const char CAPTURE_PENDING_REPLY[] =
+  "010000002c00000066004205020000008c9c0114850000000000000000000000"
+  "000000000000000000000000";
+
+static const char SAMPLE_REPLY[] =
+  "01000000600000006c004005020000008c9c0114000000000000000000000000"
+  "0000000000000000340000000000000004000000009c01140000000014000000"
+  "ac27493d858230b6ace063b560297f594315db27000000000400000000000000";
+
+static const char SAMPLE_DONE_REPLY[] =
+  "01000000600000006c004005020000008c9c0114000000000000000000000000"
+  "0000000000000000340000000000000004000000019c01140000000014000000"
+  "593f0a9481c697258513c8a921687629e44542f0000000000400000000000000";
+
+static const char SAMPLE_REJECTED_REPLY[] =
+  "010000002c0000006c00400502000000889c0114590000000000000000000000"
+  "000000000000000000000000";
+
+static const char COMMIT_REPLY[] =
+  "01000000400000006e004005020000008c9c0114000000000000000000000000"
+  "00000000000000001400000003000000000000000000000004000000805a7800"
+  "00";
+
+static const char MATCH_HIT_REPLY[] =
+  "01000000440000002f004205020000008c9c0114000000000000000000000000"
+  "0000000000000000180000000000000004000000010000000000000004000000"
+  "07a0df00";
+
+static const char MATCH_MISS_REPLY[] =
+  "01000000440000002f004205020000008c9c0114000000000000000000000000"
+  "0000000000000000180000000000000004000000000000000000000004000000"
+  "00000000";
+
+static const char MATCH_EMPTY_REPLY[] =
+  "010000002c0000002f004205020000008c9c0114470000000000000000000000"
+  "000000000000000000000000";
+
+static const char CANCEL_REPLY[] =
+  "010000002c000000680040050200000000000000000000000000000000000000"
+  "000000000000000000000000";
+
+static const char VERSION_REPLY[] =
+  "0100000050030000390040010200000000000000000000000000000000000000"
+  "000000000000000024030000010000001c0300005553485f4348495049443a30"
+  "353831303231310a5553485f434849505f5355425f5645523a30303030303538"
+  "310a5553485f52454c5f5645523a30313032303030300a5553485f52454c5f55"
+  "5047524144455f5645523a30303431323031350a5553485f52454c5f4255494c"
+  "445f5645523a30303030303030300a5553485f424f4f545f434d443a35383830"
+  "303130300a5553485f5245424f4f545f434e543a30303030303030300a555348"
+  "5f5342495f4d4f44453a30303030303030300a5553485f464c534857525f434e"
+  "543a30303030303030300a5553485f4f54505f53544154533a30303030303030"
+  "310a5553485f435553545f49443a36303030303030310a5553485f435553545f"
+  "5245563a30303030303030300a5553485f5343445f524f4d5f5645523a303130"
+  "31303630300a5553485f43565f5645523a30313030303233350a5553485f4343"
+  "49445f5645523a30303033303130310a5553485f4849445f5645523a30303030"
+  "303032630a5553485f44505f5645525f55505045523a30303035303030300a55"
+  "53485f44505f5645525f4c4f5745523a30303033303365300a5553485f525341"
+  "5f5645523a30303030303130310a5553485f49505f52455649443a3030303030"
+  "3030300a5553485f5057525f49444c455f54494d453a30303034393365300a55"
+  "53485f5057525f4d4f44453a30303030303030330a5553485f555342445f5049"
+  "443a30303030353833340a5553485f5359535f49443a30303030303030320a55"
+  "53485f46505f4e4558545f53454e534f523a30303031306130310a5553485f46"
+  "505f44505f53454e534f523a30303030303030300a5553485f46505f53594e41"
+  "50544943535f53454e534f523a30303030303030300a5553485f4145535f4b45"
+  "595f56414c49443a30303030303030310a5553485f424f4152445f49443a6263"
+  "3030303030300a5553485f494d475f535441543a30303030303030300a555348"
+  "5f494d475f464c4147533a30303030303037650a5553485f4355525f5449434b"
+  "3a30303034323430320a5553485f4255494c445f54494d453a41756720313820"
+  "323032352031373a35343a34300a0000";
+
 static GBytes *
 hex_bytes (const char *hex)
 {
@@ -135,12 +218,347 @@ test_build_requests (void)
   assert_message (cv2_build_simple (CV2_CMD_GET_VERSION), VERSION_REQ);
 }
 
+static GByteArray *
+hex_array (const char *hex)
+{
+  g_autoptr(GBytes) bytes = hex_bytes (hex);
+  gsize len;
+  const guint8 *data = g_bytes_get_data (bytes, &len);
+  GByteArray *array = g_byte_array_sized_new (len);
+
+  g_byte_array_append (array, data, len);
+  return array;
+}
+
+static Cv2Reply *
+parse_hex (const char *hex, guint16 cmd, GError **error)
+{
+  g_autoptr(GBytes) bytes = hex_bytes (hex);
+  gsize len;
+  const guint8 *data = g_bytes_get_data (bytes, &len);
+
+  return cv2_reply_parse (data, len, cmd, error);
+}
+
+static Cv2Reply *
+parse_array (GByteArray *array, guint16 cmd, GError **error)
+{
+  return cv2_reply_parse (array->data, array->len, cmd, error);
+}
+
+static void
+assert_id (const guint8 *id, const char *expected_hex)
+{
+  g_autoptr(GBytes) expected = hex_bytes (expected_hex);
+  gsize len;
+  const guint8 *data = g_bytes_get_data (expected, &len);
+
+  g_assert_cmpmem (id, CV2_CAPTURE_ID_LEN, data, len);
+}
+
+static void
+test_parse_open (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(Cv2Reply) reply = parse_hex (OPEN_REPLY, CV2_CMD_OPEN_SESSION, &error);
+  guint32 session = 0;
+
+  g_assert_no_error (error);
+  g_assert_cmpuint (reply->cmd, ==, CV2_CMD_OPEN_SESSION);
+  g_assert_cmpuint (reply->flags, ==, 0x0540);
+  g_assert_cmpuint (reply->status, ==, 0);
+  g_assert_cmpuint (reply->session, ==, SESSION);
+  g_assert_cmpuint (reply->params->len, ==, 1);
+  g_assert_true (cv2_reply_get_session (reply, &session, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (session, ==, SESSION);
+}
+
+static void
+test_parse_capture_and_samples (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(Cv2Reply) start = parse_hex (CAPTURE_START_REPLY, CV2_CMD_CAPTURE_START, &error);
+  g_autoptr(Cv2Reply) sample = NULL;
+  g_autoptr(Cv2Reply) done_reply = NULL;
+  guint8 id[CV2_CAPTURE_ID_LEN];
+  gboolean done = TRUE;
+
+  g_assert_no_error (error);
+  g_assert_true (cv2_reply_get_capture_id (start, id, &error));
+  assert_id (id, CAPTURE_ID);
+
+  sample = parse_hex (SAMPLE_REPLY, CV2_CMD_ENROLL_SAMPLE, &error);
+  g_assert_no_error (error);
+  g_assert_true (cv2_reply_get_sample (sample, &done, id, &error));
+  g_assert_false (done);
+  assert_id (id, CAPTURE_ID);
+
+  done_reply = parse_hex (SAMPLE_DONE_REPLY, CV2_CMD_ENROLL_SAMPLE, &error);
+  g_assert_no_error (error);
+  g_assert_true (cv2_reply_get_sample (done_reply, &done, id, &error));
+  g_assert_true (done);
+  assert_id (id, FINAL_ID);
+}
+
+static void
+test_parse_commit_with_trailing_byte (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(Cv2Reply) reply = parse_hex (COMMIT_REPLY, CV2_CMD_ENROLL_COMMIT, &error);
+  guint32 template_id = 0;
+
+  g_assert_no_error (error);
+  g_assert_cmpuint (g_bytes_get_size (reply->raw), ==, 0x40);
+  g_assert_true (cv2_reply_get_template (reply, &template_id, &error));
+  g_assert_cmphex (template_id, ==, 0x00785a80);
+}
+
+static void
+test_parse_match (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(Cv2Reply) hit = parse_hex (MATCH_HIT_REPLY, CV2_CMD_MATCH, &error);
+  g_autoptr(Cv2Reply) miss = NULL;
+  gboolean matched = FALSE;
+  guint32 template_id = 0;
+
+  g_assert_no_error (error);
+  g_assert_true (cv2_reply_get_match (hit, &matched, &template_id, &error));
+  g_assert_true (matched);
+  g_assert_cmphex (template_id, ==, 0x00dfa007);
+
+  miss = parse_hex (MATCH_MISS_REPLY, CV2_CMD_MATCH, &error);
+  g_assert_no_error (error);
+  g_assert_true (cv2_reply_get_match (miss, &matched, &template_id, &error));
+  g_assert_false (matched);
+  g_assert_cmphex (template_id, ==, 0);
+}
+
+static void
+test_parse_header_only (void)
+{
+  struct
+  {
+    const char *hex;
+    guint16     cmd;
+    guint32     status;
+  } cases[] = {
+    { SAMPLE_REJECTED_REPLY, CV2_CMD_ENROLL_SAMPLE, CV2_STATUS_SAMPLE_REJECTED },
+    { CAPTURE_PENDING_REPLY, CV2_CMD_CAPTURE_START, CV2_STATUS_CAPTURE_PENDING },
+    { MATCH_EMPTY_REPLY, CV2_CMD_MATCH, CV2_STATUS_NO_TEMPLATES },
+    { CANCEL_REPLY, CV2_CMD_CAPTURE_CANCEL, CV2_STATUS_OK },
+  };
+
+  for (guint i = 0; i < G_N_ELEMENTS (cases); i++)
+    {
+      g_autoptr(GError) error = NULL;
+      g_autoptr(Cv2Reply) reply = parse_hex (cases[i].hex, cases[i].cmd, &error);
+
+      g_assert_no_error (error);
+      g_assert_cmphex (reply->status, ==, cases[i].status);
+      g_assert_cmpuint (reply->params->len, ==, 0);
+    }
+}
+
+static void
+test_parse_version (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(Cv2Reply) reply = parse_hex (VERSION_REPLY, CV2_CMD_GET_VERSION, &error);
+  g_autofree gchar *text = NULL;
+
+  g_assert_no_error (error);
+  text = cv2_reply_get_version_text (reply, &error);
+  g_assert_no_error (error);
+  g_assert_true (g_str_has_prefix (text, "USH_CHIPID:05810211\n"));
+  g_assert_nonnull (strstr (text, "\nUSH_REL_UPGRADE_VER:00412015\n"));
+  g_assert_true (g_str_has_suffix (text, "USH_BUILD_TIME:Aug 18 2025 17:54:40\n"));
+}
+
+static void
+assert_proto_error (GError *error)
+{
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+}
+
+static void
+test_parse_malformed (void)
+{
+  g_autoptr(GByteArray) msg = NULL;
+  g_autoptr(GError) error = NULL;
+
+  /* Truncated header */
+  msg = hex_array (OPEN_REPLY);
+  g_byte_array_set_size (msg, 0x20);
+  g_assert_null (parse_array (msg, CV2_CMD_OPEN_SESSION, &error));
+  assert_proto_error (error);
+  g_clear_error (&error);
+  g_clear_pointer (&msg, g_byte_array_unref);
+
+  /* Header length larger than the bytes read */
+  msg = hex_array (OPEN_REPLY);
+  g_byte_array_set_size (msg, msg->len - 4);
+  g_assert_null (parse_array (msg, CV2_CMD_OPEN_SESSION, &error));
+  assert_proto_error (error);
+  g_clear_error (&error);
+  g_clear_pointer (&msg, g_byte_array_unref);
+
+  /* Bad magic */
+  msg = hex_array (OPEN_REPLY);
+  msg->data[CV2_HDR_MAGIC] = 2;
+  g_assert_null (parse_array (msg, CV2_CMD_OPEN_SESSION, &error));
+  assert_proto_error (error);
+  g_clear_error (&error);
+  g_clear_pointer (&msg, g_byte_array_unref);
+
+  /* Reply for another command */
+  g_assert_null (parse_hex (OPEN_REPLY, CV2_CMD_CLOSE_SESSION, &error));
+  assert_proto_error (error);
+  g_clear_error (&error);
+
+  /* Parameter area length disagrees with the message length */
+  msg = hex_array (OPEN_REPLY);
+  msg->data[CV2_HDR_PARAMS_LEN] = 0x10;
+  g_assert_null (parse_array (msg, CV2_CMD_OPEN_SESSION, &error));
+  assert_proto_error (error);
+  g_clear_error (&error);
+  g_clear_pointer (&msg, g_byte_array_unref);
+
+  /* Parameter overruns the message */
+  msg = hex_array (OPEN_REPLY);
+  msg->data[PARAM0_LEN] = 0x40;
+  g_assert_null (parse_array (msg, CV2_CMD_OPEN_SESSION, &error));
+  assert_proto_error (error);
+  g_clear_error (&error);
+  g_clear_pointer (&msg, g_byte_array_unref);
+
+  /* Parameter length near G_MAXUINT32: must not wrap when padded (32-bit) */
+  msg = hex_array (OPEN_REPLY);
+  msg->data[PARAM0_LEN] = 0xfd;
+  msg->data[PARAM0_LEN + 1] = 0xff;
+  msg->data[PARAM0_LEN + 2] = 0xff;
+  msg->data[PARAM0_LEN + 3] = 0xff;
+  g_assert_null (parse_array (msg, CV2_CMD_OPEN_SESSION, &error));
+  assert_proto_error (error);
+  g_clear_error (&error);
+  g_clear_pointer (&msg, g_byte_array_unref);
+
+  /* Truncated parameter header: 4 bytes of parameter area */
+  msg = hex_array (CANCEL_REPLY);
+  g_byte_array_set_size (msg, msg->len + 4);
+  memset (msg->data + CV2_HEADER_LEN, 0, 4);
+  msg->data[CV2_HDR_LEN] = CV2_HEADER_LEN + 4;
+  msg->data[CV2_HDR_PARAMS_LEN] = 0x04;
+  g_assert_null (parse_array (msg, CV2_CMD_CAPTURE_CANCEL, &error));
+  assert_proto_error (error);
+  g_clear_error (&error);
+  g_clear_pointer (&msg, g_byte_array_unref);
+}
+
+static void
+test_getters_reject_wrong_shape (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(Cv2Reply) start = parse_hex (CAPTURE_START_REPLY, CV2_CMD_CAPTURE_START, NULL);
+  g_autoptr(Cv2Reply) open = parse_hex (OPEN_REPLY, CV2_CMD_OPEN_SESSION, NULL);
+  g_autoptr(Cv2Reply) hit = NULL;
+  g_autoptr(GByteArray) msg = NULL;
+  gboolean matched;
+  guint32 value;
+  gchar *text;
+
+  /* 0:20 where 0:4 is expected */
+  g_assert_false (cv2_reply_get_session (start, &value, &error));
+  assert_proto_error (error);
+  g_clear_error (&error);
+
+  /* Missing parameter */
+  g_assert_false (cv2_reply_get_template (open, &value, &error));
+  assert_proto_error (error);
+  g_clear_error (&error);
+
+  /* Not a string parameter */
+  text = cv2_reply_get_version_text (open, &error);
+  g_assert_null (text);
+  assert_proto_error (error);
+  g_clear_error (&error);
+
+  /* Match flag other than 0 or 1 */
+  msg = hex_array (MATCH_HIT_REPLY);
+  msg->data[PARAM0_DATA] = 2;
+  hit = parse_array (msg, CV2_CMD_MATCH, NULL);
+  g_assert_false (cv2_reply_get_match (hit, &matched, &value, &error));
+  assert_proto_error (error);
+}
+
+static void
+test_peek_cmd (void)
+{
+  g_autoptr(GBytes) open = hex_bytes (OPEN_REPLY);
+  gsize len;
+  const guint8 *data = g_bytes_get_data (open, &len);
+  guint16 cmd = 0;
+
+  g_assert_true (cv2_message_peek_cmd (data, len, &cmd));
+  g_assert_cmpuint (cmd, ==, CV2_CMD_OPEN_SESSION);
+  g_assert_false (cv2_message_peek_cmd (data, 10, &cmd));
+}
+
+static void
+test_int_event (void)
+{
+  g_autoptr(GBytes) reply_ready = hex_bytes ("0000000050000000");
+  g_autoptr(GBytes) finger = hex_bytes ("0300000000000000");
+  g_autoptr(GBytes) too_long = hex_bytes ("0000000065100000");
+  g_autoptr(GBytes) too_short = hex_bytes ("000000000c000000");
+  g_autoptr(GBytes) unknown = hex_bytes ("0700000001000000");
+  g_autoptr(GError) error = NULL;
+  Cv2IntEvent event;
+
+  g_assert_true (cv2_int_event_parse (g_bytes_get_data (reply_ready, NULL), 8, &event, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (event.type, ==, CV2_INT_REPLY);
+  g_assert_cmpuint (event.value, ==, 0x50);
+
+  g_assert_true (cv2_int_event_parse (g_bytes_get_data (finger, NULL), 8, &event, &error));
+  g_assert_cmpuint (event.type, ==, CV2_INT_FINGER);
+  g_assert_cmpuint (event.value, ==, 0);
+
+  /* Unknown types are for the caller to reject */
+  g_assert_true (cv2_int_event_parse (g_bytes_get_data (unknown, NULL), 8, &event, &error));
+  g_assert_cmpuint (event.type, ==, 7);
+  g_assert_no_error (error);
+
+  /* A reply length larger than the reply buffer, or smaller than a header */
+  g_assert_false (cv2_int_event_parse (g_bytes_get_data (too_long, NULL), 8, &event, &error));
+  assert_proto_error (error);
+  g_clear_error (&error);
+  g_assert_false (cv2_int_event_parse (g_bytes_get_data (too_short, NULL), 8, &event, &error));
+  assert_proto_error (error);
+  g_clear_error (&error);
+
+  /* Too short to hold a type and a value */
+  g_assert_false (cv2_int_event_parse (g_bytes_get_data (finger, NULL), 7, &event, &error));
+  assert_proto_error (error);
+}
+
 int
 main (int argc, char *argv[])
 {
   g_test_init (&argc, &argv, NULL);
 
   g_test_add_func ("/cv2/build/requests", test_build_requests);
+  g_test_add_func ("/cv2/parse/open", test_parse_open);
+  g_test_add_func ("/cv2/parse/capture-and-samples", test_parse_capture_and_samples);
+  g_test_add_func ("/cv2/parse/commit-trailing-byte", test_parse_commit_with_trailing_byte);
+  g_test_add_func ("/cv2/parse/match", test_parse_match);
+  g_test_add_func ("/cv2/parse/header-only", test_parse_header_only);
+  g_test_add_func ("/cv2/parse/version", test_parse_version);
+  g_test_add_func ("/cv2/parse/malformed", test_parse_malformed);
+  g_test_add_func ("/cv2/parse/wrong-shape", test_getters_reject_wrong_shape);
+  g_test_add_func ("/cv2/parse/peek-cmd", test_peek_cmd);
+  g_test_add_func ("/cv2/parse/int-event", test_int_event);
 
   return g_test_run ();
 }

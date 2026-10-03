@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "drivers_api.h"
+#include "fpi-byte-reader.h"
 #include "fpi-byte-utils.h"
 
 #include "cv2-proto.h"
@@ -212,4 +213,260 @@ cv2_build_delete (guint32 session, guint32 template_id)
   msg_add_u32 (msg, template_id);
   msg_add_param (msg, CV2_PARAM_BLOCK, 0, NULL, 0);
   return msg_finish (msg);
+}
+
+#define set_proto_error(error, ...) \
+  g_propagate_error ((error), fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, __VA_ARGS__))
+
+gboolean
+cv2_int_event_parse (const guint8 *buf,
+                     gsize         len,
+                     Cv2IntEvent  *event,
+                     GError      **error)
+{
+  if (len < CV2_INT_EVENT_LEN)
+    {
+      set_proto_error (error, "Short interrupt message (%" G_GSIZE_FORMAT " bytes)", len);
+      return FALSE;
+    }
+
+  event->type = FP_READ_UINT32_LE (buf);
+  event->value = FP_READ_UINT32_LE (buf + 4);
+
+  if (event->type == CV2_INT_REPLY &&
+      (event->value < CV2_HEADER_LEN || event->value > CV2_REPLY_BUF_LEN))
+    {
+      set_proto_error (error, "Reply-ready message with bad reply length %u", event->value);
+      return FALSE;
+    }
+
+  return TRUE;
+}
+
+gboolean
+cv2_message_peek_cmd (const guint8 *buf, gsize len, guint16 *cmd)
+{
+  if (len < CV2_HEADER_LEN)
+    return FALSE;
+
+  *cmd = FP_READ_UINT16_LE (buf + CV2_HDR_CMD);
+  return TRUE;
+}
+
+void
+cv2_reply_free (Cv2Reply *reply)
+{
+  if (!reply)
+    return;
+
+  g_clear_pointer (&reply->raw, g_bytes_unref);
+  g_clear_pointer (&reply->params, g_array_unref);
+  g_free (reply);
+}
+
+/* Bytes after the header's total length are ignored: the reader sometimes
+ * sends one more byte than the message holds. */
+Cv2Reply *
+cv2_reply_parse (const guint8 *buf,
+                 gsize         len,
+                 guint16       expected_cmd,
+                 GError      **error)
+{
+  g_autoptr(Cv2Reply) reply = NULL;
+  FpiByteReader reader;
+  const guint8 *data;
+  guint32 total;
+  guint32 params_len;
+
+  if (len < CV2_HEADER_LEN)
+    {
+      set_proto_error (error, "Reply too short (%" G_GSIZE_FORMAT " bytes)", len);
+      return NULL;
+    }
+
+  total = FP_READ_UINT32_LE (buf + CV2_HDR_LEN);
+  if (FP_READ_UINT32_LE (buf + CV2_HDR_MAGIC) != CV2_MAGIC ||
+      total < CV2_HEADER_LEN || total > len)
+    {
+      set_proto_error (error, "Bad reply header (length %u, %" G_GSIZE_FORMAT " bytes read)",
+                       total, len);
+      return NULL;
+    }
+
+  reply = g_new0 (Cv2Reply, 1);
+  reply->raw = g_bytes_new (buf, total);
+  reply->params = g_array_new (FALSE, FALSE, sizeof (Cv2Param));
+  data = g_bytes_get_data (reply->raw, NULL);
+  reply->cmd = FP_READ_UINT16_LE (data + CV2_HDR_CMD);
+  reply->flags = FP_READ_UINT16_LE (data + CV2_HDR_FLAGS);
+  reply->session = FP_READ_UINT32_LE (data + CV2_HDR_SESSION);
+  reply->status = FP_READ_UINT32_LE (data + CV2_HDR_STATUS);
+
+  if (reply->cmd != expected_cmd)
+    {
+      set_proto_error (error, "Reply is for command 0x%02x, expected 0x%02x",
+                       reply->cmd, expected_cmd);
+      return NULL;
+    }
+
+  params_len = FP_READ_UINT32_LE (data + CV2_HDR_PARAMS_LEN);
+  if (params_len != total - CV2_HEADER_LEN)
+    {
+      set_proto_error (error, "Parameter area length %u does not match message length %u",
+                       params_len, total);
+      return NULL;
+    }
+
+  fpi_byte_reader_init (&reader, data + CV2_HEADER_LEN, params_len);
+  while (fpi_byte_reader_get_remaining (&reader) > 0)
+    {
+      Cv2Param param;
+
+      if (!fpi_byte_reader_get_uint32_le (&reader, &param.kind) ||
+          !fpi_byte_reader_get_uint32_le (&reader, &param.len))
+        {
+          set_proto_error (error, "Truncated parameter header in reply to 0x%02x", reply->cmd);
+          return NULL;
+        }
+
+      if (!fpi_byte_reader_get_data (&reader, param.len, &param.data) ||
+          !fpi_byte_reader_skip (&reader, CV2_PAD (param.len)))
+        {
+          set_proto_error (error, "Parameter %u overruns the reply to 0x%02x",
+                           reply->params->len, reply->cmd);
+          return NULL;
+        }
+
+      g_array_append_val (reply->params, param);
+    }
+
+  return g_steal_pointer (&reply);
+}
+
+/* Accepts a parameter of any length */
+#define ANY_LEN G_MAXUINT32
+
+static const Cv2Param *
+get_param (const Cv2Reply *reply,
+           guint           index,
+           guint32         kind,
+           guint32         len,
+           GError        **error)
+{
+  const Cv2Param *param;
+
+  if (index >= reply->params->len)
+    {
+      set_proto_error (error, "Reply to 0x%02x has no parameter %u", reply->cmd, index);
+      return NULL;
+    }
+
+  param = &g_array_index (reply->params, Cv2Param, index);
+  if (param->kind != kind || (len != ANY_LEN && param->len != len))
+    {
+      set_proto_error (error, "Reply to 0x%02x: parameter %u is %u:%u, expected kind %u",
+                       reply->cmd, index, param->kind, param->len, kind);
+      return NULL;
+    }
+
+  return param;
+}
+
+gboolean
+cv2_reply_get_session (const Cv2Reply *reply, guint32 *session, GError **error)
+{
+  const Cv2Param *param = get_param (reply, 0, CV2_PARAM_VALUE, 4, error);
+
+  if (!param)
+    return FALSE;
+
+  *session = FP_READ_UINT32_LE (param->data);
+  return TRUE;
+}
+
+gboolean
+cv2_reply_get_capture_id (const Cv2Reply *reply, guint8 *capture_id, GError **error)
+{
+  const Cv2Param *param = get_param (reply, 0, CV2_PARAM_VALUE, CV2_CAPTURE_ID_LEN, error);
+
+  if (!param)
+    return FALSE;
+
+  memcpy (capture_id, param->data, CV2_CAPTURE_ID_LEN);
+  return TRUE;
+}
+
+/* The done flag is the low byte; the upper bytes carry unrelated data. */
+gboolean
+cv2_reply_get_sample (const Cv2Reply *reply,
+                      gboolean       *done,
+                      guint8         *result_id,
+                      GError        **error)
+{
+  const Cv2Param *flag = get_param (reply, 0, CV2_PARAM_VALUE, 4, error);
+  const Cv2Param *id;
+
+  if (!flag)
+    return FALSE;
+
+  id = get_param (reply, 1, CV2_PARAM_VALUE, CV2_CAPTURE_ID_LEN, error);
+  if (!id)
+    return FALSE;
+
+  *done = (FP_READ_UINT32_LE (flag->data) & 0xff) == 1;
+  memcpy (result_id, id->data, CV2_CAPTURE_ID_LEN);
+  return TRUE;
+}
+
+/* Parameter 0 is an empty buffer (3:0); the handle is parameter 1. */
+gboolean
+cv2_reply_get_template (const Cv2Reply *reply, guint32 *template_id, GError **error)
+{
+  const Cv2Param *param = get_param (reply, 1, CV2_PARAM_VALUE, 4, error);
+
+  if (!param)
+    return FALSE;
+
+  *template_id = FP_READ_UINT32_LE (param->data);
+  return TRUE;
+}
+
+gboolean
+cv2_reply_get_match (const Cv2Reply *reply,
+                     gboolean       *matched,
+                     guint32        *template_id,
+                     GError        **error)
+{
+  const Cv2Param *flag = get_param (reply, 0, CV2_PARAM_VALUE, 4, error);
+  const Cv2Param *handle;
+  guint32 value;
+
+  if (!flag)
+    return FALSE;
+
+  handle = get_param (reply, 1, CV2_PARAM_VALUE, 4, error);
+  if (!handle)
+    return FALSE;
+
+  value = FP_READ_UINT32_LE (flag->data);
+  if (value > 1)
+    {
+      set_proto_error (error, "Unexpected match result %u", value);
+      return FALSE;
+    }
+
+  *matched = value == 1;
+  *template_id = FP_READ_UINT32_LE (handle->data);
+  return TRUE;
+}
+
+gchar *
+cv2_reply_get_version_text (const Cv2Reply *reply, GError **error)
+{
+  const Cv2Param *param = get_param (reply, 0, CV2_PARAM_STRING, ANY_LEN, error);
+
+  if (!param)
+    return NULL;
+
+  return g_strndup ((const gchar *) param->data, param->len);
 }
