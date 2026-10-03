@@ -378,6 +378,24 @@ foreach test_name: unit_tests
     )
 endforeach
 
+if 'cv2' in drivers
+    test_cv2_proto = executable('test-cv2-proto',
+        sources: [
+            'test-cv2-proto.c',
+            files('../libfprint/drivers/cv2/cv2-proto.c'),
+        ],
+        include_directories: include_directories('../libfprint/drivers/cv2'),
+        dependencies: libfprint_private_dep,
+        c_args: common_cflags,
+        install: false,
+    )
+    test('cv2-proto',
+        test_cv2_proto,
+        suite: ['unit-tests'],
+        env: envs,
+    )
+endif
+
 # Run udev rule generator with fatal warnings
 hwdb_envs = envs
 hwdb_envs.set('UDEV_HWDB', udev_hwdb.full_path())
