@@ -46,8 +46,22 @@
 #define CV2_INT_BUF_LEN 32
 #define CV2_INT_EVENT_LEN 8
 
-/* First firmware (USH_REL_UPGRADE_VER) whose enrollment commit works */
+/*
+ * Firmware (USH_REL_UPGRADE_VER, read with command 0x39) and enrollment:
+ *
+ * - 00047026 (4.7.26, 2017; factory, Latitude 7480) and 00412001 (4.12.001;
+ *   factory, Latitude 7490): every enrollment commit fails with 0x24.
+ * - 00412015 (4.12.015, built Aug 2025): enrollment works.
+ *
+ * 4.12.015 ships in Dell's "ControlVault2 Driver and Firmware" package
+ * version 4.12.11.15. Older packages, including some that Dell's catalog
+ * lists as the newest for a given laptop (4.12.5.8), still contain 4.12.001.
+ * The package installs from Windows; it worked from a VM with the reader
+ * passed through by USB port (the chip re-enumerates as 0a5c:5831 while
+ * flashing). Verify, identify and delete work on the old firmware too. */
 #define CV2_FW_MIN_ENROLL 0x00412015
+#define CV2_FW_MIN_ENROLL_NAME "4.12.015"
+#define CV2_FW_PACKAGE_MIN_NAME "4.12.11.15"
 
 typedef enum {
   CV2_PARAM_VALUE  = 0,

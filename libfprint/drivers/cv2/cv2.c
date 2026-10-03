@@ -1228,6 +1228,25 @@ open_version_cb (FpiDeviceCv2   *self,
       g_clear_error (&error);
     }
 
+  /* See CV2_FW_MIN_ENROLL for which firmware works and where to get it */
+  switch (cv2_firmware_enroll_support (self->fw_version))
+    {
+    case CV2_FW_TOO_OLD:
+      fp_info ("Firmware %s is too old to enroll (needs %08x, %s, from Dell's ControlVault2 "
+               "package %s or newer); verify, identify and delete still work",
+               self->fw_version, CV2_FW_MIN_ENROLL, CV2_FW_MIN_ENROLL_NAME,
+               CV2_FW_PACKAGE_MIN_NAME);
+      break;
+
+    case CV2_FW_UNKNOWN:
+      fp_info ("Firmware version unknown; enrollment will be tried and fails with "
+               "status 0x24 if the firmware is older than %s", CV2_FW_MIN_ENROLL_NAME);
+      break;
+
+    case CV2_FW_OK:
+      break;
+    }
+
   fpi_ssm_next_state (ssm);
 }
 

@@ -563,9 +563,11 @@ GError *
 cv2_firmware_error (const gchar *upgrade_ver)
 {
   return fpi_device_error_new_msg (FP_DEVICE_ERROR_NOT_SUPPORTED,
-                                   "Enrolling needs ControlVault2 firmware %08x or newer "
-                                   "(this reader has %s). Update it with Dell's "
-                                   "ControlVault2 firmware package.",
-                                   CV2_FW_MIN_ENROLL,
-                                   upgrade_ver ? upgrade_ver : "an unknown version");
+                                   "Enrolling needs ControlVault2 firmware %08x (%s) or newer "
+                                   "(this reader has %s). Update it with Dell's ControlVault2 "
+                                   "Driver and Firmware package version %s or newer, "
+                                   "installed from Windows.",
+                                   CV2_FW_MIN_ENROLL, CV2_FW_MIN_ENROLL_NAME,
+                                   upgrade_ver ? upgrade_ver : "an unknown version",
+                                   CV2_FW_PACKAGE_MIN_NAME);
 }

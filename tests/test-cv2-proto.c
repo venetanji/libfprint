@@ -626,9 +626,12 @@ static void
 test_firmware_gate (void)
 {
   g_autoptr(GError) old = cv2_firmware_error ("00412001");
+  g_autoptr(GError) older = cv2_firmware_error ("00047026");
   g_autoptr(GError) unknown = cv2_firmware_error (NULL);
 
+  /* Factory firmware seen on a Latitude 7490 and a 7480 */
   g_assert_cmpint (cv2_firmware_enroll_support ("00412001"), ==, CV2_FW_TOO_OLD);
+  g_assert_cmpint (cv2_firmware_enroll_support ("00047026"), ==, CV2_FW_TOO_OLD);
   g_assert_cmpint (cv2_firmware_enroll_support ("00412015"), ==, CV2_FW_OK);
   g_assert_cmpint (cv2_firmware_enroll_support ("00412100"), ==, CV2_FW_OK);
   g_assert_cmpint (cv2_firmware_enroll_support (NULL), ==, CV2_FW_UNKNOWN);
@@ -639,6 +642,10 @@ test_firmware_gate (void)
   g_assert_error (old, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
   g_assert_nonnull (strstr (old->message, "00412001"));
   g_assert_nonnull (strstr (old->message, "Dell"));
+  /* Name the firmware and the Dell package version that contains it */
+  g_assert_nonnull (strstr (old->message, "4.12.015"));
+  g_assert_nonnull (strstr (old->message, "4.12.11.15"));
+  g_assert_nonnull (strstr (older->message, "00047026"));
   g_assert_error (unknown, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
 }
 
