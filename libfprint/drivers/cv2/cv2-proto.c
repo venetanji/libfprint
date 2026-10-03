@@ -470,3 +470,81 @@ cv2_reply_get_version_text (const Cv2Reply *reply, GError **error)
 
   return g_strndup ((const gchar *) param->data, param->len);
 }
+
+Cv2Outcome
+cv2_status_classify (guint16 cmd, guint32 status, GError **error)
+{
+  if (status == CV2_STATUS_OK)
+    return CV2_OUTCOME_OK;
+
+  if (cmd == CV2_CMD_ENROLL_SAMPLE && status == CV2_STATUS_SAMPLE_REJECTED)
+    {
+      g_propagate_error (error, fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL));
+      return CV2_OUTCOME_RETRY;
+    }
+
+  if (cmd == CV2_CMD_CAPTURE_START && status == CV2_STATUS_CAPTURE_PENDING)
+    {
+      g_propagate_error (error,
+                         fpi_device_error_new_msg (FP_DEVICE_ERROR_BUSY,
+                                                   "A capture is still pending on the reader"));
+      return CV2_OUTCOME_CAPTURE_PENDING;
+    }
+
+  if (cmd == CV2_CMD_MATCH && status == CV2_STATUS_NO_TEMPLATES)
+    return CV2_OUTCOME_NO_MATCH;
+
+  if (cmd == CV2_CMD_ENROLL_COMMIT && status == CV2_STATUS_FW_TOO_OLD)
+    {
+      g_propagate_error (error, cv2_firmware_error (NULL));
+      return CV2_OUTCOME_ERROR;
+    }
+
+  if (cmd == CV2_CMD_DELETE)
+    {
+      g_propagate_error (error,
+                         fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                                   "Deleting the template failed (status 0x%02x)",
+                                                   status));
+      return CV2_OUTCOME_ERROR;
+    }
+
+  set_proto_error (error, "Command 0x%02x failed with status 0x%02x", cmd, status);
+  return CV2_OUTCOME_ERROR;
+}
+
+gchar *
+cv2_version_lookup (const gchar *text, const gchar *key)
+{
+  g_auto(GStrv) lines = g_strsplit (text, "\n", -1);
+  gsize key_len = strlen (key);
+
+  for (guint i = 0; lines[i]; i++)
+    if (strncmp (lines[i], key, key_len) == 0 && lines[i][key_len] == ':')
+      return g_strstrip (g_strdup (lines[i] + key_len + 1));
+
+  return NULL;
+}
+
+Cv2FwSupport
+cv2_firmware_enroll_support (const gchar *upgrade_ver)
+{
+  guint64 version;
+
+  if (!upgrade_ver || strlen (upgrade_ver) != 8 ||
+      !g_ascii_string_to_unsigned (upgrade_ver, 16, 0, G_MAXUINT32, &version, NULL))
+    return CV2_FW_UNKNOWN;
+
+  return version >= CV2_FW_MIN_ENROLL ? CV2_FW_OK : CV2_FW_TOO_OLD;
+}
+
+GError *
+cv2_firmware_error (const gchar *upgrade_ver)
+{
+  return fpi_device_error_new_msg (FP_DEVICE_ERROR_NOT_SUPPORTED,
+                                   "Enrolling needs ControlVault2 firmware %08x or newer "
+                                   "(this reader has %s). Update it with Dell's "
+                                   "ControlVault2 firmware package.",
+                                   CV2_FW_MIN_ENROLL,
+                                   upgrade_ver ? upgrade_ver : "an unknown version");
+}

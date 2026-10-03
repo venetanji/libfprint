@@ -543,6 +543,89 @@ test_int_event (void)
   assert_proto_error (error);
 }
 
+static void
+test_status_classify (void)
+{
+  const struct
+  {
+    guint16    cmd;
+    guint32    status;
+    Cv2Outcome outcome;
+    GQuark     (*domain) (void);  /* NULL: no error expected */
+    gint       code;
+  } cases[] = {
+    { CV2_CMD_OPEN_SESSION, 0x00, CV2_OUTCOME_OK, NULL, 0 },
+    { CV2_CMD_ENROLL_SAMPLE, 0x59, CV2_OUTCOME_RETRY, fp_device_retry_quark, FP_DEVICE_RETRY_GENERAL },
+    { CV2_CMD_CAPTURE_START, 0x85, CV2_OUTCOME_CAPTURE_PENDING, fp_device_error_quark, FP_DEVICE_ERROR_BUSY },
+    { CV2_CMD_MATCH, 0x47, CV2_OUTCOME_NO_MATCH, NULL, 0 },
+    { CV2_CMD_ENROLL_COMMIT, 0x24, CV2_OUTCOME_ERROR, fp_device_error_quark, FP_DEVICE_ERROR_NOT_SUPPORTED },
+    { CV2_CMD_DELETE, 0x13, CV2_OUTCOME_ERROR, fp_device_error_quark, FP_DEVICE_ERROR_GENERAL },
+    { CV2_CMD_ENROLL_COMMIT, 0x8d, CV2_OUTCOME_ERROR, fp_device_error_quark, FP_DEVICE_ERROR_PROTO },
+    { CV2_CMD_ENROLL_SAMPLE, 0x85, CV2_OUTCOME_ERROR, fp_device_error_quark, FP_DEVICE_ERROR_PROTO },
+    { CV2_CMD_CAPTURE_START, 0x47, CV2_OUTCOME_ERROR, fp_device_error_quark, FP_DEVICE_ERROR_PROTO },
+    { CV2_CMD_CLOSE_SESSION, 0x00, CV2_OUTCOME_OK, NULL, 0 },
+  };
+
+  for (guint i = 0; i < G_N_ELEMENTS (cases); i++)
+    {
+      g_autoptr(GError) error = NULL;
+      Cv2Outcome outcome = cv2_status_classify (cases[i].cmd, cases[i].status, &error);
+
+      g_assert_cmpint (outcome, ==, cases[i].outcome);
+      if (cases[i].domain)
+        g_assert_error (error, cases[i].domain (), cases[i].code);
+      else
+        g_assert_no_error (error);
+    }
+}
+
+static void
+test_version_lookup (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(Cv2Reply) reply = parse_hex (VERSION_REPLY, CV2_CMD_GET_VERSION, &error);
+  g_autofree gchar *text = cv2_reply_get_version_text (reply, &error);
+  g_autofree gchar *upgrade = cv2_version_lookup (text, "USH_REL_UPGRADE_VER");
+  g_autofree gchar *chip = cv2_version_lookup (text, "USH_CHIPID");
+  g_autofree gchar *build = cv2_version_lookup (text, "USH_BUILD_TIME");
+  g_autofree gchar *missing = cv2_version_lookup (text, "USH_NOPE");
+  g_autofree gchar *prefix = cv2_version_lookup (text, "USH_REL");
+  g_autofree gchar *reordered = cv2_version_lookup ("B:2\nUSH_REL_UPGRADE_VER:00412001\nA:1",
+                                                    "USH_REL_UPGRADE_VER");
+  g_autofree gchar *crlf = cv2_version_lookup ("USH_REL_UPGRADE_VER:00412015\r\n",
+                                               "USH_REL_UPGRADE_VER");
+  g_autofree gchar *garbage = cv2_version_lookup ("\x01\x02\x03", "USH_REL_UPGRADE_VER");
+
+  g_assert_cmpstr (upgrade, ==, "00412015");
+  g_assert_cmpstr (chip, ==, "05810211");
+  g_assert_cmpstr (build, ==, "Aug 18 2025 17:54:40");
+  g_assert_null (missing);
+  g_assert_null (prefix);
+  g_assert_cmpstr (reordered, ==, "00412001");
+  g_assert_cmpstr (crlf, ==, "00412015");
+  g_assert_null (garbage);
+}
+
+static void
+test_firmware_gate (void)
+{
+  g_autoptr(GError) old = cv2_firmware_error ("00412001");
+  g_autoptr(GError) unknown = cv2_firmware_error (NULL);
+
+  g_assert_cmpint (cv2_firmware_enroll_support ("00412001"), ==, CV2_FW_TOO_OLD);
+  g_assert_cmpint (cv2_firmware_enroll_support ("00412015"), ==, CV2_FW_OK);
+  g_assert_cmpint (cv2_firmware_enroll_support ("00412100"), ==, CV2_FW_OK);
+  g_assert_cmpint (cv2_firmware_enroll_support (NULL), ==, CV2_FW_UNKNOWN);
+  g_assert_cmpint (cv2_firmware_enroll_support (""), ==, CV2_FW_UNKNOWN);
+  g_assert_cmpint (cv2_firmware_enroll_support ("0041201"), ==, CV2_FW_UNKNOWN);
+  g_assert_cmpint (cv2_firmware_enroll_support ("zz412015"), ==, CV2_FW_UNKNOWN);
+
+  g_assert_error (old, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
+  g_assert_nonnull (strstr (old->message, "00412001"));
+  g_assert_nonnull (strstr (old->message, "Dell"));
+  g_assert_error (unknown, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -559,6 +642,9 @@ main (int argc, char *argv[])
   g_test_add_func ("/cv2/parse/wrong-shape", test_getters_reject_wrong_shape);
   g_test_add_func ("/cv2/parse/peek-cmd", test_peek_cmd);
   g_test_add_func ("/cv2/parse/int-event", test_int_event);
+  g_test_add_func ("/cv2/status/classify", test_status_classify);
+  g_test_add_func ("/cv2/firmware/version-lookup", test_version_lookup);
+  g_test_add_func ("/cv2/firmware/gate", test_firmware_gate);
 
   return g_test_run ();
 }
