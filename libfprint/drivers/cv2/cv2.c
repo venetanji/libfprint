@@ -33,6 +33,8 @@
 
 #define FP_COMPONENT "cv2"
 
+#include <string.h>
+
 #include "drivers_api.h"
 
 #include "cv2-proto.h"
@@ -45,12 +47,35 @@
 #define CV2_CMD_TIMEOUT_MS 5000
 #define CV2_MAX_STALE 2
 #define CV2_ENROLL_STAGES 4
+/* Give up an enrollment that has not finished after this many accepted
+ * samples (4 are normal; a degraded chip never finishes) */
+#define CV2_ENROLL_MAX_SAMPLES 30
+
+/* State of the operation in progress. It starts at zero, and
+ * cv2_task_complete () clears it. */
+typedef struct
+{
+  guint32  session;
+  gboolean session_open;
+  gboolean enrolling;          /* an enrollment is open on the chip */
+  gboolean capture_pending;    /* the chip holds a capture to cancel first */
+  gboolean capture_retried;    /* this capture already canceled a pending one */
+  guint8   capture_id[CV2_CAPTURE_ID_LEN];
+  guint8   result_id[CV2_CAPTURE_ID_LEN];
+  gint     enroll_stage;
+  guint    accepted_samples;
+  guint32  enrolled_id;        /* enroll: the new template's handle */
+} Cv2Op;
 
 struct _FpiDeviceCv2
 {
   FpDevice parent;
 
   gchar   *fw_version;     /* USH_REL_UPGRADE_VER, NULL if unknown */
+
+  FpiSsm  *task_ssm;
+  GError  *task_error;     /* held while cleanup runs */
+  Cv2Op    op;
 };
 
 G_DEFINE_TYPE (FpiDeviceCv2, fpi_device_cv2, FP_TYPE_DEVICE)
@@ -269,7 +294,18 @@ cv2_cmd_full (FpiDeviceCv2  *self,
   fpi_ssm_start (cmd_ssm, cmd_ssm_done);
 }
 
-/* Sends even if the operation was canceled. */
+/* Sends a step of the current operation. If the operation was canceled,
+ * nothing is sent and the callback gets the cancellation error instead. */
+static void
+cv2_cmd (FpiDeviceCv2  *self,
+         FpiSsm        *ssm,
+         GByteArray    *request,
+         Cv2CmdCallback callback)
+{
+  cv2_cmd_full (self, ssm, request, TRUE, callback);
+}
+
+/* Sends even if the operation was canceled: for cleanup, and while opening. */
 static void
 cv2_cmd_always (FpiDeviceCv2  *self,
                 FpiSsm        *ssm,
@@ -277,6 +313,474 @@ cv2_cmd_always (FpiDeviceCv2  *self,
                 Cv2CmdCallback callback)
 {
   cv2_cmd_full (self, ssm, request, FALSE, callback);
+}
+
+/* For steps whose failure doesn't change the result */
+static void
+log_failure (const char *step, GError *error)
+{
+  if (error)
+    fp_info ("%s failed: %s", step, error->message);
+
+  g_clear_error (&error);
+}
+
+/* ---- Operation lifecycle ----
+ *
+ * Each operation opens a chip session, runs, and closes it. If it fails or
+ * is canceled while a session is open, a cleanup machine cancels any
+ * capture, discards an unfinished enrollment and closes the session before
+ * the original error is reported.
+ */
+
+static void task_ssm_done (FpiSsm   *ssm,
+                           FpDevice *dev,
+                           GError   *error);
+
+static void
+cv2_op_clear (Cv2Op *op)
+{
+  memset (op, 0, sizeof (*op));
+}
+
+/* Starts an operation, with all of its state at zero. */
+static void
+cv2_start_task (FpiDeviceCv2         *self,
+                FpiSsmHandlerCallback handler,
+                int                   nr_states,
+                const char           *name)
+{
+  g_assert (self->task_ssm == NULL);
+
+  cv2_op_clear (&self->op);
+
+  self->task_ssm = fpi_ssm_new_full (FP_DEVICE (self), handler, nr_states, nr_states, name);
+  fpi_ssm_start (self->task_ssm, task_ssm_done);
+}
+
+static void
+cv2_task_complete (FpiDeviceCv2 *self, GError *error)
+{
+  FpDevice *dev = FP_DEVICE (self);
+  FpiDeviceAction action = fpi_device_get_current_action (dev);
+  guint32 enrolled_id = self->op.enrolled_id;
+  FpPrint *print;
+
+  cv2_op_clear (&self->op);
+  fpi_device_report_finger_status (dev, FP_FINGER_STATUS_NONE);
+
+  if (action == FPI_DEVICE_ACTION_ENROLL)
+    {
+      if (error)
+        {
+          fpi_device_enroll_complete (dev, NULL, error);
+          return;
+        }
+
+      fpi_device_get_enroll_data (dev, &print);
+      fpi_print_set_type (print, FPI_PRINT_RAW);
+      fpi_print_set_device_stored (print, TRUE);
+      g_object_set (print, "fpi-data", g_variant_new ("(u)", enrolled_id), NULL);
+      fpi_device_enroll_complete (dev, g_object_ref (print), NULL);
+    }
+  else
+    {
+      g_assert_not_reached ();
+    }
+}
+
+enum {
+  CLEANUP_CANCEL_CAPTURE,
+  CLEANUP_DISCARD_ENROLLMENT,
+  CLEANUP_CLOSE_SESSION,
+  CLEANUP_NUM_STATES,
+};
+
+static void
+cleanup_cmd_cb (FpiDeviceCv2   *self,
+                FpiSsm         *ssm,
+                Cv2Outcome      outcome,
+                const Cv2Reply *reply,
+                GError         *error)
+{
+  log_failure ("Cleanup step", error);
+  fpi_ssm_next_state (ssm);
+}
+
+static void
+cleanup_run_state (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceCv2 *self = FPI_DEVICE_CV2 (dev);
+
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case CLEANUP_CANCEL_CAPTURE:
+      cv2_cmd_always (self, ssm, cv2_build_simple (CV2_CMD_CAPTURE_CANCEL), cleanup_cmd_cb);
+      break;
+
+    case CLEANUP_DISCARD_ENROLLMENT:
+      if (!self->op.enrolling)
+        {
+          fpi_ssm_next_state (ssm);
+          break;
+        }
+      cv2_cmd_always (self, ssm, cv2_build_simple (CV2_CMD_ENROLL_DISCARD), cleanup_cmd_cb);
+      break;
+
+    case CLEANUP_CLOSE_SESSION:
+      cv2_cmd_always (self, ssm, cv2_build_close_session (self->op.session), cleanup_cmd_cb);
+      break;
+    }
+}
+
+static void
+cleanup_done (FpiSsm *ssm, FpDevice *dev, GError *error)
+{
+  FpiDeviceCv2 *self = FPI_DEVICE_CV2 (dev);
+
+  /* Cleanup steps never fail the machine; see cleanup_cmd_cb */
+  g_clear_error (&error);
+  cv2_task_complete (self, g_steal_pointer (&self->task_error));
+}
+
+static void
+task_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
+{
+  FpiDeviceCv2 *self = FPI_DEVICE_CV2 (dev);
+  FpiSsm *cleanup;
+
+  self->task_ssm = NULL;
+
+  if (error && self->op.session_open)
+    {
+      fp_dbg ("Operation failed (%s), cleaning up", error->message);
+      self->task_error = error;
+      cleanup = fpi_ssm_new_full (dev, cleanup_run_state, CLEANUP_NUM_STATES,
+                                  CLEANUP_NUM_STATES, "cv2-cleanup");
+      fpi_ssm_start (cleanup, cleanup_done);
+      return;
+    }
+
+  cv2_task_complete (self, error);
+}
+
+static void
+open_session_cb (FpiDeviceCv2   *self,
+                 FpiSsm         *ssm,
+                 Cv2Outcome      outcome,
+                 const Cv2Reply *reply,
+                 GError         *error)
+{
+  if (error || !cv2_reply_get_session (reply, &self->op.session, &error))
+    {
+      fpi_ssm_mark_failed (ssm, error);
+      return;
+    }
+
+  self->op.session_open = TRUE;
+  fpi_ssm_next_state (ssm);
+}
+
+/* The operation already succeeded, so a failed close is only logged. */
+static void
+close_session_cb (FpiDeviceCv2   *self,
+                  FpiSsm         *ssm,
+                  Cv2Outcome      outcome,
+                  const Cv2Reply *reply,
+                  GError         *error)
+{
+  log_failure ("Closing the session", error);
+  self->op.session_open = FALSE;
+  fpi_ssm_next_state (ssm);
+}
+
+/* ---- Capture ----
+ *
+ * Starts a capture and waits for a finger. A capture the chip still holds
+ * (left by another client) is canceled first.
+ */
+
+enum {
+  CAPTURE_CANCEL_PENDING,
+  CAPTURE_START,
+  CAPTURE_WAIT_FINGER,
+  CAPTURE_NUM_STATES,
+};
+
+static void
+capture_cancel_pending_cb (FpiDeviceCv2   *self,
+                           FpiSsm         *ssm,
+                           Cv2Outcome      outcome,
+                           const Cv2Reply *reply,
+                           GError         *error)
+{
+  if (error)
+    {
+      fpi_ssm_mark_failed (ssm, error);
+      return;
+    }
+
+  self->op.capture_pending = FALSE;
+  fpi_ssm_next_state (ssm);
+}
+
+static void
+capture_start_cb (FpiDeviceCv2   *self,
+                  FpiSsm         *ssm,
+                  Cv2Outcome      outcome,
+                  const Cv2Reply *reply,
+                  GError         *error)
+{
+  if (outcome == CV2_OUTCOME_CAPTURE_PENDING && !self->op.capture_retried)
+    {
+      fp_dbg ("A capture is still pending; canceling it and retrying");
+      g_clear_error (&error);
+      self->op.capture_pending = TRUE;
+      self->op.capture_retried = TRUE;
+      fpi_ssm_jump_to_state (ssm, CAPTURE_CANCEL_PENDING);
+      return;
+    }
+
+  if (error || !cv2_reply_get_capture_id (reply, self->op.capture_id, &error))
+    {
+      fpi_ssm_mark_failed (ssm, error);
+      return;
+    }
+
+  self->op.capture_retried = FALSE;
+  fpi_ssm_next_state (ssm);
+}
+
+static void
+wait_finger_cb (FpiUsbTransfer *transfer,
+                FpDevice       *dev,
+                gpointer        user_data,
+                GError         *error)
+{
+  Cv2IntEvent event;
+
+  if (error ||
+      !cv2_int_event_parse (transfer->buffer, transfer->actual_length, &event, &error))
+    {
+      fpi_ssm_mark_failed (transfer->ssm, error);
+      return;
+    }
+
+  if (event.type == CV2_INT_REPLY)
+    {
+      /* Left over after a stale reply was skipped; keep waiting */
+      fp_dbg ("Ignoring a leftover reply-ready event while waiting for a finger");
+      fpi_ssm_jump_to_state (transfer->ssm, CAPTURE_WAIT_FINGER);
+      return;
+    }
+
+  if (event.type != CV2_INT_FINGER)
+    {
+      fpi_ssm_mark_failed (transfer->ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                                     "Expected a finger event, got interrupt type %u",
+                                                     event.type));
+      return;
+    }
+
+  fpi_device_report_finger_status_changes (dev, FP_FINGER_STATUS_PRESENT,
+                                           FP_FINGER_STATUS_NEEDED);
+  fpi_ssm_mark_completed (transfer->ssm);
+}
+
+static void
+capture_run_state (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceCv2 *self = FPI_DEVICE_CV2 (dev);
+  FpiUsbTransfer *transfer;
+
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case CAPTURE_CANCEL_PENDING:
+      if (!self->op.capture_pending)
+        {
+          fpi_ssm_next_state (ssm);
+          break;
+        }
+      cv2_cmd (self, ssm, cv2_build_simple (CV2_CMD_CAPTURE_CANCEL), capture_cancel_pending_cb);
+      break;
+
+    case CAPTURE_START:
+      cv2_cmd (self, ssm, cv2_build_capture_start (self->op.session), capture_start_cb);
+      break;
+
+    case CAPTURE_WAIT_FINGER:
+      transfer = fpi_usb_transfer_new (dev);
+      transfer->ssm = ssm;
+      fpi_usb_transfer_fill_interrupt (transfer, CV2_EP_INT, CV2_INT_BUF_LEN);
+      fpi_usb_transfer_submit (transfer, 0, fpi_device_get_cancellable (dev),
+                               wait_finger_cb, NULL);
+      fpi_device_report_finger_status (dev, FP_FINGER_STATUS_NEEDED);
+      break;
+    }
+}
+
+static FpiSsm *
+capture_ssm_new (FpiDeviceCv2 *self)
+{
+  return fpi_ssm_new_full (FP_DEVICE (self), capture_run_state, CAPTURE_NUM_STATES,
+                           CAPTURE_NUM_STATES, "cv2-capture");
+}
+
+/* ---- Enroll ---- */
+
+enum {
+  ENROLL_OPEN_SESSION,
+  ENROLL_BEGIN,
+  ENROLL_CAPTURE,
+  ENROLL_SAMPLE,
+  ENROLL_COMMIT,
+  ENROLL_CLOSE_SESSION,
+  ENROLL_NUM_STATES,
+};
+
+/* The reader rejected the sample: ask for another press and capture again.
+ * Takes the retry error. */
+static void
+enroll_retry (FpiDeviceCv2 *self, GError *error)
+{
+  fpi_device_enroll_progress (FP_DEVICE (self), self->op.enroll_stage, NULL, error);
+  fpi_ssm_jump_to_state (self->task_ssm, ENROLL_CAPTURE);
+}
+
+static void
+enroll_begin_cb (FpiDeviceCv2   *self,
+                 FpiSsm         *ssm,
+                 Cv2Outcome      outcome,
+                 const Cv2Reply *reply,
+                 GError         *error)
+{
+  if (error)
+    {
+      fpi_ssm_mark_failed (ssm, error);
+      return;
+    }
+
+  self->op.enrolling = TRUE;
+  fpi_ssm_next_state (ssm);
+}
+
+static void
+enroll_sample_cb (FpiDeviceCv2   *self,
+                  FpiSsm         *ssm,
+                  Cv2Outcome      outcome,
+                  const Cv2Reply *reply,
+                  GError         *error)
+{
+  FpDevice *dev = FP_DEVICE (self);
+  gboolean done = FALSE;
+
+  fpi_device_report_finger_status (dev, FP_FINGER_STATUS_NONE);
+
+  if (outcome == CV2_OUTCOME_RETRY)
+    {
+      enroll_retry (self, error);
+      return;
+    }
+
+  if (error || !cv2_reply_get_sample (reply, &done, self->op.result_id, &error))
+    {
+      fpi_ssm_mark_failed (ssm, error);
+      return;
+    }
+
+  /* Stages advance per accepted sample, but never reach the last stage
+   * until the reader says the enrollment is complete. */
+  if (done)
+    self->op.enroll_stage = CV2_ENROLL_STAGES;
+  else
+    self->op.enroll_stage = MIN (self->op.enroll_stage + 1, CV2_ENROLL_STAGES - 1);
+  fpi_device_enroll_progress (dev, self->op.enroll_stage, NULL, NULL);
+
+  if (done)
+    {
+      fpi_ssm_next_state (ssm);
+      return;
+    }
+
+  if (++self->op.accepted_samples >= CV2_ENROLL_MAX_SAMPLES)
+    {
+      fpi_ssm_mark_failed (ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                                     "Enrollment did not finish after %u samples. "
+                                                     "Clean the sensor and try again.",
+                                                     self->op.accepted_samples));
+      return;
+    }
+
+  fpi_ssm_jump_to_state (ssm, ENROLL_CAPTURE);
+}
+
+static void
+enroll_commit_cb (FpiDeviceCv2   *self,
+                  FpiSsm         *ssm,
+                  Cv2Outcome      outcome,
+                  const Cv2Reply *reply,
+                  GError         *error)
+{
+  if (error || !cv2_reply_get_template (reply, &self->op.enrolled_id, &error))
+    {
+      fpi_ssm_mark_failed (ssm, error);
+      return;
+    }
+
+  self->op.enrolling = FALSE;
+  fp_info ("Enrolled template 0x%08x", self->op.enrolled_id);
+  fpi_ssm_next_state (ssm);
+}
+
+static void
+enroll_run_state (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceCv2 *self = FPI_DEVICE_CV2 (dev);
+
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case ENROLL_OPEN_SESSION:
+      cv2_cmd (self, ssm, cv2_build_open_session (), open_session_cb);
+      break;
+
+    case ENROLL_BEGIN:
+      cv2_cmd (self, ssm, cv2_build_simple (CV2_CMD_ENROLL_BEGIN), enroll_begin_cb);
+      break;
+
+    case ENROLL_CAPTURE:
+      fpi_ssm_start_subsm (ssm, capture_ssm_new (self));
+      break;
+
+    case ENROLL_SAMPLE:
+      cv2_cmd (self, ssm, cv2_build_enroll_sample (self->op.session, self->op.capture_id),
+               enroll_sample_cb);
+      break;
+
+    case ENROLL_COMMIT:
+      cv2_cmd (self, ssm, cv2_build_enroll_commit (self->op.session, self->op.result_id),
+               enroll_commit_cb);
+      break;
+
+    case ENROLL_CLOSE_SESSION:
+      cv2_cmd_always (self, ssm, cv2_build_close_session (self->op.session), close_session_cb);
+      break;
+    }
+}
+
+static void
+cv2_enroll (FpDevice *dev)
+{
+  FpiDeviceCv2 *self = FPI_DEVICE_CV2 (dev);
+
+  if (cv2_firmware_enroll_support (self->fw_version) == CV2_FW_TOO_OLD)
+    {
+      fpi_device_enroll_complete (dev, NULL, cv2_firmware_error (self->fw_version));
+      return;
+    }
+
+  cv2_start_task (self, enroll_run_state, ENROLL_NUM_STATES, "cv2-enroll");
 }
 
 /* ---- Device open and close ----
@@ -391,6 +895,8 @@ fpi_device_cv2_finalize (GObject *object)
   FpiDeviceCv2 *self = FPI_DEVICE_CV2 (object);
 
   g_clear_pointer (&self->fw_version, g_free);
+  g_clear_error (&self->task_error);
+  cv2_op_clear (&self->op);
 
   G_OBJECT_CLASS (fpi_device_cv2_parent_class)->finalize (object);
 }
@@ -413,6 +919,7 @@ fpi_device_cv2_class_init (FpiDeviceCv2Class *klass)
 
   dev_class->open = cv2_open;
   dev_class->close = cv2_close;
+  dev_class->enroll = cv2_enroll;
 
   fpi_device_class_auto_initialize_features (dev_class);
 }
