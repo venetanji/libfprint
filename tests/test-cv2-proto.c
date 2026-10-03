@@ -56,11 +56,16 @@ static const char SAMPLE_REQ[] =
   "00000000000000003000000000000000040000008c9c01140000000014000000"
   "ac27493d858230b6ace063b560297f594315db270200000000000000";
 
+/* From Dell's Linux driver with the Windows driver's commit and delete
+ * arguments (see cv2_build_enroll_commit ()) */
 static const char COMMIT_REQ[] =
-  "010000006c0000006e004004020000008c9c0114000000000000000000000000"
-  "00000000000000004000000000000000040000008c9c01140000000014000000"
-  "593f0a9481c697258513c8a921687629e44542f0020000000000000002000000"
+  "010000008c0000006e004004020000008c9c0114000000000000000000000000"
+  "00000000000000006000000000000000040000008c9c01140000000014000000"
+  "a3939f381cde83d7610a2825047108c3ddc27b9d020000000800000000000400"
+  "0400000002000000150000000101ff0000000d000c42726f6164636f6d574246"
   "000000000300000000000000";
+
+static const char COMMIT_ID[] = "a3939f381cde83d7610a2825047108c3ddc27b9d";
 
 static const char DISCARD_REQ[] =
   "01000000380000006d0040040200000000000000000000000000000000000000"
@@ -79,9 +84,10 @@ static const char MATCH2_REQ[] =
   "080000002f6236001c835b00";
 
 static const char DELETE_REQ[] =
-  "010000004c0000000a004204020000008c9c0114000000000000000000000000"
-  "00000000000000002000000000000000040000008c9c01140000000004000000"
-  "2f6236000200000000000000";
+  "01000000640000000a004204020000008c9c0114000000000000000000000000"
+  "00000000000000003800000000000000040000008c9c01140000000004000000"
+  "aebd1d0002000000150000000101ff0000000d000c42726f6164636f6d574246"
+  "00000000";
 
 static const char VERSION_REQ[] =
   "0100000038000000390040040200000000000000000000000000000000000000"
@@ -203,7 +209,7 @@ static void
 test_build_requests (void)
 {
   g_autoptr(GBytes) capture_id = hex_bytes (CAPTURE_ID);
-  g_autoptr(GBytes) final_id = hex_bytes (FINAL_ID);
+  g_autoptr(GBytes) commit_id = hex_bytes (COMMIT_ID);
   const guint32 one[] = { 0x00dfa007 };
   const guint32 two[] = { 0x0036622f, 0x005b831c };
 
@@ -214,12 +220,12 @@ test_build_requests (void)
   assert_message (cv2_build_simple (CV2_CMD_CAPTURE_CANCEL), CANCEL_REQ);
   assert_message (cv2_build_enroll_sample (SESSION, g_bytes_get_data (capture_id, NULL)),
                   SAMPLE_REQ);
-  assert_message (cv2_build_enroll_commit (SESSION, g_bytes_get_data (final_id, NULL)),
+  assert_message (cv2_build_enroll_commit (SESSION, g_bytes_get_data (commit_id, NULL)),
                   COMMIT_REQ);
   assert_message (cv2_build_simple (CV2_CMD_ENROLL_DISCARD), DISCARD_REQ);
   assert_message (cv2_build_match (SESSION, one, G_N_ELEMENTS (one)), MATCH1_REQ);
   assert_message (cv2_build_match (SESSION, two, G_N_ELEMENTS (two)), MATCH2_REQ);
-  assert_message (cv2_build_delete (SESSION, 0x0036622f), DELETE_REQ);
+  assert_message (cv2_build_delete (SESSION, 0x001dbdae), DELETE_REQ);
   assert_message (cv2_build_simple (CV2_CMD_GET_VERSION), VERSION_REQ);
   assert_message (cv2_build_simple (CV2_CMD_SENSOR_RESET), SENSOR_RESET_REQ);
 }

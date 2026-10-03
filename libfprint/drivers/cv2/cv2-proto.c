@@ -178,6 +178,25 @@ cv2_build_enroll_sample (guint32 session, const guint8 *capture_id)
   return msg_finish (msg);
 }
 
+/*
+ * The commit's two blocks, and the delete's block, captured on USB from
+ * Dell's Linux driver as patched to send the values Dell's Windows driver
+ * uses (Windows sends them inside its protected session).
+ *
+ * Firmware 4.12.015 also accepts empty blocks, and the delete with this
+ * authorization also removes templates committed with empty blocks. Older
+ * firmware rejected a commit with empty blocks with status 0x24.
+ */
+static const guint8 commit_attributes[] = {
+  0x00, 0x00, 0x04, 0x00, 0x04, 0x00, 0x00, 0x00,
+};
+
+/* Contains the fixed text "BroadcomWBF" */
+static const guint8 authorization[] = {
+  0x01, 0x01, 0xff, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x0c, 0x42, 0x72, 0x6f,
+  0x61, 0x64, 0x63, 0x6f, 0x6d, 0x57, 0x42, 0x46, 0x00,
+};
+
 GByteArray *
 cv2_build_enroll_commit (guint32 session, const guint8 *result_id)
 {
@@ -185,8 +204,10 @@ cv2_build_enroll_commit (guint32 session, const guint8 *result_id)
 
   msg_add_u32 (msg, session);
   msg_add_param (msg, CV2_PARAM_VALUE, CV2_CAPTURE_ID_LEN, result_id, CV2_CAPTURE_ID_LEN);
-  msg_add_param (msg, CV2_PARAM_BLOCK, 0, NULL, 0);
-  msg_add_param (msg, CV2_PARAM_BLOCK, 0, NULL, 0);
+  msg_add_param (msg, CV2_PARAM_BLOCK, sizeof (commit_attributes),
+                 commit_attributes, sizeof (commit_attributes));
+  msg_add_param (msg, CV2_PARAM_BLOCK, sizeof (authorization),
+                 authorization, sizeof (authorization));
   msg_add_param (msg, CV2_PARAM_BUFFER, 0, NULL, 0);
   return msg_finish (msg);
 }
@@ -215,7 +236,8 @@ cv2_build_delete (guint32 session, guint32 template_id)
 
   msg_add_u32 (msg, session);
   msg_add_u32 (msg, template_id);
-  msg_add_param (msg, CV2_PARAM_BLOCK, 0, NULL, 0);
+  msg_add_param (msg, CV2_PARAM_BLOCK, sizeof (authorization),
+                 authorization, sizeof (authorization));
   return msg_finish (msg);
 }
 

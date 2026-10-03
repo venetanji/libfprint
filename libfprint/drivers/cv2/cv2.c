@@ -58,6 +58,7 @@ typedef struct
   /* Inputs */
   GArray  *templates;          /* verify, identify: guint32 handles to match */
   guint32  delete_id;          /* delete: the handle to delete */
+  gboolean enroll;             /* enroll: begin the enrollment before each capture */
 
   guint32  session;
   gboolean session_open;
@@ -535,10 +536,15 @@ close_session_cb (FpiDeviceCv2   *self,
  * (left by another client, or by a touch too short to use) is canceled
  * first. A touch too short to use fails the capture with a retry error;
  * the operation decides what a retry means.
+ *
+ * When enrolling, 0x8a (begin enrollment) comes right before every capture,
+ * as the vendor's Windows driver sends it. It keeps the samples already
+ * accepted.
  */
 
 enum {
   CAPTURE_CANCEL_PENDING,
+  CAPTURE_ENROLL_BEGIN,
   CAPTURE_START,
   CAPTURE_WAIT_FINGER,
   CAPTURE_NUM_STATES,
@@ -558,6 +564,23 @@ capture_cancel_pending_cb (FpiDeviceCv2   *self,
     }
 
   self->op.capture_pending = FALSE;
+  fpi_ssm_next_state (ssm);
+}
+
+static void
+capture_enroll_begin_cb (FpiDeviceCv2   *self,
+                         FpiSsm         *ssm,
+                         Cv2Outcome      outcome,
+                         const Cv2Reply *reply,
+                         GError         *error)
+{
+  if (error)
+    {
+      fpi_ssm_mark_failed (ssm, error);
+      return;
+    }
+
+  self->op.enrolling = TRUE;
   fpi_ssm_next_state (ssm);
 }
 
@@ -653,6 +676,15 @@ capture_run_state (FpiSsm *ssm, FpDevice *dev)
       cv2_cmd (self, ssm, cv2_build_simple (CV2_CMD_CAPTURE_CANCEL), capture_cancel_pending_cb);
       break;
 
+    case CAPTURE_ENROLL_BEGIN:
+      if (!self->op.enroll)
+        {
+          fpi_ssm_next_state (ssm);
+          break;
+        }
+      cv2_cmd (self, ssm, cv2_build_simple (CV2_CMD_ENROLL_BEGIN), capture_enroll_begin_cb);
+      break;
+
     case CAPTURE_START:
       cv2_cmd (self, ssm, cv2_build_capture_start (self->op.session), capture_start_cb);
       break;
@@ -679,7 +711,6 @@ capture_ssm_new (FpiDeviceCv2 *self)
 
 enum {
   ENROLL_OPEN_SESSION,
-  ENROLL_BEGIN,
   ENROLL_CAPTURE,
   ENROLL_SAMPLE,
   ENROLL_COMMIT,
@@ -707,23 +738,6 @@ enroll_capture_done (FpiSsm *ssm, FpDevice *dev, GError *error)
     fpi_ssm_mark_failed (self->task_ssm, error);
   else
     fpi_ssm_next_state (self->task_ssm);
-}
-
-static void
-enroll_begin_cb (FpiDeviceCv2   *self,
-                 FpiSsm         *ssm,
-                 Cv2Outcome      outcome,
-                 const Cv2Reply *reply,
-                 GError         *error)
-{
-  if (error)
-    {
-      fpi_ssm_mark_failed (ssm, error);
-      return;
-    }
-
-  self->op.enrolling = TRUE;
-  fpi_ssm_next_state (ssm);
 }
 
 static void
@@ -806,10 +820,6 @@ enroll_run_state (FpiSsm *ssm, FpDevice *dev)
       cv2_cmd (self, ssm, cv2_build_open_session (), open_session_cb);
       break;
 
-    case ENROLL_BEGIN:
-      cv2_cmd (self, ssm, cv2_build_simple (CV2_CMD_ENROLL_BEGIN), enroll_begin_cb);
-      break;
-
     case ENROLL_CAPTURE:
       /* Not a sub-machine: a retry error must not fail the enrollment */
       fpi_ssm_start (capture_ssm_new (self), enroll_capture_done);
@@ -842,7 +852,8 @@ cv2_enroll (FpDevice *dev)
       return;
     }
 
-  cv2_start_task (self, enroll_run_state, ENROLL_NUM_STATES, "cv2-enroll", &(Cv2Op){ 0 });
+  cv2_start_task (self, enroll_run_state, ENROLL_NUM_STATES, "cv2-enroll",
+                  &(Cv2Op){ .enroll = TRUE });
 }
 
 /* ---- Verify and identify ----
