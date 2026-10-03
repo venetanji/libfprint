@@ -798,6 +798,13 @@ enroll_commit_cb (FpiDeviceCv2   *self,
                   const Cv2Reply *reply,
                   GError         *error)
 {
+  /* 0x24: the firmware rejected the commit; name its version */
+  if (g_error_matches (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED))
+    {
+      g_clear_error (&error);
+      error = cv2_firmware_error (self->fw_version);
+    }
+
   if (error || !cv2_reply_get_template (reply, &self->op.enrolled_id, &error))
     {
       fpi_ssm_mark_failed (ssm, error);
@@ -846,11 +853,12 @@ cv2_enroll (FpDevice *dev)
 {
   FpiDeviceCv2 *self = FPI_DEVICE_CV2 (dev);
 
+  /* Old firmware rejected commits with empty blocks (0x24, which gives the
+   * firmware error). Try anyway: it may accept the vendor's blocks. */
   if (cv2_firmware_enroll_support (self->fw_version) == CV2_FW_TOO_OLD)
-    {
-      fpi_device_enroll_complete (dev, NULL, cv2_firmware_error (self->fw_version));
-      return;
-    }
+    fp_info ("Enrolling with firmware %s, older than %s; if the enrollment fails, "
+             "update the firmware with Dell's ControlVault2 package %s or newer",
+             self->fw_version, CV2_FW_MIN_ENROLL_NAME, CV2_FW_PACKAGE_MIN_NAME);
 
   cv2_start_task (self, enroll_run_state, ENROLL_NUM_STATES, "cv2-enroll",
                   &(Cv2Op){ .enroll = TRUE });
@@ -1243,14 +1251,15 @@ open_version_cb (FpiDeviceCv2   *self,
   switch (cv2_firmware_enroll_support (self->fw_version))
     {
     case CV2_FW_TOO_OLD:
-      fp_info ("Firmware %s is too old to enroll (needs %08x, %s, from Dell's ControlVault2 "
-               "package %s or newer); verify, identify and delete still work",
+      fp_info ("Firmware %s is older than %08x (%s), the oldest known to enroll; "
+               "enrollment will be tried. If it fails, update the firmware with Dell's "
+               "ControlVault2 package %s or newer. Verify and identify work either way.",
                self->fw_version, CV2_FW_MIN_ENROLL, CV2_FW_MIN_ENROLL_NAME,
                CV2_FW_PACKAGE_MIN_NAME);
       break;
 
     case CV2_FW_UNKNOWN:
-      fp_info ("Firmware version unknown; enrollment will be tried and fails with "
+      fp_info ("Firmware version unknown; enrollment will be tried, and may fail with "
                "status 0x24 if the firmware is older than %s", CV2_FW_MIN_ENROLL_NAME);
       break;
 

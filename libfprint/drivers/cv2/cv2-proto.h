@@ -50,15 +50,20 @@
  * Firmware (USH_REL_UPGRADE_VER, read with command 0x39) and enrollment:
  *
  * - 00047026 (4.7.26, 2017; factory, Latitude 7480) and 00412001 (4.12.001;
- *   factory, Latitude 7490): every enrollment commit fails with 0x24.
- * - 00412015 (4.12.015, built Aug 2025): enrollment works.
+ *   factory, Latitude 7490): every enrollment commit sent with empty
+ *   attribute and authorization blocks failed with 0x24. Commits with the
+ *   vendor's blocks (cv2_build_enroll_commit ()) are reported to work on
+ *   such units, but are untested on these versions; enrollment is tried,
+ *   and 0x24 gives an error that names the update below.
+ * - 00412015 (4.12.015, built Aug 2025): enrollment works either way.
  *
  * 4.12.015 ships in Dell's "ControlVault2 Driver and Firmware" package
  * version 4.12.11.15. Older packages, including some that Dell's catalog
  * lists as the newest for a given laptop (4.12.5.8), still contain 4.12.001.
  * The package installs from Windows; it worked from a VM with the reader
  * passed through by USB port (the chip re-enumerates as 0a5c:5831 while
- * flashing). Verify, identify and delete work on the old firmware too. */
+ * flashing). Verify and identify work on the old firmware too; so did delete
+ * with an empty block, but the authorization block is untested there. */
 #define CV2_FW_MIN_ENROLL 0x00412015
 #define CV2_FW_MIN_ENROLL_NAME "4.12.015"
 #define CV2_FW_PACKAGE_MIN_NAME "4.12.11.15"
