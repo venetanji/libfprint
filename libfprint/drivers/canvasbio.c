@@ -3527,7 +3527,7 @@ unpack_and_match (FpPrint *print, const guint8 *captured, Cb2000NccTelemetry *te
                                         0.0, 1.0);
   max_shift = (gint) cb2000_ncc_env_uint ("CB2000_NCC_MAX_SHIFT",
                                           CB2000_NCC_MAX_SHIFT_DEFAULT,
-                                          0, 8);
+                                          0, 16);
 
   cb2000_ncc_compute_enroll_cohesion (images_data, n_images,
                                       (guint8) mask_threshold,
