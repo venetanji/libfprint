@@ -837,7 +837,6 @@ static void cb2000_log_cmd_rx_data (FpDevice               *dev,
                                     const FpiUsbTransfer   *transfer);
 static gboolean cb2000_verify_finalize_ack_gate (FpDevice           *dev,
                                                  FpiDeviceCanvasbio *self);
-static void complete_deactivation (FpDevice *dev);
 static gboolean deactivation_force_cb (gpointer user_data);
 static void start_new_cycle (FpDevice *dev);
 
@@ -2404,6 +2403,7 @@ cmd_transfer_cb (FpiUsbTransfer *transfer,
                  gpointer        user_data,
                  GError         *error)
 {
+  FpiDeviceCanvasbio *self = FPI_DEVICE_CANVASBIO (dev);
   Cb2000CmdContext *ctx;
   const Cb2000Command *cmd;
 
@@ -2411,6 +2411,15 @@ cmd_transfer_cb (FpiUsbTransfer *transfer,
     {
       fp_warn ("Command transfer failed: %s", error->message);
       fpi_ssm_mark_failed (transfer->ssm, error);
+      return;
+    }
+
+  if (self->deactivating || self->deactivation_in_progress || fpi_device_action_is_cancelled (dev))
+    {
+      fpi_ssm_mark_failed (transfer->ssm,
+                           g_error_new_literal (G_IO_ERROR,
+                                                G_IO_ERROR_CANCELLED,
+                                                "Operation cancelled"));
       return;
     }
 
@@ -2573,11 +2582,18 @@ poll_finger_result_cb (FpiUsbTransfer *transfer,
   FpiDeviceCanvasbio *self = FPI_DEVICE_CANVASBIO (dev);
   gint64 now_us = g_get_monotonic_time ();
 
-  if (self->deactivating || self->deactivation_in_progress)
-    return;
   if (error)
     {
       fpi_ssm_mark_failed (transfer->ssm, error);
+      return;
+    }
+
+  if (self->deactivating || self->deactivation_in_progress || fpi_device_action_is_cancelled (dev))
+    {
+      fpi_ssm_mark_failed (transfer->ssm,
+                           g_error_new_literal (G_IO_ERROR,
+                                                G_IO_ERROR_CANCELLED,
+                                                "Operation cancelled"));
       return;
     }
 
@@ -2707,11 +2723,18 @@ poll_removal_result_cb (FpiUsbTransfer *transfer,
   FpiDeviceCanvasbio *self = FPI_DEVICE_CANVASBIO (dev);
   gint64 now_us = g_get_monotonic_time ();
 
-  if (self->deactivating || self->deactivation_in_progress)
-    return;
   if (error)
     {
       fpi_ssm_mark_failed (transfer->ssm, error);
+      return;
+    }
+
+  if (self->deactivating || self->deactivation_in_progress || fpi_device_action_is_cancelled (dev))
+    {
+      fpi_ssm_mark_failed (transfer->ssm,
+                           g_error_new_literal (G_IO_ERROR,
+                                                G_IO_ERROR_CANCELLED,
+                                                "Operation cancelled"));
       return;
     }
 
@@ -3230,6 +3253,15 @@ image_chunk_cb (FpiUsbTransfer *transfer,
       return;
     }
 
+  if (self->deactivating || self->deactivation_in_progress || fpi_device_action_is_cancelled (dev))
+    {
+      fpi_ssm_mark_failed (transfer->ssm,
+                           g_error_new_literal (G_IO_ERROR,
+                                                G_IO_ERROR_CANCELLED,
+                                                "Operation cancelled"));
+      return;
+    }
+
   guint8 *src = transfer->buffer;
   gsize len = transfer->actual_length;
   int chunk_index = self->chunks_read;
@@ -3322,6 +3354,16 @@ image_padding_cb (FpiUsbTransfer *transfer,
     {
       fp_warn ("Padding write error: %s", error->message);
       fpi_ssm_mark_failed (transfer->ssm, error);
+      return;
+    }
+
+  FpiDeviceCanvasbio *self = FPI_DEVICE_CANVASBIO (dev);
+  if (self->deactivating || self->deactivation_in_progress || fpi_device_action_is_cancelled (dev))
+    {
+      fpi_ssm_mark_failed (transfer->ssm,
+                           g_error_new_literal (G_IO_ERROR,
+                                                G_IO_ERROR_CANCELLED,
+                                                "Operation cancelled"));
       return;
     }
 
@@ -4453,7 +4495,8 @@ cycle_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
 
   /* Check for cancellation */
   if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED) ||
-      (action != FPI_DEVICE_ACTION_NONE && fpi_device_action_is_cancelled (dev)))
+      (action != FPI_DEVICE_ACTION_NONE && fpi_device_action_is_cancelled (dev)) ||
+      self->deactivating)
     {
       fp_info ("Cycle cancelled");
       if (action != FPI_DEVICE_ACTION_NONE)
@@ -4466,13 +4509,6 @@ cycle_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
         {
           g_clear_error (&error);
         }
-      return;
-    }
-
-  if (self->deactivating)
-    {
-      g_clear_error (&error);
-      complete_deactivation (dev);
       return;
     }
 
@@ -4642,21 +4678,26 @@ static void
 start_new_cycle (FpDevice *dev)
 {
   FpiDeviceCanvasbio *self = FPI_DEVICE_CANVASBIO (dev);
+  FpiDeviceAction action = fpi_device_get_current_action (dev);
 
-  if (self->deactivating || self->cycle_ssm != NULL)
-    return;
-
-  if (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_NONE)
+  if (action == FPI_DEVICE_ACTION_NONE)
     {
       fp_dbg ("start_new_cycle: no active action, ignoring");
       return;
     }
 
-  if (fpi_device_action_is_cancelled (dev))
+  if (self->deactivating || fpi_device_action_is_cancelled (dev))
     {
-      fp_dbg ("start_new_cycle: action is cancelled, ignoring");
+      fp_info ("start_new_cycle: action is cancelled/deactivating, completing");
+      fpi_device_action_error (dev,
+                               g_error_new_literal (G_IO_ERROR,
+                                                    G_IO_ERROR_CANCELLED,
+                                                    "Operation cancelled"));
       return;
     }
+
+  if (self->cycle_ssm != NULL)
+    return;
 
   self->cycle_ssm = fpi_ssm_new (dev, cycle_run_state,
                                  CYCLE_NUM_STATES);
@@ -4799,10 +4840,89 @@ static void
 dev_cancel (FpDevice *device)
 {
   FpiDeviceCanvasbio *self = FPI_DEVICE_CANVASBIO (device);
+  FpiDeviceAction action = fpi_device_get_current_action (device);
 
-  fp_info ("Cancelling CanvasBio CB2000 operation");
+  fp_info ("Cancelling CanvasBio CB2000 operation (action=%d)", action);
+
+  if (action == FPI_DEVICE_ACTION_NONE)
+    return;
 
   self->deactivating = TRUE;
+
+  if (self->cancellable)
+    g_cancellable_cancel (self->cancellable);
+
+  if (self->settle_timeout_id > 0)
+    {
+      g_source_remove (self->settle_timeout_id);
+      self->settle_timeout_id = 0;
+      if (self->cycle_ssm)
+        {
+          fpi_ssm_mark_failed (self->cycle_ssm,
+                               g_error_new_literal (G_IO_ERROR,
+                                                    G_IO_ERROR_CANCELLED,
+                                                    "Operation cancelled"));
+          return;
+        }
+    }
+
+  if (self->early_timeout_id > 0)
+    {
+      g_source_remove (self->early_timeout_id);
+      self->early_timeout_id = 0;
+    }
+
+  /* Note: Do NOT remove poll_timeout_id or removal_timeout_id here.
+   * The sub-SSMs are waiting on these timeouts. Leaving them intact allows
+   * poll_finger_delay_cb / poll_removal_delay_cb to execute within <=16ms (or <=50ms),
+   * detect self->deactivating == TRUE, and mark the sub-SSM failed with G_IO_ERROR_CANCELLED,
+   * which cleanly bubbles up to cycle_complete and completes the action.
+   */
+
+  /* If no cycle SSM is running (e.g. before cycle started or between cycles),
+   * complete cancellation immediately. */
+  if (self->cycle_ssm == NULL &&
+      self->poll_timeout_id == 0 &&
+      self->removal_timeout_id == 0)
+    {
+      fp_info ("No cycle active, completing cancellation immediately");
+      fpi_device_action_error (device,
+                               g_error_new_literal (G_IO_ERROR,
+                                                    G_IO_ERROR_CANCELLED,
+                                                    "Operation cancelled"));
+      return;
+    }
+
+  /* Arm a safety timeout (500ms). If cancellation doesn't complete within 500ms,
+   * force completion so the daemon never hangs. */
+  if (self->deactivation_timeout_id == 0)
+    {
+      self->deactivation_timeout_id = g_timeout_add (500,
+                                                     deactivation_force_cb,
+                                                     device);
+    }
+}
+
+/*
+ * Release USB interface and free resources.
+ */
+static void
+dev_close (FpDevice *device)
+{
+  FpiDeviceCanvasbio *self = FPI_DEVICE_CANVASBIO (device);
+  GUsbDevice *usb_dev = fpi_device_get_usb_device (device);
+  GError *error = NULL;
+  GError *deact_error = NULL;
+  gsize actual_len = 0;
+  int i;
+
+  fp_info ("Closing CanvasBio CB2000 device");
+
+  if (self->cancellable)
+    {
+      g_cancellable_cancel (self->cancellable);
+      g_clear_object (&self->cancellable);
+    }
 
   if (self->settle_timeout_id > 0)
     {
@@ -4830,48 +4950,6 @@ dev_cancel (FpDevice *device)
       self->deactivation_timeout_id = 0;
     }
 
-  if (self->cancellable)
-    g_cancellable_cancel (self->cancellable);
-}
-
-/*
- * Release USB interface and free resources.
- */
-static void
-dev_close (FpDevice *device)
-{
-  FpiDeviceCanvasbio *self = FPI_DEVICE_CANVASBIO (device);
-  GError *error = NULL;
-  int i;
-
-  fp_info ("Closing CanvasBio CB2000 device");
-
-  dev_cancel (device);
-
-  if (self->cancellable)
-    g_clear_object (&self->cancellable);
-
-  if (self->settle_timeout_id > 0)
-    {
-      g_source_remove (self->settle_timeout_id);
-      self->settle_timeout_id = 0;
-    }
-  if (self->poll_timeout_id > 0)
-    {
-      g_source_remove (self->poll_timeout_id);
-      self->poll_timeout_id = 0;
-    }
-  if (self->removal_timeout_id > 0)
-    {
-      g_source_remove (self->removal_timeout_id);
-      self->removal_timeout_id = 0;
-    }
-  if (self->early_timeout_id > 0)
-    {
-      g_source_remove (self->early_timeout_id);
-      self->early_timeout_id = 0;
-    }
-
   g_clear_pointer (&self->image_buffer, g_free);
   g_clear_pointer (&self->background_buffer, g_free);
   g_clear_pointer (&self->previous_norm_buffer, g_free);
@@ -4879,8 +4957,18 @@ dev_close (FpDevice *device)
   for (i = 0; i < 5; i++)
     g_clear_pointer (&self->enroll_images[i], g_free);
 
-  g_usb_device_release_interface (fpi_device_get_usb_device (device),
-                                  0, 0, &error);
+  /* Send vendor deactivation synchronously before releasing interface. */
+  g_usb_device_control_transfer (usb_dev,
+                                 G_USB_DEVICE_DIRECTION_HOST_TO_DEVICE,
+                                 G_USB_DEVICE_REQUEST_TYPE_VENDOR,
+                                 G_USB_DEVICE_RECIPIENT_DEVICE,
+                                 REQ_INIT, 0x0001, 0,
+                                 NULL, 0, &actual_len,
+                                 500, NULL, &deact_error);
+  if (deact_error)
+    g_clear_error (&deact_error);
+
+  g_usb_device_release_interface (usb_dev, 0, 0, &error);
 
   fpi_device_close_complete (device, error);
 }
@@ -5011,78 +5099,48 @@ dev_capture (FpDevice *device)
 }
 
 /*
- * Deactivation control request completion.
- * In FpDevice mode, this is just a cleanup callback - no deactivate_complete needed.
+ * Safety timeout: if cancellation hasn't completed within a short delay,
+ * force completion to ensure the daemon never freezes.
  */
-static void
-deactivate_ctrl_cb (FpiUsbTransfer *transfer,
-                    FpDevice       *dev,
-                    gpointer        user_data,
-                    GError         *error)
-{
-  if (error)
-    {
-      fp_warn ("Deactivation command error: %s", error->message);
-      g_error_free (error);
-    }
-
-  fp_dbg ("Deactivation USB command complete");
-}
-
-/*
- * Issue the vendor deactivation control request for cleanup.
- * In FpDevice mode, there is no deactivate_complete to call.
- */
-static void
-complete_deactivation (FpDevice *dev)
-{
-  FpiDeviceCanvasbio *self = FPI_DEVICE_CANVASBIO (dev);
-  FpiUsbTransfer *transfer;
-
-  if (self->deactivation_in_progress)
-    {
-      fp_dbg ("Deactivation already in progress, skipping duplicate");
-      return;
-    }
-  self->deactivation_in_progress = TRUE;
-  if (self->deactivation_timeout_id > 0)
-    {
-      g_source_remove (self->deactivation_timeout_id);
-      self->deactivation_timeout_id = 0;
-    }
-
-  fp_dbg ("Sending deactivation command (REQ_INIT 0x0001 idx=0)");
-
-  transfer = fpi_usb_transfer_new (dev);
-  fpi_usb_transfer_fill_control (transfer,
-                                 G_USB_DEVICE_DIRECTION_HOST_TO_DEVICE,
-                                 G_USB_DEVICE_REQUEST_TYPE_VENDOR,
-                                 G_USB_DEVICE_RECIPIENT_DEVICE,
-                                 REQ_INIT, 0x0001, 0, 0);
-  fpi_usb_transfer_submit (transfer, CB2000_TIMEOUT, NULL,
-                           deactivate_ctrl_cb, NULL);
-}
-
-/*
- * Safety timeout: if the cycle is still running after a short delay, force
- * completion to honor cancellation (e.g. Ctrl+C).
- */
-static gboolean G_GNUC_UNUSED
+static gboolean
 deactivation_force_cb (gpointer user_data)
 {
   FpDevice *dev = FP_DEVICE (user_data);
   FpiDeviceCanvasbio *self = FPI_DEVICE_CANVASBIO (dev);
+  FpiDeviceAction action = fpi_device_get_current_action (dev);
 
   self->deactivation_timeout_id = 0;
 
-  if (!self->deactivating || self->deactivation_in_progress)
+  if (!self->deactivating)
     return G_SOURCE_REMOVE;
 
-  if (self->cycle_ssm)
-    /* Still busy: force completion to honor cancel/ctrl+c */
-    fpi_ssm_mark_completed (self->cycle_ssm);
-  else
-    complete_deactivation (dev);
+  fp_warn ("Safety timeout expired during cancellation (action=%d)", action);
+
+  if (self->poll_timeout_id > 0)
+    {
+      g_source_remove (self->poll_timeout_id);
+      self->poll_timeout_id = 0;
+    }
+  if (self->removal_timeout_id > 0)
+    {
+      g_source_remove (self->removal_timeout_id);
+      self->removal_timeout_id = 0;
+    }
+  if (self->settle_timeout_id > 0)
+    {
+      g_source_remove (self->settle_timeout_id);
+      self->settle_timeout_id = 0;
+    }
+
+  self->cycle_ssm = NULL;
+
+  if (action != FPI_DEVICE_ACTION_NONE)
+    {
+      fpi_device_action_error (dev,
+                               g_error_new_literal (G_IO_ERROR,
+                                                    G_IO_ERROR_CANCELLED,
+                                                    "Operation cancelled"));
+    }
 
   return G_SOURCE_REMOVE;
 }
