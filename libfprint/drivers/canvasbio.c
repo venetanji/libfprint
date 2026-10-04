@@ -3565,14 +3565,17 @@ unpack_and_match (FpPrint *print, const guint8 *captured, Cb2000NccTelemetry *te
       cb2000_compute_gradient_magnitude (enrolled, enrolled_grad,
                                          CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT);
 
-      int_score = cb2000_ncc_match_u8_masked (captured, enrolled,
-                                              captured_mask, enrolled_mask,
-                                              CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
-                                              max_shift, min_samples);
-      grad_score = cb2000_ncc_match_f64_masked (captured_grad, enrolled_grad,
-                                                captured_mask, enrolled_mask,
-                                                CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
-                                                max_shift, min_samples);
+      gint best_dx = 0, best_dy = 0;
+      int_score = cb2000_ncc_match_u8_masked_ext (captured, enrolled,
+                                                  captured_mask, enrolled_mask,
+                                                  CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
+                                                  max_shift, min_samples,
+                                                  &best_dx, &best_dy);
+      grad_score = cb2000_ncc_match_f64_masked_window (captured_grad, enrolled_grad,
+                                                       captured_mask, enrolled_mask,
+                                                       CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
+                                                       best_dx, best_dy, 1,
+                                                       min_samples);
 
       top_scores[i] = int_score;
       tel->compared_images++;

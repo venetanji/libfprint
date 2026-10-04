@@ -50,12 +50,15 @@ cb2000_ncc_env_double (const char *name,
                        gdouble     max)
 {
   const char *env = g_getenv (name);
+  char *end = NULL;
   gdouble val;
 
   if (!env || !*env)
     return fallback;
 
-  val = g_ascii_strtod (env, NULL);
+  val = g_ascii_strtod (env, &end);
+  if (end == env || *end != '\0')
+    return fallback;
   if (val < min || val > max)
     return fallback;
   return val;
@@ -129,16 +132,19 @@ cb2000_compute_gradient_magnitude (const guint8 *img,
 }
 
 gdouble
-cb2000_ncc_match_u8_masked (const guint8 *a,
-                            const guint8 *b,
-                            const guint8 *mask_a,
-                            const guint8 *mask_b,
-                            gint          width,
-                            gint          height,
-                            gint          max_shift,
-                            guint         min_samples)
+cb2000_ncc_match_u8_masked_ext (const guint8 *a,
+                                const guint8 *b,
+                                const guint8 *mask_a,
+                                const guint8 *mask_b,
+                                gint          width,
+                                gint          height,
+                                gint          max_shift,
+                                guint         min_samples,
+                                gint         *out_dx,
+                                gint         *out_dy)
 {
   gdouble best = -2.0;
+  gint best_dx = 0, best_dy = 0;
   gint dx, dy, x, y;
 
   for (dy = -max_shift; dy <= max_shift; dy++)
@@ -149,6 +155,123 @@ cb2000_ncc_match_u8_masked (const guint8 *a,
         continue;
 
       for (dx = -max_shift; dx <= max_shift; dx++)
+        {
+          gint x0 = MAX (0, -dx);
+          gint x1 = MIN (width, width - dx);
+          guint n = 0;
+          gdouble sum_a = 0.0, sum_b = 0.0;
+          gdouble mean_a, mean_b;
+          gdouble cov = 0.0, var_a = 0.0, var_b = 0.0;
+          gdouble score;
+
+          if (x0 >= x1)
+            continue;
+
+          for (y = y0; y < y1; y++)
+            {
+              for (x = x0; x < x1; x++)
+                {
+                  gint ia = y * width + x;
+                  gint ib = (y + dy) * width + (x + dx);
+                  if (!mask_a[ia] || !mask_b[ib])
+                    continue;
+                  sum_a += a[ia];
+                  sum_b += b[ib];
+                  n++;
+                }
+            }
+
+          if (n < min_samples)
+            continue;
+
+          mean_a = sum_a / n;
+          mean_b = sum_b / n;
+
+          for (y = y0; y < y1; y++)
+            {
+              for (x = x0; x < x1; x++)
+                {
+                  gint ia = y * width + x;
+                  gint ib = (y + dy) * width + (x + dx);
+                  gdouble da, db;
+                  if (!mask_a[ia] || !mask_b[ib])
+                    continue;
+                  da = a[ia] - mean_a;
+                  db = b[ib] - mean_b;
+                  cov += da * db;
+                  var_a += da * da;
+                  var_b += db * db;
+                }
+            }
+
+          score = (var_a < 1.0 || var_b < 1.0) ? 0.0 : cov / sqrt (var_a * var_b);
+          if (score > best)
+            {
+              best = score;
+              best_dx = dx;
+              best_dy = dy;
+            }
+        }
+    }
+
+  if (out_dx)
+    *out_dx = (best < -1.0) ? 0 : best_dx;
+  if (out_dy)
+    *out_dy = (best < -1.0) ? 0 : best_dy;
+
+  if (best < -1.0)
+    return 0.0;
+  return best;
+}
+
+gdouble
+cb2000_ncc_match_u8_masked (const guint8 *a,
+                            const guint8 *b,
+                            const guint8 *mask_a,
+                            const guint8 *mask_b,
+                            gint          width,
+                            gint          height,
+                            gint          max_shift,
+                            guint         min_samples)
+{
+  return cb2000_ncc_match_u8_masked_ext (a, b, mask_a, mask_b,
+                                         width, height,
+                                         max_shift, min_samples,
+                                         NULL, NULL);
+}
+
+gdouble
+cb2000_ncc_match_f64_masked_window (const gdouble *a,
+                                    const gdouble *b,
+                                    const guint8  *mask_a,
+                                    const guint8  *mask_b,
+                                    gint           width,
+                                    gint           height,
+                                    gint           center_dx,
+                                    gint           center_dy,
+                                    gint           window,
+                                    guint          min_samples)
+{
+  gdouble best = -2.0;
+  gint dx, dy, x, y;
+  gint min_dy, max_dy, min_dx, max_dx;
+
+  if (window < 0)
+    window = 0;
+
+  min_dy = center_dy - window;
+  max_dy = center_dy + window;
+  min_dx = center_dx - window;
+  max_dx = center_dx + window;
+
+  for (dy = min_dy; dy <= max_dy; dy++)
+    {
+      gint y0 = MAX (0, -dy);
+      gint y1 = MIN (height, height - dy);
+      if (y0 >= y1)
+        continue;
+
+      for (dx = min_dx; dx <= max_dx; dx++)
         {
           gint x0 = MAX (0, -dx);
           gint x1 = MIN (width, width - dx);
@@ -219,75 +342,10 @@ cb2000_ncc_match_f64_masked (const gdouble *a,
                              gint           max_shift,
                              guint          min_samples)
 {
-  gdouble best = -2.0;
-  gint dx, dy, x, y;
-
-  for (dy = -max_shift; dy <= max_shift; dy++)
-    {
-      gint y0 = MAX (0, -dy);
-      gint y1 = MIN (height, height - dy);
-      if (y0 >= y1)
-        continue;
-
-      for (dx = -max_shift; dx <= max_shift; dx++)
-        {
-          gint x0 = MAX (0, -dx);
-          gint x1 = MIN (width, width - dx);
-          guint n = 0;
-          gdouble sum_a = 0.0, sum_b = 0.0;
-          gdouble mean_a, mean_b;
-          gdouble cov = 0.0, var_a = 0.0, var_b = 0.0;
-          gdouble score;
-
-          if (x0 >= x1)
-            continue;
-
-          for (y = y0; y < y1; y++)
-            {
-              for (x = x0; x < x1; x++)
-                {
-                  gint ia = y * width + x;
-                  gint ib = (y + dy) * width + (x + dx);
-                  if (!mask_a[ia] || !mask_b[ib])
-                    continue;
-                  sum_a += a[ia];
-                  sum_b += b[ib];
-                  n++;
-                }
-            }
-
-          if (n < min_samples)
-            continue;
-
-          mean_a = sum_a / n;
-          mean_b = sum_b / n;
-
-          for (y = y0; y < y1; y++)
-            {
-              for (x = x0; x < x1; x++)
-                {
-                  gint ia = y * width + x;
-                  gint ib = (y + dy) * width + (x + dx);
-                  gdouble da, db;
-                  if (!mask_a[ia] || !mask_b[ib])
-                    continue;
-                  da = a[ia] - mean_a;
-                  db = b[ib] - mean_b;
-                  cov += da * db;
-                  var_a += da * da;
-                  var_b += db * db;
-                }
-            }
-
-          score = (var_a < 1.0 || var_b < 1.0) ? 0.0 : cov / sqrt (var_a * var_b);
-          if (score > best)
-            best = score;
-        }
-    }
-
-  if (best < -1.0)
-    return 0.0;
-  return best;
+  return cb2000_ncc_match_f64_masked_window (a, b, mask_a, mask_b,
+                                             width, height,
+                                             0, 0, max_shift,
+                                             min_samples);
 }
 
 gdouble
@@ -365,14 +423,17 @@ cb2000_ncc_compute_enroll_cohesion (const guint8       *images_data,
     {
       for (j = i + 1; j < n_images; j++)
         {
-          gdouble int_pair = cb2000_ncc_match_u8_masked (images[i], images[j],
-                                                         masks[i], masks[j],
-                                                         CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
-                                                         max_shift, min_samples);
-          gdouble grad_pair = cb2000_ncc_match_f64_masked (grads[i], grads[j],
-                                                           masks[i], masks[j],
-                                                           CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
-                                                           max_shift, min_samples);
+          gint pair_dx = 0, pair_dy = 0;
+          gdouble int_pair = cb2000_ncc_match_u8_masked_ext (images[i], images[j],
+                                                             masks[i], masks[j],
+                                                             CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
+                                                             max_shift, min_samples,
+                                                             &pair_dx, &pair_dy);
+          gdouble grad_pair = cb2000_ncc_match_f64_masked_window (grads[i], grads[j],
+                                                                  masks[i], masks[j],
+                                                                  CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
+                                                                  pair_dx, pair_dy, 1,
+                                                                  min_samples);
           sum_int += int_pair;
           sum_grad += grad_pair;
           min_int = MIN (min_int, int_pair);
