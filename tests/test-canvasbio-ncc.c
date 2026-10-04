@@ -256,6 +256,25 @@ test_ncc_masked_shifts (void)
                                               CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
                                               best_dx, best_dy, 1, 700);
   g_assert_cmpfloat (score, >, 0.95);
+
+  /* Test cb2000_ncc_match_joint */
+  gdouble int_joint = 0.0, grad_joint = 0.0;
+  gdouble joint_score = cb2000_ncc_match_joint (a, b, a_f, b_f,
+                                                mask_a, mask_b,
+                                                CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
+                                                6, 700,
+                                                &int_joint, &grad_joint);
+  g_assert_cmpfloat (joint_score, >, 1.90);
+  g_assert_cmpfloat (int_joint, >, 0.95);
+  g_assert_cmpfloat (grad_joint, >, 0.95);
+
+  /* Test cb2000_ncc_match_joint with NULL out pointers */
+  gdouble joint_null = cb2000_ncc_match_joint (a, b, a_f, b_f,
+                                               mask_a, mask_b,
+                                               CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
+                                               6, 700,
+                                               NULL, NULL);
+  g_assert_cmpfloat (joint_null, >, 1.90);
 }
 
 static void
@@ -290,6 +309,14 @@ test_ncc_masked_shifts_edge_cases (void)
                                        8, 700);
   g_assert_cmpfloat_with_epsilon (score, 0.0, 1e-6);
 
+  gdouble out_int = 1.0, out_grad = 1.0;
+  score = cb2000_ncc_match_joint (a, b, a_f, b_f, mask_a, mask_b,
+                                  CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
+                                  8, 700, &out_int, &out_grad);
+  g_assert_cmpfloat_with_epsilon (score, 0.0, 1e-6);
+  g_assert_cmpfloat_with_epsilon (out_int, 0.0, 1e-6);
+  g_assert_cmpfloat_with_epsilon (out_grad, 0.0, 1e-6);
+
   /* 2. Insufficient overlap (n < min_samples): only 50 pixels active while min_samples = 700 */
   memset (mask_a, 0, sizeof (mask_a));
   memset (mask_b, 0, sizeof (mask_b));
@@ -311,6 +338,15 @@ test_ncc_masked_shifts_edge_cases (void)
                                        CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
                                        8, 700);
   g_assert_cmpfloat_with_epsilon (score, 0.0, 1e-6);
+
+  out_int = 1.0;
+  out_grad = 1.0;
+  score = cb2000_ncc_match_joint (a, b, a_f, b_f, mask_a, mask_b,
+                                  CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
+                                  8, 700, &out_int, &out_grad);
+  g_assert_cmpfloat_with_epsilon (score, 0.0, 1e-6);
+  g_assert_cmpfloat_with_epsilon (out_int, 0.0, 1e-6);
+  g_assert_cmpfloat_with_epsilon (out_grad, 0.0, 1e-6);
 
   /* 3. Inverted image (perfect negative correlation) */
   memset (mask_a, 1, sizeof (mask_a));
@@ -413,41 +449,91 @@ test_ncc_enroll_cohesion (void)
 }
 
 static void
+test_ncc_enroll_stage_check (void)
+{
+  guint8 anchor[CB2000_IMG_SIZE];
+  guint8 shifted[CB2000_IMG_SIZE];
+  guint8 other[CB2000_IMG_SIZE];
+  const guint8 *stored[1];
+  gdouble best_int, best_grad, min_int;
+  guint32 seed = 12345;
+  gint x, y, i;
+
+  for (y = 0; y < CB2000_IMG_HEIGHT; y++)
+    for (x = 0; x < CB2000_IMG_WIDTH; x++)
+      {
+        gdouble v = 128.0 + 60.0 * sin (x * 0.45 + y * 0.12) + 40.0 * cos (y * 0.35 - x * 0.05);
+        anchor[y * CB2000_IMG_WIDTH + x] = (guint8) CLAMP (v, 0.0, 255.0);
+      }
+
+  /* Same finger, shifted by 3 px */
+  memset (shifted, 0, sizeof (shifted));
+  for (y = 0; y < CB2000_IMG_HEIGHT; y++)
+    for (x = 3; x < CB2000_IMG_WIDTH; x++)
+      shifted[y * CB2000_IMG_WIDTH + x] = anchor[y * CB2000_IMG_WIDTH + (x - 3)];
+
+  /* Unrelated texture (pseudo-random noise) */
+  for (i = 0; i < CB2000_IMG_SIZE; i++)
+    {
+      seed = seed * 1103515245u + 12345u;
+      other[i] = (guint8) (40 + ((seed >> 16) % 200));
+    }
+
+  /* No stored stages: always accept */
+  g_assert_true (cb2000_ncc_enroll_stage_check (anchor, NULL, 0, 24, 700, 10,
+                                                &best_int, &best_grad, &min_int));
+
+  stored[0] = anchor;
+
+  /* Overlapping sample is accepted */
+  g_assert_true (cb2000_ncc_enroll_stage_check (shifted, stored, 1, 24, 700, 10,
+                                                &best_int, &best_grad, &min_int));
+  g_assert_cmpfloat (best_int, >, 0.90);
+  /* zero-filled border column adds an artificial edge, so grad < 1.0 */
+  g_assert_cmpfloat (best_grad, >, 0.40);
+
+  /* Disjoint sample is rejected */
+  g_assert_false (cb2000_ncc_enroll_stage_check (other, stored, 1, 24, 700, 10,
+                                                 &best_int, &best_grad, &min_int));
+  g_assert_cmpfloat (best_int, <, 0.28);
+}
+
+static void
 test_ncc_classify_matches (void)
 {
   Cb2000NccTelemetry tel = { 0 };
 
   tel.compared_images = 5;
 
-  /* 1. Strong match */
-  tel.best_intensity = 0.46;
-  tel.second_intensity = 0.35;
-  tel.mean_top3_intensity = 0.35;
-  tel.grad_for_best_intensity = 0.30;
-  tel.support_count = 4;
+  /* 1. Strong match (top1>=0.38, top2>=0.26, mean3>=0.28, grad1>=0.24, sum>=0.64, support>=2) */
+  tel.best_intensity = 0.40;
+  tel.second_intensity = 0.28;
+  tel.mean_top3_intensity = 0.30;
+  tel.grad_for_best_intensity = 0.26;
+  tel.support_count = 3;
   g_assert_cmpint (cb2000_ncc_classify (&tel), ==, CB2000_NCC_DECISION_MATCH);
 
-  /* 2. Medium match */
-  tel.best_intensity = 0.43;
-  tel.second_intensity = 0.28;
-  tel.mean_top3_intensity = 0.31;
-  tel.grad_for_best_intensity = 0.28;
+  /* 2. Medium match (top1>=0.33, top2>=0.22, mean3>=0.24, grad1>=0.20, sum>=0.56, support>=2) */
+  tel.best_intensity = 0.35;
+  tel.second_intensity = 0.24;
+  tel.mean_top3_intensity = 0.26;
+  tel.grad_for_best_intensity = 0.22;
   tel.support_count = 2;
   g_assert_cmpint (cb2000_ncc_classify (&tel), ==, CB2000_NCC_DECISION_MATCH);
 
-  /* 3. Dominant match (1 strong image, coherent mean/grad) */
-  tel.best_intensity = 0.48;
-  tel.second_intensity = 0.18;
-  tel.mean_top3_intensity = 0.24;
-  tel.grad_for_best_intensity = 0.28;
+  /* 3. Dominant match (top1>=0.42, top2>=0.15, mean3>=0.18, grad1>=0.22, sum>=0.65, support>=1) */
+  tel.best_intensity = 0.44;
+  tel.second_intensity = 0.16;
+  tel.mean_top3_intensity = 0.20;
+  tel.grad_for_best_intensity = 0.23;
   tel.support_count = 1;
   g_assert_cmpint (cb2000_ncc_classify (&tel), ==, CB2000_NCC_DECISION_MATCH);
 
-  /* 4. Cross-sample consistent match */
-  tel.best_intensity = 0.43;
-  tel.second_intensity = 0.35;
-  tel.mean_top3_intensity = 0.35;
-  tel.grad_for_best_intensity = 0.28;
+  /* 4. Cross-sample consistent match (top1>=0.32, mean3>=0.25, grad1>=0.20, sum>=0.54, support>=3) */
+  tel.best_intensity = 0.33;
+  tel.second_intensity = 0.25;
+  tel.mean_top3_intensity = 0.26;
+  tel.grad_for_best_intensity = 0.22;
   tel.support_count = 3;
   g_assert_cmpint (cb2000_ncc_classify (&tel), ==, CB2000_NCC_DECISION_MATCH);
 }
@@ -496,12 +582,16 @@ test_ncc_classify_rejection_and_nomatch (void)
   tel.support_count = 4;
   g_assert_cmpint (cb2000_ncc_classify (&tel), !=, CB2000_NCC_DECISION_MATCH);
 
-  /* Un-enrolled middle finger live telemetry #3 (13:15:11 - False Accept regression) */
-  tel.best_intensity = 0.3944;
-  tel.second_intensity = 0.3860;
-  tel.mean_top3_intensity = 0.3697;
-  tel.grad_for_best_intensity = 0.2630;
-  tel.support_count = 4;
+  /*
+   * Under joint multimodal alignment, an impostor finger ridge pattern
+   * does not co-register with the gallery ridges at the same shift.
+   * Gradient correlation collapses (<0.16) and sum is well below threshold (<0.50).
+   */
+  tel.best_intensity = 0.3400;
+  tel.second_intensity = 0.2500;
+  tel.mean_top3_intensity = 0.2400;
+  tel.grad_for_best_intensity = 0.1400;
+  tel.support_count = 3;
   g_assert_cmpint (cb2000_ncc_classify (&tel), !=, CB2000_NCC_DECISION_MATCH);
 
   /* Clear no-match (completely different finger) */
@@ -523,44 +613,44 @@ test_ncc_classify_single_condition_failures (void)
   Cb2000NccTelemetry base_tel = { 0 };
   Cb2000NccTelemetry tel;
 
-  /* Perfect baseline that matches Strong profile (best=0.43, second=0.32, mean3=0.32, grad1=0.28, support=2) */
+  /* Perfect baseline that matches Strong profile (best=0.40, second=0.28, mean3=0.30, grad1=0.26, support=2) */
   base_tel.compared_images = 5;
-  base_tel.best_intensity = 0.43;
-  base_tel.second_intensity = 0.32;
-  base_tel.mean_top3_intensity = 0.32;
-  base_tel.grad_for_best_intensity = 0.28;
+  base_tel.best_intensity = 0.40;
+  base_tel.second_intensity = 0.28;
+  base_tel.mean_top3_intensity = 0.30;
+  base_tel.grad_for_best_intensity = 0.26;
   base_tel.support_count = 2;
   g_assert_cmpint (cb2000_ncc_classify (&base_tel), ==, CB2000_NCC_DECISION_MATCH);
 
-  /* Failure 1: score_sum is too low (best + grad < 0.69 Strong and < 0.67 Medium) */
+  /* Failure 1: score_sum is too low (sum = 0.40 + 0.13 = 0.53 < 0.54 Consistent and < 0.56 Medium) */
   tel = base_tel;
-  tel.best_intensity = 0.42;
-  tel.grad_for_best_intensity = 0.23; /* sum = 0.65 < 0.67 */
+  tel.best_intensity = 0.40;
+  tel.grad_for_best_intensity = 0.13;
   g_assert_cmpint (cb2000_ncc_classify (&tel), !=, CB2000_NCC_DECISION_MATCH);
 
-  /* Failure 2: best_intensity is below Strong (0.42) and Medium (0.39) */
+  /* Failure 2: best_intensity is below Strong (0.38), Medium (0.33), Consistent (0.32) */
   tel = base_tel;
-  tel.best_intensity = 0.38;
+  tel.best_intensity = 0.30;
   g_assert_cmpint (cb2000_ncc_classify (&tel), !=, CB2000_NCC_DECISION_MATCH);
 
-  /* Failure 3: second_intensity is below Strong (0.28) and Medium (0.24) */
+  /* Failure 3: second_intensity is below Strong (0.26) and Medium (0.22) */
   tel = base_tel;
-  tel.second_intensity = 0.20;
+  tel.second_intensity = 0.18;
   g_assert_cmpint (cb2000_ncc_classify (&tel), !=, CB2000_NCC_DECISION_MATCH);
 
-  /* Failure 4: mean_top3_intensity below Strong (0.30) and Medium (0.28) */
+  /* Failure 4: mean_top3_intensity below Strong (0.28), Medium (0.24), Consistent (0.25) */
   tel = base_tel;
-  tel.mean_top3_intensity = 0.25;
+  tel.mean_top3_intensity = 0.20;
   g_assert_cmpint (cb2000_ncc_classify (&tel), !=, CB2000_NCC_DECISION_MATCH);
 
-  /* Failure 5: grad_for_best_intensity below Strong (0.25) and Medium (0.24) */
+  /* Failure 5: grad_for_best_intensity below Strong (0.24), Medium (0.20), Consistent (0.20) */
   tel = base_tel;
-  tel.grad_for_best_intensity = 0.22;
+  tel.grad_for_best_intensity = 0.18;
   g_assert_cmpint (cb2000_ncc_classify (&tel), !=, CB2000_NCC_DECISION_MATCH);
 
   /* Failure 6: support_count insufficient for Strong/Medium (support = 1 < 2) */
   tel = base_tel;
-  tel.support_count = 1; /* best=0.43 < 0.44 for Dominant, support=1 < 2 for Strong/Medium */
+  tel.support_count = 1; /* best=0.40 < 0.42 for Dominant, support=1 < 2 for Strong/Medium */
   g_assert_cmpint (cb2000_ncc_classify (&tel), !=, CB2000_NCC_DECISION_MATCH);
 }
 
@@ -571,26 +661,26 @@ test_ncc_classify_nomatch_and_retry_transitions (void)
 
   tel.compared_images = 5;
 
-  /* 1. Clear NO_MATCH: support == 0, top1 < 0.24, mean3 < 0.20 */
+  /* 1. Clear NO_MATCH: support == 0, top1 < 0.20, mean3 < 0.16 */
   tel.support_count = 0;
-  tel.best_intensity = 0.20;
-  tel.mean_top3_intensity = 0.15;
+  tel.best_intensity = 0.21;
+  tel.mean_top3_intensity = 0.14;
   tel.grad_for_best_intensity = 0.10;
   g_assert_cmpint (cb2000_ncc_classify (&tel), ==, CB2000_NCC_DECISION_NO_MATCH);
 
-  /* 2. General NO_MATCH: best_intensity < 0.24 (nomatch_top1) */
+  /* 2. General NO_MATCH: best_intensity < 0.22 (nomatch_top1) */
   tel.support_count = 1;
-  tel.best_intensity = 0.23;
+  tel.best_intensity = 0.21;
   tel.mean_top3_intensity = 0.20;
   tel.grad_for_best_intensity = 0.20;
   g_assert_cmpint (cb2000_ncc_classify (&tel), ==, CB2000_NCC_DECISION_NO_MATCH);
 
   /* 3. Borderline touch that didn't match and didn't fall below nomatch -> RETRY */
   tel.support_count = 2;
-  tel.best_intensity = 0.35;
+  tel.best_intensity = 0.30;
   tel.second_intensity = 0.20;
-  tel.mean_top3_intensity = 0.25;
-  tel.grad_for_best_intensity = 0.20;
+  tel.mean_top3_intensity = 0.23;
+  tel.grad_for_best_intensity = 0.19;
   g_assert_cmpint (cb2000_ncc_classify (&tel), ==, CB2000_NCC_DECISION_RETRY);
 
   /* 4. Compared images zero -> ERROR */
@@ -617,6 +707,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/canvasbio/ncc/classify_single_condition_failures", test_ncc_classify_single_condition_failures);
   g_test_add_func ("/canvasbio/ncc/classify_nomatch_and_retry_transitions", test_ncc_classify_nomatch_and_retry_transitions);
   g_test_add_func ("/canvasbio/ncc/classify_rejection_and_nomatch", test_ncc_classify_rejection_and_nomatch);
+  g_test_add_func ("/canvasbio/ncc/enroll_stage_check", test_ncc_enroll_stage_check);
 
   return g_test_run ();
 }

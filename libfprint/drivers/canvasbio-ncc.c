@@ -349,6 +349,123 @@ cb2000_ncc_match_f64_masked (const gdouble *a,
 }
 
 gdouble
+cb2000_ncc_match_joint (const guint8  *img_a,
+                        const guint8  *img_b,
+                        const gdouble *grad_a,
+                        const gdouble *grad_b,
+                        const guint8  *mask_a,
+                        const guint8  *mask_b,
+                        gint           width,
+                        gint           height,
+                        gint           max_shift,
+                        guint          min_samples,
+                        gdouble       *out_int_score,
+                        gdouble       *out_grad_score)
+{
+  gdouble best_fused = -4.0;
+  gdouble best_int = 0.0;
+  gdouble best_grad = 0.0;
+  gint dx, dy, x, y;
+
+  for (dy = -max_shift; dy <= max_shift; dy++)
+    {
+      gint y0 = MAX (0, -dy);
+      gint y1 = MIN (height, height - dy);
+      if (y0 >= y1)
+        continue;
+
+      for (dx = -max_shift; dx <= max_shift; dx++)
+        {
+          gint x0 = MAX (0, -dx);
+          gint x1 = MIN (width, width - dx);
+          guint n = 0;
+          gdouble sum_ia = 0.0, sum_ib = 0.0;
+          gdouble sum_ga = 0.0, sum_gb = 0.0;
+          gdouble mean_ia, mean_ib, mean_ga, mean_gb;
+          gdouble cov_i = 0.0, var_ia = 0.0, var_ib = 0.0;
+          gdouble cov_g = 0.0, var_ga = 0.0, var_gb = 0.0;
+          gdouble score_i, score_g, score_fused;
+
+          if (x0 >= x1)
+            continue;
+
+          for (y = y0; y < y1; y++)
+            {
+              for (x = x0; x < x1; x++)
+                {
+                  gint ia = y * width + x;
+                  gint ib = (y + dy) * width + (x + dx);
+                  if (!mask_a[ia] || !mask_b[ib])
+                    continue;
+                  sum_ia += img_a[ia];
+                  sum_ib += img_b[ib];
+                  sum_ga += grad_a[ia];
+                  sum_gb += grad_b[ib];
+                  n++;
+                }
+            }
+
+          if (n < min_samples)
+            continue;
+
+          mean_ia = sum_ia / n;
+          mean_ib = sum_ib / n;
+          mean_ga = sum_ga / n;
+          mean_gb = sum_gb / n;
+
+          for (y = y0; y < y1; y++)
+            {
+              for (x = x0; x < x1; x++)
+                {
+                  gint ia = y * width + x;
+                  gint ib = (y + dy) * width + (x + dx);
+                  gdouble dia, dib, dga, dgb;
+                  if (!mask_a[ia] || !mask_b[ib])
+                    continue;
+                  dia = img_a[ia] - mean_ia;
+                  dib = img_b[ib] - mean_ib;
+                  cov_i += dia * dib;
+                  var_ia += dia * dia;
+                  var_ib += dib * dib;
+
+                  dga = grad_a[ia] - mean_ga;
+                  dgb = grad_b[ib] - mean_gb;
+                  cov_g += dga * dgb;
+                  var_ga += dga * dga;
+                  var_gb += dgb * dgb;
+                }
+            }
+
+          score_i = (var_ia < 1.0 || var_ib < 1.0) ? 0.0 : cov_i / sqrt (var_ia * var_ib);
+          score_g = (var_ga < 1.0 || var_gb < 1.0) ? 0.0 : cov_g / sqrt (var_ga * var_gb);
+          score_fused = score_i + score_g;
+
+          if (score_fused > best_fused)
+            {
+              best_fused = score_fused;
+              best_int = score_i;
+              best_grad = score_g;
+            }
+        }
+    }
+
+  if (best_fused < -3.0)
+    {
+      if (out_int_score)
+        *out_int_score = 0.0;
+      if (out_grad_score)
+        *out_grad_score = 0.0;
+      return 0.0;
+    }
+
+  if (out_int_score)
+    *out_int_score = MAX (0.0, best_int);
+  if (out_grad_score)
+    *out_grad_score = MAX (0.0, best_grad);
+  return best_fused;
+}
+
+gdouble
 cb2000_ncc_compute_adaptive_relax (const Cb2000NccTelemetry *tel)
 {
   guint adaptive_enabled = cb2000_ncc_env_uint ("CB2000_NCC_ADAPTIVE",
@@ -423,17 +540,13 @@ cb2000_ncc_compute_enroll_cohesion (const guint8       *images_data,
     {
       for (j = i + 1; j < n_images; j++)
         {
-          gint pair_dx = 0, pair_dy = 0;
-          gdouble int_pair = cb2000_ncc_match_u8_masked_ext (images[i], images[j],
-                                                             masks[i], masks[j],
-                                                             CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
-                                                             max_shift, min_samples,
-                                                             &pair_dx, &pair_dy);
-          gdouble grad_pair = cb2000_ncc_match_f64_masked_window (grads[i], grads[j],
-                                                                  masks[i], masks[j],
-                                                                  CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
-                                                                  pair_dx, pair_dy, 1,
-                                                                  min_samples);
+          gdouble int_pair = 0.0, grad_pair = 0.0;
+          cb2000_ncc_match_joint (images[i], images[j],
+                                  grads[i], grads[j],
+                                  masks[i], masks[j],
+                                  CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
+                                  max_shift, min_samples,
+                                  &int_pair, &grad_pair);
           sum_int += int_pair;
           sum_grad += grad_pair;
           min_int = MIN (min_int, int_pair);
@@ -450,6 +563,102 @@ cb2000_ncc_compute_enroll_cohesion (const guint8       *images_data,
   tel->enroll_pair_mean_intensity = sum_int / pairs;
   tel->enroll_pair_min_intensity = min_int;
   tel->enroll_pair_mean_gradient = sum_grad / pairs;
+}
+
+/*
+ * Check whether a candidate enrollment image overlaps the already stored
+ * gallery. Returns TRUE when the candidate is co-registered with at least
+ * one stored stage (best_int/best_grad) and is not disjoint from any
+ * stored stage (min_int). Thresholds can be overridden via environment.
+ */
+gboolean
+cb2000_ncc_enroll_stage_check (const guint8         *candidate,
+                               const guint8 * const *stored,
+                               gint                  n_stored,
+                               guint8                mask_threshold,
+                               guint                 min_samples,
+                               gint                  max_shift,
+                               gdouble              *out_best_int,
+                               gdouble              *out_best_grad,
+                               gdouble              *out_min_int)
+{
+  guint8 cand_mask[CB2000_IMG_SIZE];
+  gdouble cand_grad[CB2000_IMG_SIZE];
+  gdouble best_int = 0.0, best_grad = 0.0, best_fused = -4.0;
+  gdouble min_int = 1.0;
+  gdouble gate_best_int = cb2000_ncc_env_double ("CB2000_NCC_ENROLL_GATE_BEST_INT",
+                                                 CB2000_NCC_ENROLL_GATE_BEST_INT_DEFAULT,
+                                                 0.0, 1.0);
+  gdouble gate_best_grad = cb2000_ncc_env_double ("CB2000_NCC_ENROLL_GATE_BEST_GRAD",
+                                                  CB2000_NCC_ENROLL_GATE_BEST_GRAD_DEFAULT,
+                                                  0.0, 1.0);
+  gdouble gate_min_int = cb2000_ncc_env_double ("CB2000_NCC_ENROLL_GATE_MIN_INT",
+                                                CB2000_NCC_ENROLL_GATE_MIN_INT_DEFAULT,
+                                                0.0, 1.0);
+  gboolean ok;
+  gint i;
+
+  if (out_best_int)
+    *out_best_int = 0.0;
+  if (out_best_grad)
+    *out_best_grad = 0.0;
+  if (out_min_int)
+    *out_min_int = 0.0;
+
+  if (n_stored <= 0 || stored == NULL)
+    return TRUE;
+
+  cb2000_build_foreground_mask (candidate, cand_mask,
+                                CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
+                                mask_threshold);
+  cb2000_compute_gradient_magnitude (candidate, cand_grad,
+                                     CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT);
+
+  for (i = 0; i < n_stored; i++)
+    {
+      guint8 st_mask[CB2000_IMG_SIZE];
+      gdouble st_grad[CB2000_IMG_SIZE];
+      gdouble int_score = 0.0, grad_score = 0.0;
+
+      if (stored[i] == NULL)
+        continue;
+
+      cb2000_build_foreground_mask (stored[i], st_mask,
+                                    CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
+                                    mask_threshold);
+      cb2000_compute_gradient_magnitude (stored[i], st_grad,
+                                         CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT);
+      cb2000_ncc_match_joint (candidate, stored[i],
+                              cand_grad, st_grad,
+                              cand_mask, st_mask,
+                              CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
+                              max_shift, min_samples,
+                              &int_score, &grad_score);
+
+      if (int_score + grad_score > best_fused)
+        {
+          best_fused = int_score + grad_score;
+          best_int = int_score;
+          best_grad = grad_score;
+        }
+      min_int = MIN (min_int, int_score);
+
+      fp_dbg ("[ NCC ] enroll gate stored=%d int=%.4f grad=%.4f",
+              i, int_score, grad_score);
+    }
+
+  ok = best_int >= gate_best_int &&
+       best_grad >= gate_best_grad &&
+       min_int >= gate_min_int;
+
+  if (out_best_int)
+    *out_best_int = best_int;
+  if (out_best_grad)
+    *out_best_grad = best_grad;
+  if (out_min_int)
+    *out_min_int = min_int;
+
+  return ok;
 }
 
 Cb2000NccDecision

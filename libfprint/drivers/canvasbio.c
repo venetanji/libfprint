@@ -224,6 +224,7 @@ typedef enum {
   CB2000_RETRY_QUALITY_GATE,
   CB2000_RETRY_MINUTIAE_PRECHECK,
   CB2000_RETRY_DEVICE_STATUS,
+  CB2000_RETRY_ENROLL_CONSISTENCY,
   CB2000_RETRY_CAUSE_COUNT,
 } Cb2000RetryCause;
 
@@ -272,6 +273,7 @@ struct _FpiDeviceCanvasbio
   /* NCC enrollment state */
   guint8        *enroll_images[5];
   gint           enroll_stage;
+  guint          enroll_gate_rejects;
   FpiMatchResult verify_result;
 
   /* Image buffer */
@@ -943,6 +945,9 @@ cb2000_retry_cause_label (Cb2000RetryCause cause)
     case CB2000_RETRY_DEVICE_STATUS:
       return "device_status";
 
+    case CB2000_RETRY_ENROLL_CONSISTENCY:
+      return "enroll_consistency";
+
     case CB2000_RETRY_CAUSE_COUNT:
       return "count_sentinel";
 
@@ -1599,11 +1604,22 @@ cb2000_retry_scan_with_cause (FpDevice        *dev,
   else
     {
       if (cause == CB2000_RETRY_AREA_GATE)
-        retry_msg = "Place finger fully on sensor and try again.";
+        {
+          retry_msg = "Place finger fully on sensor and try again.";
+        }
       else if (cause == CB2000_RETRY_QUALITY_GATE)
-        retry_msg = "Image quality too low, adjust finger and try again.";
+        {
+          retry_msg = "Image quality too low, adjust finger and try again.";
+        }
       else if (cause == CB2000_RETRY_MINUTIAE_PRECHECK)
-        retry_msg = "Adjust finger and try again.";
+        {
+          retry_msg = "Adjust finger and try again.";
+        }
+      else if (cause == CB2000_RETRY_ENROLL_CONSISTENCY)
+        {
+          retry_error = FP_DEVICE_RETRY_CENTER_FINGER;
+          retry_msg = "Place the same finger centered, as in the previous touch.";
+        }
 
       fp_info ("[ RETRY ] action=%s cause=%s total=%u cause_count=%u retry_hint=%s msg=\"%s\" %s",
                cb2000_action_label (action),
@@ -3551,13 +3567,19 @@ unpack_and_match (FpPrint *print, const guint8 *captured, Cb2000NccTelemetry *te
   cb2000_compute_gradient_magnitude (captured, captured_grad,
                                      CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT);
 
+  gdouble best_fused_score = -4.0;
+  gdouble grad_for_best_fused = 0.0;
+  gdouble best_grad_supported = 0.0;
+  gdouble grad_for_best_intensity = 0.0;
+
   for (i = 0; i < n_images; i++)
     {
       const guint8 *enrolled = images_data + i * CB2000_IMG_SIZE;
       gdouble enrolled_grad[CB2000_IMG_SIZE];
       guint8 enrolled_mask[CB2000_IMG_SIZE];
-      gdouble int_score;
-      gdouble grad_score;
+      gdouble int_score = 0.0;
+      gdouble grad_score = 0.0;
+      gdouble fused_score;
 
       cb2000_build_foreground_mask (enrolled, enrolled_mask,
                                     CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
@@ -3565,26 +3587,28 @@ unpack_and_match (FpPrint *print, const guint8 *captured, Cb2000NccTelemetry *te
       cb2000_compute_gradient_magnitude (enrolled, enrolled_grad,
                                          CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT);
 
-      gint best_dx = 0, best_dy = 0;
-      int_score = cb2000_ncc_match_u8_masked_ext (captured, enrolled,
-                                                  captured_mask, enrolled_mask,
-                                                  CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
-                                                  max_shift, min_samples,
-                                                  &best_dx, &best_dy);
-      grad_score = cb2000_ncc_match_f64_masked_window (captured_grad, enrolled_grad,
-                                                       captured_mask, enrolled_mask,
-                                                       CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
-                                                       best_dx, best_dy, 1,
-                                                       min_samples);
+      cb2000_ncc_match_joint (captured, enrolled,
+                              captured_grad, enrolled_grad,
+                              captured_mask, enrolled_mask,
+                              CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT,
+                              max_shift, min_samples,
+                              &int_score, &grad_score);
 
       top_scores[i] = int_score;
       tel->compared_images++;
+
+      fused_score = int_score + grad_score;
+      if (fused_score > best_fused_score)
+        {
+          best_fused_score = fused_score;
+          grad_for_best_fused = grad_score;
+        }
 
       if (int_score > tel->best_intensity)
         {
           tel->second_intensity = tel->best_intensity;
           tel->best_intensity = int_score;
-          tel->grad_for_best_intensity = grad_score;
+          grad_for_best_intensity = grad_score;
         }
       else if (int_score > tel->second_intensity)
         {
@@ -3592,10 +3616,24 @@ unpack_and_match (FpPrint *print, const guint8 *captured, Cb2000NccTelemetry *te
         }
 
       if (int_score >= support_int_effective && grad_score >= support_grad_effective)
-        tel->support_count++;
+        {
+          tel->support_count++;
+          if (grad_score > best_grad_supported)
+            best_grad_supported = grad_score;
+        }
 
-      fp_dbg ("[ NCC ] gallery=%d int=%.4f grad=%.4f", i, int_score, grad_score);
+      fp_dbg ("[ NCC ] gallery=%d int=%.4f grad=%.4f fused=%.4f",
+              i, int_score, grad_score, fused_score);
     }
+
+  {
+    gdouble chosen_grad = grad_for_best_intensity;
+    if (grad_for_best_fused > chosen_grad)
+      chosen_grad = grad_for_best_fused;
+    if (best_grad_supported > chosen_grad)
+      chosen_grad = best_grad_supported;
+    tel->grad_for_best_intensity = chosen_grad;
+  }
 
   top_n = MIN ((guint) n_images, (guint) 3);
   for (i = 0; i < n_images; i++)
@@ -4359,10 +4397,70 @@ cycle_run_state (FpiSsm *ssm, FpDevice *dev)
               guint8 *norm = g_malloc (CB2000_IMG_SIZE);
               memcpy (norm, img->data, CB2000_IMG_SIZE);
               normalize_contrast (norm, CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT);
+              g_object_unref (img);
+
+              if (self->enroll_stage > 0 &&
+                  cb2000_ncc_env_uint ("CB2000_NCC_ENROLL_GATE",
+                                       CB2000_NCC_ENROLL_GATE_ENABLED_DEFAULT, 0, 1))
+                {
+                  gdouble g_best_int = 0.0, g_best_grad = 0.0, g_min_int = 0.0;
+                  gboolean g_ok = cb2000_ncc_enroll_stage_check (
+                    norm,
+                    (const guint8 * const *) self->enroll_images,
+                    self->enroll_stage,
+                    (guint8) cb2000_ncc_env_uint ("CB2000_NCC_MASK_THRESH",
+                                                  CB2000_NCC_MASK_THRESHOLD_DEFAULT,
+                                                  1, 254),
+                    cb2000_ncc_env_uint ("CB2000_NCC_MIN_SAMPLES",
+                                         CB2000_NCC_MIN_SAMPLES_DEFAULT,
+                                         64, CB2000_IMG_SIZE),
+                    (gint) cb2000_ncc_env_uint ("CB2000_NCC_MAX_SHIFT",
+                                                CB2000_NCC_MAX_SHIFT_DEFAULT,
+                                                0, 16),
+                    &g_best_int, &g_best_grad, &g_min_int);
+
+                  g_message ("[ NCC ] enroll gate stage=%d best_int=%.4f best_grad=%.4f min_int=%.4f rejects=%u -> %s",
+                             self->enroll_stage, g_best_int, g_best_grad, g_min_int,
+                             self->enroll_gate_rejects, g_ok ? "ACCEPT" : "REJECT");
+
+                  if (!g_ok)
+                    {
+                      self->enroll_gate_rejects++;
+
+                      if (self->enroll_stage == 1 && self->enroll_gate_rejects >= 3)
+                        {
+                          /* The anchor (stage 0) is likely a poor/partial touch:
+                           * replace it with the latest sample and keep going. */
+                          fp_info ("[ NCC ] enroll gate: replacing anchor stage 0");
+                          g_clear_pointer (&self->enroll_images[0], g_free);
+                          self->enroll_images[0] = norm;
+                          self->enroll_gate_rejects = 0;
+                          cb2000_retry_scan_with_cause (dev,
+                                                        CB2000_RETRY_ENROLL_CONSISTENCY,
+                                                        "(anchor replaced)");
+                          fpi_ssm_next_state (ssm);
+                          return;
+                        }
+
+                      if (self->enroll_gate_rejects < CB2000_NCC_ENROLL_GATE_MAX_REJECTS)
+                        {
+                          g_free (norm);
+                          cb2000_retry_scan_with_cause (dev,
+                                                        CB2000_RETRY_ENROLL_CONSISTENCY,
+                                                        "(no overlap with gallery)");
+                          fpi_ssm_next_state (ssm);
+                          return;
+                        }
+
+                      fp_warn ("[ NCC ] enroll gate: accepting stage %d after %u rejects",
+                               self->enroll_stage, self->enroll_gate_rejects);
+                    }
+                }
+
+              self->enroll_gate_rejects = 0;
               g_clear_pointer (&self->enroll_images[self->enroll_stage], g_free);
               self->enroll_images[self->enroll_stage] = norm;
               self->enroll_stage++;
-              g_object_unref (img);
 
               fp_info ("Enrollment stage %d/%d complete",
                        self->enroll_stage, CB2000_NR_ENROLL_STAGES);
@@ -5074,6 +5172,7 @@ dev_enroll (FpDevice *device)
   fp_info ("Starting enrollment (%d stages)", CB2000_NR_ENROLL_STAGES);
   dev_action_common_init (self);
   self->enroll_stage = 0;
+  self->enroll_gate_rejects = 0;
   for (i = 0; i < CB2000_NR_ENROLL_STAGES; i++)
     g_clear_pointer (&self->enroll_images[i], g_free);
 

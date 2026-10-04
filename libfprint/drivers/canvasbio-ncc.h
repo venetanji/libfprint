@@ -19,42 +19,42 @@
 
 /* NCC correlation matching constants & defaults */
 #define CB2000_NR_ENROLL_STAGES 5
-#define CB2000_NCC_MAX_SHIFT_DEFAULT 10
+#define CB2000_NCC_MAX_SHIFT_DEFAULT 16
 #define CB2000_NCC_MASK_THRESHOLD_DEFAULT 24
 #define CB2000_NCC_MIN_SAMPLES_DEFAULT 700
 
-#define CB2000_NCC_MATCH_TOP1_DEFAULT 0.42
-#define CB2000_NCC_MATCH_TOP2_DEFAULT 0.28
-#define CB2000_NCC_MATCH_MEAN3_DEFAULT 0.30
-#define CB2000_NCC_MATCH_GRAD1_DEFAULT 0.25
-#define CB2000_NCC_MATCH_SCORE_SUM_DEFAULT 0.69
+#define CB2000_NCC_MATCH_TOP1_DEFAULT 0.38
+#define CB2000_NCC_MATCH_TOP2_DEFAULT 0.26
+#define CB2000_NCC_MATCH_MEAN3_DEFAULT 0.28
+#define CB2000_NCC_MATCH_GRAD1_DEFAULT 0.24
+#define CB2000_NCC_MATCH_SCORE_SUM_DEFAULT 0.64
 #define CB2000_NCC_SUPPORT_MIN_DEFAULT 2
-#define CB2000_NCC_SUPPORT_INT_DEFAULT 0.25
-#define CB2000_NCC_SUPPORT_GRAD_DEFAULT 0.18
+#define CB2000_NCC_SUPPORT_INT_DEFAULT 0.22
+#define CB2000_NCC_SUPPORT_GRAD_DEFAULT 0.16
 
-#define CB2000_NCC_MEDIUM_TOP1_DEFAULT 0.39
-#define CB2000_NCC_MEDIUM_TOP2_DEFAULT 0.24
-#define CB2000_NCC_MEDIUM_MEAN3_DEFAULT 0.28
-#define CB2000_NCC_MEDIUM_GRAD1_DEFAULT 0.24
-#define CB2000_NCC_MEDIUM_SCORE_SUM_DEFAULT 0.67
+#define CB2000_NCC_MEDIUM_TOP1_DEFAULT 0.325
+#define CB2000_NCC_MEDIUM_TOP2_DEFAULT 0.22
+#define CB2000_NCC_MEDIUM_MEAN3_DEFAULT 0.24
+#define CB2000_NCC_MEDIUM_GRAD1_DEFAULT 0.20
+#define CB2000_NCC_MEDIUM_SCORE_SUM_DEFAULT 0.56
 #define CB2000_NCC_MEDIUM_SUPPORT_MIN_DEFAULT 2
 
-#define CB2000_NCC_DOMINANT_TOP1_DEFAULT 0.44
+#define CB2000_NCC_DOMINANT_TOP1_DEFAULT 0.42
 #define CB2000_NCC_DOMINANT_TOP2_DEFAULT 0.15
-#define CB2000_NCC_DOMINANT_MEAN3_DEFAULT 0.20
-#define CB2000_NCC_DOMINANT_GRAD1_DEFAULT 0.25
-#define CB2000_NCC_DOMINANT_SCORE_SUM_DEFAULT 0.70
+#define CB2000_NCC_DOMINANT_MEAN3_DEFAULT 0.18
+#define CB2000_NCC_DOMINANT_GRAD1_DEFAULT 0.22
+#define CB2000_NCC_DOMINANT_SCORE_SUM_DEFAULT 0.65
 #define CB2000_NCC_DOMINANT_SUPPORT_MIN_DEFAULT 1
 
-#define CB2000_NCC_CONSISTENT_TOP1_DEFAULT 0.40
-#define CB2000_NCC_CONSISTENT_MEAN3_DEFAULT 0.30
-#define CB2000_NCC_CONSISTENT_GRAD1_DEFAULT 0.24
-#define CB2000_NCC_CONSISTENT_SCORE_SUM_DEFAULT 0.67
+#define CB2000_NCC_CONSISTENT_TOP1_DEFAULT 0.315
+#define CB2000_NCC_CONSISTENT_MEAN3_DEFAULT 0.25
+#define CB2000_NCC_CONSISTENT_GRAD1_DEFAULT 0.20
+#define CB2000_NCC_CONSISTENT_SCORE_SUM_DEFAULT 0.54
 #define CB2000_NCC_CONSISTENT_SUPPORT_MIN_DEFAULT 3
-#define CB2000_NCC_NOMATCH_TOP1_DEFAULT 0.24
+#define CB2000_NCC_NOMATCH_TOP1_DEFAULT 0.22
 
-#define CB2000_NCC_CLEAR_NOMATCH_TOP1_DEFAULT 0.24
-#define CB2000_NCC_CLEAR_NOMATCH_MEAN3_DEFAULT 0.20
+#define CB2000_NCC_CLEAR_NOMATCH_TOP1_DEFAULT 0.20
+#define CB2000_NCC_CLEAR_NOMATCH_MEAN3_DEFAULT 0.16
 
 #define CB2000_NCC_ADAPTIVE_ENABLED_DEFAULT 1
 #define CB2000_NCC_ADAPTIVE_MAX_RELAX_DEFAULT 0.03
@@ -62,6 +62,17 @@
 #define CB2000_NCC_ADAPTIVE_TARGET_MIN_DEFAULT 0.24
 #define CB2000_NCC_ADAPTIVE_SUPPORT_RELAX_AT 0.035
 #define CB2000_NCC_ADAPTIVE_RELAX_SUPPORT_DEFAULT 0
+
+/*
+ * Enrollment consistency gate: every stage after the first must overlap
+ * the already-stored gallery. A gallery made of disjoint finger regions
+ * (pair correlation ~0) cannot be matched reliably on an 80x64 sensor.
+ */
+#define CB2000_NCC_ENROLL_GATE_ENABLED_DEFAULT 0
+#define CB2000_NCC_ENROLL_GATE_BEST_INT_DEFAULT 0.28
+#define CB2000_NCC_ENROLL_GATE_BEST_GRAD_DEFAULT 0.18
+#define CB2000_NCC_ENROLL_GATE_MIN_INT_DEFAULT 0.12
+#define CB2000_NCC_ENROLL_GATE_MAX_REJECTS 6
 
 typedef enum {
   CB2000_NCC_DECISION_MATCH = 0,
@@ -148,6 +159,19 @@ gdouble cb2000_ncc_match_f64_masked (const gdouble *a,
                                      gint           max_shift,
                                      guint          min_samples);
 
+gdouble cb2000_ncc_match_joint (const guint8  *img_a,
+                                const guint8  *img_b,
+                                const gdouble *grad_a,
+                                const gdouble *grad_b,
+                                const guint8  *mask_a,
+                                const guint8  *mask_b,
+                                gint           width,
+                                gint           height,
+                                gint           max_shift,
+                                guint          min_samples,
+                                gdouble       *out_int_score,
+                                gdouble       *out_grad_score);
+
 gdouble cb2000_ncc_compute_adaptive_relax (const Cb2000NccTelemetry *tel);
 
 void cb2000_ncc_compute_enroll_cohesion (const guint8       *images_data,
@@ -156,5 +180,15 @@ void cb2000_ncc_compute_enroll_cohesion (const guint8       *images_data,
                                          guint               min_samples,
                                          gint                max_shift,
                                          Cb2000NccTelemetry *tel);
+
+gboolean cb2000_ncc_enroll_stage_check (const guint8         *candidate,
+                                        const guint8 * const *stored,
+                                        gint                  n_stored,
+                                        guint8                mask_threshold,
+                                        guint                 min_samples,
+                                        gint                  max_shift,
+                                        gdouble              *out_best_int,
+                                        gdouble              *out_best_grad,
+                                        gdouble              *out_min_int);
 
 Cb2000NccDecision cb2000_ncc_classify (const Cb2000NccTelemetry *tel);
