@@ -409,6 +409,9 @@ cb2000_ncc_classify (const Cb2000NccTelemetry *tel)
   guint support_min = cb2000_ncc_env_uint ("CB2000_NCC_SUPPORT_MIN",
                                            CB2000_NCC_SUPPORT_MIN_DEFAULT,
                                            1, CB2000_NR_ENROLL_STAGES);
+  gdouble match_score_sum = cb2000_ncc_env_double ("CB2000_NCC_MATCH_SCORE_SUM",
+                                                   CB2000_NCC_MATCH_SCORE_SUM_DEFAULT,
+                                                   0.0, 2.0);
   gdouble medium_top1 = cb2000_ncc_env_double ("CB2000_NCC_MEDIUM_TOP1",
                                                CB2000_NCC_MEDIUM_TOP1_DEFAULT,
                                                0.0, 1.0);
@@ -421,6 +424,9 @@ cb2000_ncc_classify (const Cb2000NccTelemetry *tel)
   gdouble medium_grad1 = cb2000_ncc_env_double ("CB2000_NCC_MEDIUM_GRAD1",
                                                 CB2000_NCC_MEDIUM_GRAD1_DEFAULT,
                                                 0.0, 1.0);
+  gdouble medium_score_sum = cb2000_ncc_env_double ("CB2000_NCC_MEDIUM_SCORE_SUM",
+                                                    CB2000_NCC_MEDIUM_SCORE_SUM_DEFAULT,
+                                                    0.0, 2.0);
   guint medium_support_min = cb2000_ncc_env_uint ("CB2000_NCC_MEDIUM_SUPPORT_MIN",
                                                   CB2000_NCC_MEDIUM_SUPPORT_MIN_DEFAULT,
                                                   1, CB2000_NR_ENROLL_STAGES);
@@ -436,6 +442,9 @@ cb2000_ncc_classify (const Cb2000NccTelemetry *tel)
   gdouble dominant_grad1 = cb2000_ncc_env_double ("CB2000_NCC_DOMINANT_GRAD1",
                                                   CB2000_NCC_DOMINANT_GRAD1_DEFAULT,
                                                   0.0, 1.0);
+  gdouble dominant_score_sum = cb2000_ncc_env_double ("CB2000_NCC_DOMINANT_SCORE_SUM",
+                                                      CB2000_NCC_DOMINANT_SCORE_SUM_DEFAULT,
+                                                      0.0, 2.0);
   guint dominant_support_min = cb2000_ncc_env_uint ("CB2000_NCC_DOMINANT_SUPPORT_MIN",
                                                     CB2000_NCC_DOMINANT_SUPPORT_MIN_DEFAULT,
                                                     1, CB2000_NR_ENROLL_STAGES);
@@ -448,6 +457,9 @@ cb2000_ncc_classify (const Cb2000NccTelemetry *tel)
   gdouble consistent_grad1 = cb2000_ncc_env_double ("CB2000_NCC_CONSISTENT_GRAD1",
                                                     CB2000_NCC_CONSISTENT_GRAD1_DEFAULT,
                                                     0.0, 1.0);
+  gdouble consistent_score_sum = cb2000_ncc_env_double ("CB2000_NCC_CONSISTENT_SCORE_SUM",
+                                                        CB2000_NCC_CONSISTENT_SCORE_SUM_DEFAULT,
+                                                        0.0, 2.0);
   guint consistent_support_min = cb2000_ncc_env_uint ("CB2000_NCC_CONSISTENT_SUPPORT_MIN",
                                                       CB2000_NCC_CONSISTENT_SUPPORT_MIN_DEFAULT,
                                                       1, CB2000_NR_ENROLL_STAGES);
@@ -464,6 +476,7 @@ cb2000_ncc_classify (const Cb2000NccTelemetry *tel)
                                                       CB2000_NCC_ADAPTIVE_RELAX_SUPPORT_DEFAULT,
                                                       0, 1);
   gdouble relax = cb2000_ncc_compute_adaptive_relax (tel);
+  gdouble score_sum = tel->best_intensity + tel->grad_for_best_intensity;
 
   if (relax > 0.0)
     {
@@ -471,20 +484,24 @@ cb2000_ncc_classify (const Cb2000NccTelemetry *tel)
       match_top2 = MAX (0.0, match_top2 - (relax * 0.75));
       match_mean3 = MAX (0.0, match_mean3 - (relax * 0.75));
       match_grad1 = MAX (0.0, match_grad1 - (relax * 0.50));
+      match_score_sum = MAX (0.0, match_score_sum - (relax * 1.25));
 
       medium_top1 = MAX (0.0, medium_top1 - relax);
       medium_top2 = MAX (0.0, medium_top2 - (relax * 0.80));
       medium_mean3 = MAX (0.0, medium_mean3 - (relax * 0.80));
       medium_grad1 = MAX (0.0, medium_grad1 - (relax * 0.50));
+      medium_score_sum = MAX (0.0, medium_score_sum - (relax * 1.25));
 
       dominant_top1 = MAX (0.0, dominant_top1 - (relax * 0.40));
       dominant_top2 = MAX (0.0, dominant_top2 - (relax * 0.25));
       dominant_mean3 = MAX (0.0, dominant_mean3 - (relax * 0.50));
       dominant_grad1 = MAX (0.0, dominant_grad1 - (relax * 0.40));
+      dominant_score_sum = MAX (0.0, dominant_score_sum - (relax * 0.80));
 
       consistent_top1 = MAX (0.0, consistent_top1 - (relax * 0.60));
       consistent_mean3 = MAX (0.0, consistent_mean3 - (relax * 0.50));
       consistent_grad1 = MAX (0.0, consistent_grad1 - (relax * 0.40));
+      consistent_score_sum = MAX (0.0, consistent_score_sum - (relax * 1.00));
 
       if (adaptive_relax_support)
         {
@@ -497,19 +514,21 @@ cb2000_ncc_classify (const Cb2000NccTelemetry *tel)
         }
     }
 
-  g_message ("[ NCC ] classify thresholds: strong(top1>=%.3f top2>=%.3f mean3>=%.3f grad1>=%.3f support>=%u) "
-             "medium(top1>=%.3f top2>=%.3f mean3>=%.3f grad1>=%.3f support>=%u) "
-             "dominant(top1>=%.3f top2>=%.3f mean3>=%.3f grad1>=%.3f support>=%u) "
-             "consistent(top1>=%.3f mean3>=%.3f grad1>=%.3f support>=%u) "
+  g_message ("[ NCC ] classify thresholds: strong(top1>=%.3f top2>=%.3f mean3>=%.3f grad1>=%.3f sum>=%.3f support>=%u) "
+             "medium(top1>=%.3f top2>=%.3f mean3>=%.3f grad1>=%.3f sum>=%.3f support>=%u) "
+             "dominant(top1>=%.3f top2>=%.3f mean3>=%.3f grad1>=%.3f sum>=%.3f support>=%u) "
+             "consistent(top1>=%.3f mean3>=%.3f grad1>=%.3f sum>=%.3f support>=%u) "
              "clear_nomatch(support==0 && top1<%.3f && mean3<%.3f) "
              "nomatch(top1<%.3f) "
+             "score_sum=%.4f "
              "adaptive(relax=%.3f relax_support=%u cohesion_mean=%.3f cohesion_min=%.3f pairs=%u)",
-             match_top1, match_top2, match_mean3, match_grad1, support_min,
-             medium_top1, medium_top2, medium_mean3, medium_grad1, medium_support_min,
-             dominant_top1, dominant_top2, dominant_mean3, dominant_grad1, dominant_support_min,
-             consistent_top1, consistent_mean3, consistent_grad1, consistent_support_min,
+             match_top1, match_top2, match_mean3, match_grad1, match_score_sum, support_min,
+             medium_top1, medium_top2, medium_mean3, medium_grad1, medium_score_sum, medium_support_min,
+             dominant_top1, dominant_top2, dominant_mean3, dominant_grad1, dominant_score_sum, dominant_support_min,
+             consistent_top1, consistent_mean3, consistent_grad1, consistent_score_sum, consistent_support_min,
              clear_nomatch_top1, clear_nomatch_mean3,
              nomatch_top1,
+             score_sum,
              relax,
              adaptive_relax_support,
              tel->enroll_pair_mean_intensity,
@@ -523,27 +542,31 @@ cb2000_ncc_classify (const Cb2000NccTelemetry *tel)
       tel->best_intensity >= match_top1 &&
       tel->second_intensity >= match_top2 &&
       tel->mean_top3_intensity >= match_mean3 &&
-      tel->grad_for_best_intensity >= match_grad1)
+      tel->grad_for_best_intensity >= match_grad1 &&
+      score_sum >= match_score_sum)
     return CB2000_NCC_DECISION_MATCH;
 
   if (tel->support_count >= medium_support_min &&
       tel->best_intensity >= medium_top1 &&
       tel->second_intensity >= medium_top2 &&
       tel->mean_top3_intensity >= medium_mean3 &&
-      tel->grad_for_best_intensity >= medium_grad1)
+      tel->grad_for_best_intensity >= medium_grad1 &&
+      score_sum >= medium_score_sum)
     return CB2000_NCC_DECISION_MATCH;
 
   if (tel->support_count >= dominant_support_min &&
       tel->best_intensity >= dominant_top1 &&
       tel->second_intensity >= dominant_top2 &&
       tel->mean_top3_intensity >= dominant_mean3 &&
-      tel->grad_for_best_intensity >= dominant_grad1)
+      tel->grad_for_best_intensity >= dominant_grad1 &&
+      score_sum >= dominant_score_sum)
     return CB2000_NCC_DECISION_MATCH;
 
   if (tel->support_count >= consistent_support_min &&
       tel->best_intensity >= consistent_top1 &&
       tel->mean_top3_intensity >= consistent_mean3 &&
-      tel->grad_for_best_intensity >= consistent_grad1)
+      tel->grad_for_best_intensity >= consistent_grad1 &&
+      score_sum >= consistent_score_sum)
     return CB2000_NCC_DECISION_MATCH;
 
   if (tel->support_count == 0 &&

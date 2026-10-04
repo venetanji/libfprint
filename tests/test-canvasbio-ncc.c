@@ -164,34 +164,34 @@ test_ncc_classify_matches (void)
   tel.compared_images = 5;
 
   /* 1. Strong match */
-  tel.best_intensity = 0.40;
-  tel.second_intensity = 0.28;
-  tel.mean_top3_intensity = 0.30;
-  tel.grad_for_best_intensity = 0.25;
+  tel.best_intensity = 0.46;
+  tel.second_intensity = 0.35;
+  tel.mean_top3_intensity = 0.35;
+  tel.grad_for_best_intensity = 0.30;
   tel.support_count = 4;
   g_assert_cmpint (cb2000_ncc_classify (&tel), ==, CB2000_NCC_DECISION_MATCH);
 
   /* 2. Medium match */
-  tel.best_intensity = 0.29;
-  tel.second_intensity = 0.21;
-  tel.mean_top3_intensity = 0.22;
-  tel.grad_for_best_intensity = 0.21;
+  tel.best_intensity = 0.43;
+  tel.second_intensity = 0.28;
+  tel.mean_top3_intensity = 0.31;
+  tel.grad_for_best_intensity = 0.28;
   tel.support_count = 2;
   g_assert_cmpint (cb2000_ncc_classify (&tel), ==, CB2000_NCC_DECISION_MATCH);
 
   /* 3. Dominant match (1 strong image, coherent mean/grad) */
-  tel.best_intensity = 0.38;
-  tel.second_intensity = 0.19;
-  tel.mean_top3_intensity = 0.21;
-  tel.grad_for_best_intensity = 0.22;
+  tel.best_intensity = 0.48;
+  tel.second_intensity = 0.18;
+  tel.mean_top3_intensity = 0.24;
+  tel.grad_for_best_intensity = 0.28;
   tel.support_count = 1;
   g_assert_cmpint (cb2000_ncc_classify (&tel), ==, CB2000_NCC_DECISION_MATCH);
 
   /* 4. Cross-sample consistent match */
-  tel.best_intensity = 0.25;
-  tel.second_intensity = 0.24;
-  tel.mean_top3_intensity = 0.23;
-  tel.grad_for_best_intensity = 0.195;
+  tel.best_intensity = 0.43;
+  tel.second_intensity = 0.35;
+  tel.mean_top3_intensity = 0.35;
+  tel.grad_for_best_intensity = 0.28;
   tel.support_count = 3;
   g_assert_cmpint (cb2000_ncc_classify (&tel), ==, CB2000_NCC_DECISION_MATCH);
 }
@@ -222,6 +222,30 @@ test_ncc_classify_rejection_and_nomatch (void)
   tel.mean_top3_intensity = 0.1562;
   tel.grad_for_best_intensity = 0.2362;
   tel.support_count = 1;
+  g_assert_cmpint (cb2000_ncc_classify (&tel), !=, CB2000_NCC_DECISION_MATCH);
+
+  /* Un-enrolled middle finger live telemetry #1 (13:01:28) */
+  tel.best_intensity = 0.3114;
+  tel.second_intensity = 0.2850;
+  tel.mean_top3_intensity = 0.2836;
+  tel.grad_for_best_intensity = 0.2634;
+  tel.support_count = 4;
+  g_assert_cmpint (cb2000_ncc_classify (&tel), !=, CB2000_NCC_DECISION_MATCH);
+
+  /* Un-enrolled middle finger live telemetry #2 (13:05:17) */
+  tel.best_intensity = 0.2405;
+  tel.second_intensity = 0.2114;
+  tel.mean_top3_intensity = 0.2210;
+  tel.grad_for_best_intensity = 0.2410;
+  tel.support_count = 4;
+  g_assert_cmpint (cb2000_ncc_classify (&tel), !=, CB2000_NCC_DECISION_MATCH);
+
+  /* Un-enrolled middle finger live telemetry #3 (13:15:11 - False Accept regression) */
+  tel.best_intensity = 0.3944;
+  tel.second_intensity = 0.3860;
+  tel.mean_top3_intensity = 0.3697;
+  tel.grad_for_best_intensity = 0.2630;
+  tel.support_count = 4;
   g_assert_cmpint (cb2000_ncc_classify (&tel), !=, CB2000_NCC_DECISION_MATCH);
 
   /* Clear no-match (completely different finger) */

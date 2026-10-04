@@ -3620,10 +3620,12 @@ unpack_and_match (FpPrint *print, const guint8 *captured, Cb2000NccTelemetry *te
       tel->mean_top3_intensity = 0.0;
     }
 
-  if (tel->second_intensity < 0.0)
+  if (n_images >= 1)
+    tel->best_intensity = MAX (0.0, top_scores[0]);
+  if (n_images >= 2)
+    tel->second_intensity = MAX (0.0, top_scores[1]);
+  else
     tel->second_intensity = 0.0;
-  if (tel->best_intensity < 0.0)
-    tel->best_intensity = 0.0;
 
   g_message ("[ NCC ] top1=%.4f top2=%.4f mean3=%.4f grad1=%.4f support=%u/%u "
              "mask_thresh=%u min_samples=%u max_shift=%d support_min=%u "
