@@ -569,28 +569,14 @@ cv2_version_lookup (const gchar *text, const gchar *key)
   return NULL;
 }
 
-Cv2FwSupport
-cv2_firmware_enroll_support (const gchar *upgrade_ver)
-{
-  guint64 version;
-
-  if (!upgrade_ver || strlen (upgrade_ver) != 8 ||
-      !g_ascii_string_to_unsigned (upgrade_ver, 16, 0, G_MAXUINT32, &version, NULL))
-    return CV2_FW_UNKNOWN;
-
-  return version >= CV2_FW_MIN_ENROLL ? CV2_FW_OK : CV2_FW_TOO_OLD;
-}
-
 GError *
 cv2_firmware_error (const gchar *upgrade_ver)
 {
   return fpi_device_error_new_msg (FP_DEVICE_ERROR_NOT_SUPPORTED,
-                                   "The reader's ControlVault2 firmware (%s) rejected the "
-                                   "enrollment. Enrolling works with firmware %08x (%s) or "
-                                   "newer: update it with Dell's ControlVault2 Driver and "
-                                   "Firmware package version %s or newer, installed from "
-                                   "Windows.",
+                                   "The reader rejected the enrollment (status 0x24, "
+                                   "ControlVault2 firmware %s). Updating the firmware with "
+                                   "Dell's ControlVault2 Driver and Firmware package version "
+                                   "%s or newer, installed from Windows, may fix this.",
                                    upgrade_ver ? upgrade_ver : "version unknown",
-                                   CV2_FW_MIN_ENROLL, CV2_FW_MIN_ENROLL_NAME,
-                                   CV2_FW_PACKAGE_MIN_NAME);
+                                   CV2_FW_PACKAGE_NAME);
 }

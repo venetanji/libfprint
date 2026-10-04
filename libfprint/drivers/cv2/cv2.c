@@ -853,13 +853,6 @@ cv2_enroll (FpDevice *dev)
 {
   FpiDeviceCv2 *self = FPI_DEVICE_CV2 (dev);
 
-  /* Old firmware rejected commits with empty blocks (0x24, which gives the
-   * firmware error). Try anyway: it may accept the vendor's blocks. */
-  if (cv2_firmware_enroll_support (self->fw_version) == CV2_FW_TOO_OLD)
-    fp_info ("Enrolling with firmware %s, older than %s; if the enrollment fails, "
-             "update the firmware with Dell's ControlVault2 package %s or newer",
-             self->fw_version, CV2_FW_MIN_ENROLL_NAME, CV2_FW_PACKAGE_MIN_NAME);
-
   cv2_start_task (self, enroll_run_state, ENROLL_NUM_STATES, "cv2-enroll",
                   &(Cv2Op){ .enroll = TRUE });
 }
@@ -1245,26 +1238,6 @@ open_version_cb (FpiDeviceCv2   *self,
     {
       fp_info ("Could not read the firmware version: %s", error->message);
       g_clear_error (&error);
-    }
-
-  /* See CV2_FW_MIN_ENROLL for which firmware works and where to get it */
-  switch (cv2_firmware_enroll_support (self->fw_version))
-    {
-    case CV2_FW_TOO_OLD:
-      fp_info ("Firmware %s is older than %08x (%s), the oldest known to enroll; "
-               "enrollment will be tried. If it fails, update the firmware with Dell's "
-               "ControlVault2 package %s or newer. Verify and identify work either way.",
-               self->fw_version, CV2_FW_MIN_ENROLL, CV2_FW_MIN_ENROLL_NAME,
-               CV2_FW_PACKAGE_MIN_NAME);
-      break;
-
-    case CV2_FW_UNKNOWN:
-      fp_info ("Firmware version unknown; enrollment will be tried, and may fail with "
-               "status 0x24 if the firmware is older than %s", CV2_FW_MIN_ENROLL_NAME);
-      break;
-
-    case CV2_FW_OK:
-      break;
     }
 
   fpi_ssm_next_state (ssm);

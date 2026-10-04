@@ -629,30 +629,18 @@ test_version_lookup (void)
 }
 
 static void
-test_firmware_gate (void)
+test_firmware_error (void)
 {
   g_autoptr(GError) old = cv2_firmware_error ("00412001");
-  g_autoptr(GError) older = cv2_firmware_error ("00047026");
   g_autoptr(GError) unknown = cv2_firmware_error (NULL);
 
-  /* Factory firmware seen on a Latitude 7490 and a 7480 */
-  g_assert_cmpint (cv2_firmware_enroll_support ("00412001"), ==, CV2_FW_TOO_OLD);
-  g_assert_cmpint (cv2_firmware_enroll_support ("00047026"), ==, CV2_FW_TOO_OLD);
-  g_assert_cmpint (cv2_firmware_enroll_support ("00412015"), ==, CV2_FW_OK);
-  g_assert_cmpint (cv2_firmware_enroll_support ("00412100"), ==, CV2_FW_OK);
-  g_assert_cmpint (cv2_firmware_enroll_support (NULL), ==, CV2_FW_UNKNOWN);
-  g_assert_cmpint (cv2_firmware_enroll_support (""), ==, CV2_FW_UNKNOWN);
-  g_assert_cmpint (cv2_firmware_enroll_support ("0041201"), ==, CV2_FW_UNKNOWN);
-  g_assert_cmpint (cv2_firmware_enroll_support ("zz412015"), ==, CV2_FW_UNKNOWN);
-
+  /* Name the reader's firmware and the Dell package that updates it */
   g_assert_error (old, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
   g_assert_nonnull (strstr (old->message, "00412001"));
-  g_assert_nonnull (strstr (old->message, "Dell"));
-  /* Name the firmware and the Dell package version that contains it */
-  g_assert_nonnull (strstr (old->message, "4.12.015"));
+  g_assert_nonnull (strstr (old->message, "0x24"));
   g_assert_nonnull (strstr (old->message, "4.12.11.15"));
-  g_assert_nonnull (strstr (older->message, "00047026"));
   g_assert_error (unknown, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
+  g_assert_nonnull (strstr (unknown->message, "version unknown"));
 }
 
 int
@@ -673,7 +661,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/cv2/parse/int-event", test_int_event);
   g_test_add_func ("/cv2/status/classify", test_status_classify);
   g_test_add_func ("/cv2/firmware/version-lookup", test_version_lookup);
-  g_test_add_func ("/cv2/firmware/gate", test_firmware_gate);
+  g_test_add_func ("/cv2/firmware/error", test_firmware_error);
 
   return g_test_run ();
 }
