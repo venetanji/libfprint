@@ -1838,6 +1838,10 @@ fpi_device_configure_wakeup (FpDevice *device, gboolean enabled)
 {
   FpDevicePrivate *priv = fp_device_get_instance_private (device);
 
+  /* The bus and port of a removed device may already belong to another one. */
+  if (priv->is_removed)
+    return;
+
   switch (priv->type)
     {
     case FP_DEVICE_TYPE_USB:
