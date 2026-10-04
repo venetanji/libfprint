@@ -1838,6 +1838,10 @@ fpi_device_configure_wakeup (FpDevice *device, gboolean enabled)
 {
   FpDevicePrivate *priv = fp_device_get_instance_private (device);
 
+  /* The bus and port of a removed device may already belong to another one. */
+  if (priv->is_removed)
+    return;
+
   switch (priv->type)
     {
     case FP_DEVICE_TYPE_USB:
@@ -2008,6 +2012,14 @@ fpi_device_resume_complete (FpDevice *device,
   fpi_device_configure_wakeup (device, FALSE);
 
   task = g_steal_pointer (&priv->suspend_resume_task);
+
+  /* As for actions, return FP_DEVICE_ERROR_REMOVED for a removed device,
+   * whatever the driver reported. */
+  if (priv->is_removed)
+    {
+      g_clear_error (&error);
+      error = fpi_device_error_new (FP_DEVICE_ERROR_REMOVED);
+    }
 
   if (error)
     g_task_return_error (task, error);

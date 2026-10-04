@@ -1042,6 +1042,10 @@ fp_device_suspend_finish (FpDevice     *device,
  * Note that it is not defined when any ongoing operation may return (success or
  * error). You must be ready to handle this before, during or after the
  * resume operation.
+ *
+ * If the device was removed while suspended, the resume completes with
+ * #FP_DEVICE_ERROR_REMOVED; it must still be called so that the device can be
+ * closed.
  */
 void
 fp_device_resume (FpDevice           *device,
@@ -1061,13 +1065,8 @@ fp_device_resume (FpDevice           *device,
       return;
     }
 
-  if (priv->is_removed)
-    {
-      g_task_return_error (task,
-                           fpi_device_error_new (FP_DEVICE_ERROR_REMOVED));
-      return;
-    }
-
+  /* Resume removed devices too: only the driver can finish a suspended
+   * action, and the device cannot be closed while suspended. */
   priv->suspend_resume_task = g_steal_pointer (&task);
 
   fpi_device_resume (device);

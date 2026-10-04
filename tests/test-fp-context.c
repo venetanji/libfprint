@@ -251,6 +251,45 @@ test_context_remove_device_open (void)
 }
 
 static void
+test_context_remove_device_suspended (void)
+{
+  g_autoptr(FptContext) tctx = fpt_context_new_with_virtual_device (FPT_VIRTUAL_DEVICE_IMAGE);
+  g_autoptr(GError) error = NULL;
+
+  tctx->user_data = NULL;
+  g_signal_connect (tctx->fp_context, "device-removed", (GCallback) context_device_removed_cb, tctx);
+  g_signal_connect (tctx->device, "removed", (GCallback) device_removed_cb, tctx);
+
+  fp_device_open_sync (tctx->device, NULL, &error);
+  g_assert_no_error (error);
+
+  fp_device_suspend_sync (tctx->device, NULL, &error);
+  g_assert_no_error (error);
+
+  /* Triggering remove on suspended device. */
+  fpi_device_remove (tctx->device);
+  g_assert_cmpint (GPOINTER_TO_INT (tctx->user_data), ==, DEV_REMOVED_CB);
+
+  fp_device_resume_sync (tctx->device, NULL, &error);
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED);
+  g_clear_error (&error);
+
+  /* The device is no longer suspended, so it can be closed and removed. */
+  fp_device_close_sync (tctx->device, NULL, &error);
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED);
+  g_assert_nonnull (tctx->device);
+  g_assert_cmpint (GPOINTER_TO_INT (tctx->user_data), ==, DEV_REMOVED_CB);
+
+  while (g_main_context_iteration (NULL, FALSE))
+    {
+    }
+  g_assert_null (tctx->device);
+  g_assert_cmpint (GPOINTER_TO_INT (tctx->user_data), ==, CTX_DEVICE_REMOVED_CB);
+
+  fpt_teardown_virtual_device_environment ();
+}
+
+static void
 open_done_cb (GObject *device, GAsyncResult *res, gpointer user_data)
 {
   g_autoptr(GError) error = NULL;
@@ -397,6 +436,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/context/remove-device-open", test_context_remove_device_open);
   g_test_add_func ("/context/remove-device-opening", test_context_remove_device_opening);
   g_test_add_func ("/context/remove-device-active", test_context_remove_device_active);
+  g_test_add_func ("/context/remove-device-suspended", test_context_remove_device_suspended);
 
   return g_test_run ();
 }
