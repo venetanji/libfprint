@@ -48,8 +48,20 @@
 #define STATUS_TIMEOUT 2000
 
 #define MAX_ENROLL_SAMPLES 8
+#define MAX_ENROLL_SAMPLES_SDCP 15
 #define DEFAULT_UID_LEN 28
 #define SUB_FINGER_01 0xFF
+
+/* SDCP (Microsoft Secure Device Connection Protocol) devices */
+#define RTK_DEVICE_SDCP (1 << 0)
+#define SDCP_RANDOM_LEN 32
+#define SDCP_PUBKEY_LEN 65
+#define SDCP_MAC_LEN 32
+#define SDCP_ID_LEN 32
+#define SDCP_CONNECT_LEN (2 + SDCP_RANDOM_LEN + 2 + SDCP_PUBKEY_LEN)
+#define SDCP_CONNECT_RESP_LEN 0x490
+#define SDCP_IDENTIFY_RESP_LEN 0x4A
+#define SDCP_FINGER_BASE 0xF5
 
 #define GET_BULK_CMD_TYPE(val)              ((val & 0xC0) >> 6)
 #define GET_TRANS_DATA_LEN(len_h, len_l)    ((len_h << 8) | len_l)
@@ -117,6 +129,7 @@ typedef enum {
   FP_RTK_VERIFY_CAPTURE,
   FP_RTK_VERIFY_FINISH_CAPTURE,
   FP_RTK_VERIFY_ACCEPT_SAMPLE,
+  FP_RTK_VERIFY_SDCP_NONCE,
   FP_RTK_VERIFY_INDENTIFY_FEATURE,
   FP_RTK_VERIFY_UPDATE_TEMPLATE,
   FP_RTK_VERIFY_CANCEL_CAPTURE,
@@ -133,6 +146,8 @@ typedef enum {
   FP_RTK_INIT_GET_DEVICE_INFO = 0,
   FP_RTK_INIT_SELECT_OS,
   FP_RTK_INIT_GET_ENROLL_NUM,
+  FP_RTK_INIT_SDCP_CONNECT,
+  FP_RTK_INIT_SDCP_CONNECT_RESPONSE,
   FP_RTK_INIT_NUM_STATES,
 } FpRtkInitState;
 
@@ -161,6 +176,15 @@ struct _FpiDeviceRealtek
   gint            pos_index;
   gint            template_num;
   gint            template_len;
+
+  /* SDCP */
+  gboolean sdcp;
+  gpointer sdcp_host_key;            /* EVP_PKEY *, only during connect */
+  guint8   sdcp_host_random[SDCP_RANDOM_LEN];
+  guint8   sdcp_mac_key[SDCP_MAC_LEN];
+  gboolean sdcp_connected;
+  guint8   sdcp_nonce[SDCP_RANDOM_LEN];
+  guint8   sdcp_enroll_nonce[SDCP_RANDOM_LEN];
 };
 
 struct rtk_cmd_bulk
@@ -243,4 +267,35 @@ static struct rtk_cmd_bulk co_select_system = {
 
 static struct rtk_cmd_bulk co_cancel_capture = {
   .cmd = {0x05, 0x07},
+};
+
+static struct rtk_cmd_bulk sdcp_connect = {
+  .cmd = {0x85, 0x01},
+  .data_len = {GET_LEN_L (SDCP_CONNECT_LEN), GET_LEN_H (SDCP_CONNECT_LEN)},
+};
+
+static struct rtk_cmd_bulk sdcp_connect_response = {
+  .cmd = {0x45, 0x02},
+  .data_len = {GET_LEN_L (SDCP_CONNECT_RESP_LEN), GET_LEN_H (SDCP_CONNECT_RESP_LEN)},
+};
+
+static struct rtk_cmd_bulk sdcp_identify_nonce = {
+  .cmd = {0x85, 0x0B},
+  .data_len = {SDCP_RANDOM_LEN},
+};
+
+static struct rtk_cmd_bulk sdcp_identify = {
+  .cmd = {0x45, 0x0C},
+  .param = {0x00, FP_RTK_PURPOSE_IDENTIFY},
+  .data_len = {SDCP_IDENTIFY_RESP_LEN},
+};
+
+static struct rtk_cmd_bulk sdcp_enroll_begin = {
+  .cmd = {0x45, 0x09},
+  .data_len = {SDCP_RANDOM_LEN},
+};
+
+static struct rtk_cmd_bulk sdcp_enroll_commit = {
+  .cmd = {0x85, 0x0A},
+  .data_len = {SDCP_ID_LEN},
 };
