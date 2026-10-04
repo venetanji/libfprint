@@ -119,7 +119,9 @@ struct _FpIdEntry
  * @suspend: Called when an interactive action is running (ENROLL, VERIFY,
  *    IDENTIFY or CAPTURE) and the system is about to go into suspend.
  * @resume: Called to resume an ongoing interactive action after the system has
- *    resumed from suspend.
+ *    resumed from suspend. This is also called if the device was removed while
+ *    suspended; fpi_device_resume_complete() must still be called and the
+ *    action finished (usually with an error, as the device is gone).
  *
  * NOTE: If your driver is image based, then you should subclass #FpImageDevice
  * instead. #FpImageDevice based drivers use a different way of interacting

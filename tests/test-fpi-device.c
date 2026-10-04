@@ -2835,6 +2835,221 @@ test_driver_identify_suspend_while_idle (void)
 }
 
 static void
+on_device_removed (FpDevice *device, guint *removed)
+{
+  *removed += 1;
+}
+
+typedef enum {
+  SUSPEND_REMOVED_RESUME,
+  SUSPEND_REMOVED_CANCEL_RESUME,
+  SUSPEND_RESUME_REMOVED,
+} SuspendRemovedOrder;
+
+/* The fake driver parks the action on suspend like synaptics does: nothing is
+ * pending, so cancelling does not end it, and only resume moves it on. */
+static void
+test_driver_identify_suspend_removed_order (SuspendRemovedOrder order)
+{
+  g_autoptr(FpAutoResetClass) dev_class = auto_reset_device_class ();
+  g_autoptr(MatchCbData) identify_data = g_new0 (MatchCbData, 1);
+  g_autoptr(GCancellable) cancellable = g_cancellable_new ();
+  g_autoptr(GPtrArray) prints = NULL;
+  g_autoptr(FpAutoCloseDevice) device = NULL;
+  g_autoptr(GError) error = NULL;
+  FpiDeviceFake *fake_dev;
+  guint removed = 0;
+
+  device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  fake_dev = FPI_DEVICE_FAKE (device);
+  dev_class->identify = fake_device_stub_identify;
+  g_signal_connect (device, "removed", G_CALLBACK (on_device_removed), &removed);
+
+  prints = make_fake_prints_gallery (device, 5);
+
+  g_assert_true (fp_device_open_sync (device, NULL, NULL));
+
+  fp_device_identify (device, prints, cancellable, NULL, NULL, NULL,
+                      (GAsyncReadyCallback) test_driver_identify_cb, identify_data);
+
+  while (g_main_context_iteration (NULL, FALSE))
+    continue;
+
+  fake_dev->ret_suspend = NULL;
+  fp_device_suspend_sync (device, NULL, &error);
+  g_assert (fake_dev->last_called_function == dev_class->suspend);
+  g_assert_no_error (error);
+
+  if (order == SUSPEND_RESUME_REMOVED)
+    {
+      fake_dev->ret_resume = NULL;
+      fp_device_resume_sync (device, NULL, &error);
+      g_assert (fake_dev->last_called_function == dev_class->resume);
+      g_assert_no_error (error);
+    }
+
+  /* The device goes away, e.g. it re-enumerates on resume */
+  fpi_device_remove (device);
+
+  if (order == SUSPEND_REMOVED_CANCEL_RESUME)
+    {
+      g_cancellable_cancel (cancellable);
+
+      while (g_main_context_iteration (NULL, FALSE))
+        continue;
+
+      g_assert (fake_dev->last_called_function == dev_class->cancel);
+    }
+
+  if (order != SUSPEND_RESUME_REMOVED)
+    {
+      /* Resuming still reaches the driver, so that it can end the action.
+       * Whatever the driver reports, the caller gets FP_DEVICE_ERROR_REMOVED. */
+      fake_dev->ret_resume = fpi_device_error_new (FP_DEVICE_ERROR_PROTO);
+      fp_device_resume_sync (device, NULL, &error);
+      g_assert (fake_dev->last_called_function == dev_class->resume);
+      g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED);
+      g_clear_error (&error);
+    }
+
+  g_assert_false (identify_data->called);
+  g_assert_cmpuint (removed, ==, 0);
+
+  /* The driver fails the action as soon as it touches the device */
+  fpi_device_identify_complete (device, fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+
+  while (g_main_context_iteration (NULL, FALSE))
+    continue;
+
+  g_assert_true (identify_data->called);
+  if (order == SUSPEND_REMOVED_CANCEL_RESUME)
+    g_assert_error (identify_data->error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  else
+    g_assert_error (identify_data->error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED);
+  g_assert_cmpuint (removed, ==, 1);
+
+  g_assert_false (fp_device_close_sync (device, NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED);
+  g_assert_false (fp_device_is_open (device));
+  g_clear_error (&error);
+
+  /* The device is no longer suspended */
+  g_assert_false (fp_device_suspend_sync (device, NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED);
+}
+
+static void
+test_driver_identify_suspend_removed (void)
+{
+  test_driver_identify_suspend_removed_order (SUSPEND_REMOVED_RESUME);
+}
+
+static void
+test_driver_identify_suspend_removed_cancelled (void)
+{
+  test_driver_identify_suspend_removed_order (SUSPEND_REMOVED_CANCEL_RESUME);
+}
+
+static void
+test_driver_identify_suspend_resumed_removed (void)
+{
+  test_driver_identify_suspend_removed_order (SUSPEND_RESUME_REMOVED);
+}
+
+/* While idle, the driver's suspend and resume handlers are never called, so
+ * this covers drivers without suspend support too. */
+static void
+test_driver_identify_suspend_while_idle_removed (void)
+{
+  g_autoptr(FpAutoResetClass) dev_class = auto_reset_device_class ();
+  g_autoptr(FpAutoCloseDevice) device = NULL;
+  g_autoptr(GError) error = NULL;
+  guint removed = 0;
+
+  device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_signal_connect (device, "removed", G_CALLBACK (on_device_removed), &removed);
+
+  g_assert_true (fp_device_open_sync (device, NULL, NULL));
+
+  fp_device_suspend_sync (device, NULL, &error);
+  g_assert_no_error (error);
+
+  fpi_device_remove (device);
+  g_assert_cmpuint (removed, ==, 1);
+
+  fp_device_resume_sync (device, NULL, &error);
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED);
+  g_clear_error (&error);
+
+  /* The device is no longer suspended, so it can be closed */
+  g_assert_false (fp_device_close_sync (device, NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED);
+  g_assert_false (fp_device_is_open (device));
+  g_clear_error (&error);
+
+  g_assert_false (fp_device_suspend_sync (device, NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED);
+}
+
+static void
+fake_device_cancel_identify (FpDevice *device)
+{
+  fpi_device_identify_complete (device,
+                                g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CANCELLED, "Cancelled"));
+}
+
+static void
+test_driver_identify_suspend_unsupported_removed (void)
+{
+  g_autoptr(FpAutoResetClass) dev_class = auto_reset_device_class ();
+  g_autoptr(MatchCbData) identify_data = g_new0 (MatchCbData, 1);
+  g_autoptr(GPtrArray) prints = NULL;
+  g_autoptr(FpAutoCloseDevice) device = NULL;
+  g_autoptr(GError) error = NULL;
+  guint removed = 0;
+
+  dev_class->identify = fake_device_stub_identify;
+  dev_class->cancel = fake_device_cancel_identify;
+  dev_class->suspend = NULL;
+
+  device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_signal_connect (device, "removed", G_CALLBACK (on_device_removed), &removed);
+  prints = make_fake_prints_gallery (device, 1);
+
+  g_assert_true (fp_device_open_sync (device, NULL, NULL));
+
+  fp_device_identify (device, prints, NULL, NULL, NULL, NULL,
+                      (GAsyncReadyCallback) test_driver_identify_cb, identify_data);
+
+  while (g_main_context_iteration (NULL, FALSE))
+    continue;
+
+  /* Without driver support, suspending cancels the action */
+  g_assert_false (fp_device_suspend_sync (device, NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED);
+  g_clear_error (&error);
+
+  g_assert_true (identify_data->called);
+  g_assert_error (identify_data->error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_BUSY);
+
+  fpi_device_remove (device);
+  g_assert_cmpuint (removed, ==, 1);
+
+  g_assert_false (fp_device_resume_sync (device, NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED);
+  g_clear_error (&error);
+
+  /* The device is no longer suspended, so it can be closed */
+  g_assert_false (fp_device_close_sync (device, NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED);
+  g_assert_false (fp_device_is_open (device));
+  g_clear_error (&error);
+
+  g_assert_false (fp_device_suspend_sync (device, NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED);
+}
+
+static void
 test_driver_identify_warmup_cooldown (void)
 {
   g_autoptr(FpAutoResetClass) dev_class = auto_reset_device_class ();
@@ -4155,6 +4370,11 @@ main (int argc, char *argv[])
   g_test_add_func ("/driver/identify/suspend_succeeds", test_driver_identify_suspend_succeeds);
   g_test_add_func ("/driver/identify/suspend_busy_error", test_driver_identify_suspend_busy_error);
   g_test_add_func ("/driver/identify/suspend_while_idle", test_driver_identify_suspend_while_idle);
+  g_test_add_func ("/driver/identify/suspend_removed", test_driver_identify_suspend_removed);
+  g_test_add_func ("/driver/identify/suspend_removed_cancelled", test_driver_identify_suspend_removed_cancelled);
+  g_test_add_func ("/driver/identify/suspend_resumed_removed", test_driver_identify_suspend_resumed_removed);
+  g_test_add_func ("/driver/identify/suspend_while_idle_removed", test_driver_identify_suspend_while_idle_removed);
+  g_test_add_func ("/driver/identify/suspend_unsupported_removed", test_driver_identify_suspend_unsupported_removed);
 
   g_test_add_func ("/driver/identify/warmup_cooldown", test_driver_identify_warmup_cooldown);
 

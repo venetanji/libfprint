@@ -2013,6 +2013,14 @@ fpi_device_resume_complete (FpDevice *device,
 
   task = g_steal_pointer (&priv->suspend_resume_task);
 
+  /* As for actions, return FP_DEVICE_ERROR_REMOVED for a removed device,
+   * whatever the driver reported. */
+  if (priv->is_removed)
+    {
+      g_clear_error (&error);
+      error = fpi_device_error_new (FP_DEVICE_ERROR_REMOVED);
+    }
+
   if (error)
     g_task_return_error (task, error);
   else
