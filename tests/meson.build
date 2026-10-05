@@ -347,7 +347,8 @@ appstreamcli = find_program('appstreamcli', required: false)
 if appstreamcli.found()
     test('metainfo-validate',
         appstreamcli,
-        args: ['validate', metainfo_generator],
+        # Validate metadata without depending on remote websites being reachable.
+        args: ['validate', '--no-net', metainfo_generator],
         depends: metainfo_generator,
         suite: ['data', 'no-valgrind'],
     )
