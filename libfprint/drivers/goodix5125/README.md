@@ -93,6 +93,40 @@ if the entry cannot be written does the learned template replace the
 `fpi-data` of the matched `FpPrint` in memory. The sensor itself stores no
 enrolled templates.
 
+## Power-button frames
+
+The sensor is the power button. When it is pressed with a finger, the MCU
+captures up to three frames by itself, before the host runs: the MCU-state
+reply (`0xae`) then has bit 0 of byte 1 set. The frames are kept for about
+180 s and are dropped when the USB link is suspended, so the device must not
+be runtime-suspended before they are read. They are read after a TLS
+handshake and before any `0x20` capture, which overwrites the first one: each
+`0xd2 00 00` returns the next frame as a TLS record of the normal image size
+(command `0xd2`, length, marker `0xaa`, header, packed image, CRC, `0x88`),
+and the MCU clears the flag after the last. The 4-byte CRC after the image is
+CRC-32/MPEG-2 of the packed image, stored as two big-endian 16-bit halves,
+the lower half first.
+
+The hwdb of libfprint and that of systemd
+(`60-autosuspend-fingerprint-reader.hwdb`) enable autosuspend for 27c6:5125,
+and fprintd opens the device only on the first request, long after it went
+to sleep. Using the frames therefore also needs a udev rule that sorts after
+`60-autosuspend.rules`, e.g. `/etc/udev/rules.d/71-goodix5125-pov.rules`:
+
+```
+ACTION!="remove", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="27c6", ATTR{idProduct}=="5125", ATTR{power/control}="on"
+```
+
+With `GOODIX5125_POWER_BUTTON_UNLOCK=1`, the driver reads the frames at the
+start of the sensor initialization and the first verify or identify tries
+them before waiting for a touch: a match completes the action, anything else
+is not reported and the action waits for a touch as usual. The frames are
+used once, within 10 s of reading them, and are cleared on enrolment and
+close. This is off by default because the driver cannot tell what an action
+is for: for about 180 s after a press that did not suspend the USB link, the
+first verify or identify is answered without a touch, whether it comes from a
+lock screen, sudo, polkit or fprintd's duplicate check before an enrolment.
+
 ## Host pairing and local state
 
 The MCU stores a write-only 102-byte container for its TLS PSK and exposes

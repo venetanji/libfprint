@@ -92,3 +92,42 @@ goodix5125_image_decode_transposed (const guint8 *packed,
 
   return TRUE;
 }
+
+/* CRC-32/MPEG-2 (polynomial 0x04c11db7, MSB first, initial value 0xffffffff,
+ * no final XOR) of the packed image.  The MCU stores it after the image as
+ * two big-endian 16-bit halves, the lower half first.  @packed_len includes
+ * the CRC. */
+gboolean
+goodix5125_image_check_crc (const guint8 *packed,
+                            gsize         packed_len,
+                            GError      **error)
+{
+  const guint8 *crc_bytes;
+  guint32 crc = 0xffffffff;
+  guint32 stored;
+
+  if (!check_buffer (packed, packed_len,
+                     GOODIX5125_IMAGE_PACKED_SIZE + GOODIX5125_IMAGE_CRC_SIZE,
+                     "Packed image with CRC", error))
+    return FALSE;
+
+  crc_bytes = packed + GOODIX5125_IMAGE_PACKED_SIZE;
+  for (gsize i = 0; i < GOODIX5125_IMAGE_PACKED_SIZE; i++)
+    {
+      crc ^= (guint32) packed[i] << 24;
+      for (guint bit = 0; bit < 8; bit++)
+        crc = crc & 0x80000000 ? (crc << 1) ^ 0x04c11db7 : crc << 1;
+    }
+
+  stored = (guint32) crc_bytes[2] << 24 | (guint32) crc_bytes[3] << 16 |
+           (guint32) crc_bytes[0] << 8 | crc_bytes[1];
+  if (crc != stored)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                   "Goodix image CRC is 0x%08x, expected 0x%08x",
+                   crc, stored);
+      return FALSE;
+    }
+
+  return TRUE;
+}

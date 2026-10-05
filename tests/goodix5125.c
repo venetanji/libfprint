@@ -90,6 +90,7 @@ test_protocol_roundtrip (void)
 
   g_assert_false (goodix5125_proto_command_is_supported (0xa4));
   g_assert_true (goodix5125_proto_command_is_supported (0xe0));
+  g_assert_true (goodix5125_proto_command_is_supported (0xd2));
   g_assert_false (goodix5125_proto_command_is_supported (0xf0));
 }
 
@@ -265,6 +266,31 @@ test_image_decode (void)
   g_assert_cmpuint (pixels[1], ==, 1452);
   g_assert_cmpuint (pixels[2], ==, 1607);
   g_assert_cmpuint (pixels[3], ==, 1851);
+}
+
+static void
+test_image_crc (void)
+{
+  g_autoptr(GError) error = NULL;
+  gsize length = GOODIX5125_IMAGE_PACKED_SIZE + GOODIX5125_IMAGE_CRC_SIZE;
+  g_autofree guint8 *packed = g_new (guint8, length);
+
+  /* CRC-32/MPEG-2 0x4407d0f7, stored as the MCU does: d0 f7 44 07 */
+  for (gsize i = 0; i < GOODIX5125_IMAGE_PACKED_SIZE; i++)
+    packed[i] = (i * 7 + (i >> 8)) & 0xff;
+  memcpy (packed + GOODIX5125_IMAGE_PACKED_SIZE,
+          ((const guint8[]){ 0xd0, 0xf7, 0x44, 0x07 }), 4);
+  g_assert_true (goodix5125_image_check_crc (packed, length, &error));
+  g_assert_no_error (error);
+
+  packed[100] ^= 0x01;
+  g_assert_false (goodix5125_image_check_crc (packed, length, &error));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+  g_clear_error (&error);
+  packed[100] ^= 0x01;
+
+  g_assert_false (goodix5125_image_check_crc (packed, length - 1, &error));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
 }
 
 static void
@@ -649,6 +675,7 @@ main (int argc, char **argv)
   g_test_add_func ("/goodix5125/image/decode", test_image_decode);
   g_test_add_func ("/goodix5125/image/decode-transpose",
                    test_image_decode_transpose);
+  g_test_add_func ("/goodix5125/image/crc", test_image_crc);
   g_test_add_func ("/goodix5125/fdt/bases", test_fdt_bases);
   g_test_add_func ("/goodix5125/chicago/calibration-persistence",
                    test_chicago_calibration_persistence);

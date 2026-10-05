@@ -292,7 +292,54 @@ fake_release_interface (GUsbDevice                   *device,
 #define g_usb_device_claim_interface fake_claim_interface
 #define g_usb_device_release_interface fake_release_interface
 
+/* ---------------------------------------------------------------------
+ * Scripted matcher: the power-button tests decide per frame whether it is
+ * unusable, matches nothing or matches the first print.
+ * --------------------------------------------------------------------- */
+
+#include "goodix5125-algo.h"
+
+typedef enum {
+  FAKE_MATCH_RETRY,
+  FAKE_MATCH_NONE,
+  FAKE_MATCH_FIRST,
+} FakeMatch;
+
+static FakeMatch fake_matches[3];   /* GOODIX5125_POV_MAX_FRAMES */
+static guint n_fake_matches;
+static guint n_fake_match_calls;
+
+static gboolean
+fake_algo_match (Goodix5125Algo      *algo,
+                 const guint16        frame[OC_FRAME_PIXELS],
+                 GVariant *const     *prints,
+                 guint                n_prints,
+                 Goodix5125MatchStep *step,
+                 GError             **error)
+{
+  g_assert_cmpuint (n_fake_match_calls, <, n_fake_matches);
+  memset (step, 0, sizeof (*step));
+  step->matched = -1;
+  switch (fake_matches[n_fake_match_calls++])
+    {
+    case FAKE_MATCH_RETRY:
+      step->retry = fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL);
+      break;
+
+    case FAKE_MATCH_NONE:
+      break;
+
+    case FAKE_MATCH_FIRST:
+      step->matched = 0;
+      break;
+    }
+  return TRUE;
+}
+
+#define goodix5125_algo_match fake_algo_match
 #include "drivers/goodix5125/goodix5125.c"
+
+G_STATIC_ASSERT (G_N_ELEMENTS (fake_matches) == GOODIX5125_POV_MAX_FRAMES);
 
 /* ---------------------------------------------------------------------
  * Helpers
@@ -371,6 +418,8 @@ open_device (void)
   FpDevice *device;
 
   fake_reset ();
+  n_fake_matches = 0;
+  n_fake_match_calls = 0;
 
   cls = g_type_class_ref (fpi_device_goodix5125_get_type ());
   cls->type = FP_DEVICE_TYPE_VIRTUAL;
@@ -663,6 +712,185 @@ test_remove_while_suspended (void)
   g_test_assert_expected_messages ();
 }
 
+/* ---------------------------------------------------------------------
+ * Power-button frames
+ * --------------------------------------------------------------------- */
+
+typedef struct
+{
+  gboolean done;
+  gboolean match;
+  FpPrint *print;
+  GError  *error;
+} MatchResult;
+
+static void
+verify_match_cb (GObject      *source_object,
+                 GAsyncResult *result,
+                 gpointer      user_data)
+{
+  MatchResult *res = user_data;
+
+  fp_device_verify_finish (FP_DEVICE (source_object), result, &res->match,
+                           NULL, &res->error);
+  res->done = TRUE;
+}
+
+static void
+identify_match_cb (GObject      *source_object,
+                   GAsyncResult *result,
+                   gpointer      user_data)
+{
+  MatchResult *res = user_data;
+
+  fp_device_identify_finish (FP_DEVICE (source_object), result, &res->print,
+                             NULL, &res->error);
+  res->done = TRUE;
+}
+
+static void
+match_reported_cb (FpDevice *device,
+                   FpPrint  *match,
+                   FpPrint  *print,
+                   gpointer  user_data,
+                   GError   *error)
+{
+  *(gboolean *) user_data = TRUE;
+}
+
+static void
+set_pov_frames (FpDevice *device,
+                gint64    age_us,
+                FakeMatch first,
+                ...)
+{
+  FpDeviceGoodix5125 *self = FPI_DEVICE_GOODIX5125 (device);
+  va_list args;
+  gint result = first;
+
+  va_start (args, first);
+  for (n_fake_matches = 0; result >= 0; n_fake_matches++)
+    {
+      fake_matches[n_fake_matches] = result;
+      result = va_arg (args, gint);
+    }
+  va_end (args);
+
+  self->n_pov_frames = n_fake_matches;
+  for (guint f = 0; f < n_fake_matches; f++)
+    for (guint i = 0; i < OC_FRAME_PIXELS; i++)
+      self->pov_frames[f][i] = 1500 + (i * (f + 3)) % 400;
+  self->pov_time = g_get_monotonic_time () - age_us;
+}
+
+static void
+assert_pov_frames_cleared (FpDevice *device)
+{
+  FpDeviceGoodix5125 *self = FPI_DEVICE_GOODIX5125 (device);
+
+  g_assert_cmpuint (self->n_pov_frames, ==, 0);
+  for (guint f = 0; f < GOODIX5125_POV_MAX_FRAMES; f++)
+    for (guint i = 0; i < OC_FRAME_PIXELS; i++)
+      g_assert_cmpuint (self->pov_frames[f][i], ==, 0);
+}
+
+/* A matching frame completes the verify without a touch, but not before
+ * fp_device_verify () has returned (see pov_match_report_cb ()) */
+static void
+test_pov_frames_verify_match (void)
+{
+  MatchResult verify = { 0 };
+  gboolean reported = FALSE;
+
+  g_autoptr(FpPrint) print = NULL;
+  FpDevice *device = open_device ();
+
+  print = fp_print_new (device);
+  set_pov_frames (device, 0, FAKE_MATCH_RETRY, FAKE_MATCH_NONE,
+                  FAKE_MATCH_FIRST, -1);
+  fp_device_verify (device, print, NULL, match_reported_cb, &reported, NULL,
+                    verify_match_cb, &verify);
+  g_assert_false (reported);
+  iterate_until (&verify.done, NULL);
+  g_assert_true (reported);
+  g_assert_no_error (verify.error);
+  g_assert_true (verify.match);
+  g_assert_cmpuint (n_fake_match_calls, ==, 3);
+  g_assert_cmpuint (fake.commands->len, ==, 0);
+  assert_pov_frames_cleared (device);
+
+  close_device (device);
+}
+
+static void
+test_pov_frames_identify_match (void)
+{
+  g_autoptr(GPtrArray) gallery = g_ptr_array_new_with_free_func (
+    g_object_unref);
+  MatchResult identify = { 0 };
+  FpDevice *device = open_device ();
+
+  g_ptr_array_add (gallery, fp_print_new (device));
+  g_ptr_array_add (gallery, fp_print_new (device));
+  set_pov_frames (device, 0, FAKE_MATCH_FIRST, FAKE_MATCH_NONE, -1);
+  fp_device_identify (device, gallery, NULL, NULL, NULL, NULL,
+                      identify_match_cb, &identify);
+  iterate_until (&identify.done, NULL);
+  g_assert_no_error (identify.error);
+  g_assert_true (identify.print == g_ptr_array_index (gallery, 0));
+  g_assert_cmpuint (n_fake_match_calls, ==, 1);
+  g_assert_cmpuint (fake.commands->len, ==, 0);
+  assert_pov_frames_cleared (device);
+  g_clear_object (&identify.print);
+
+  close_device (device);
+}
+
+/* Frames that are unusable or do not match are not reported: the verify
+ * waits for a touch as without them */
+static void
+test_pov_frames_no_match (void)
+{
+  g_autoptr(GCancellable) cancellable = g_cancellable_new ();
+  Result verify = { 0 };
+  FpDevice *device = open_device ();
+
+  set_pov_frames (device, 0, FAKE_MATCH_RETRY, FAKE_MATCH_NONE, -1);
+  start_verify (device, cancellable, &verify);
+  g_assert_cmpuint (n_fake_match_calls, ==, 2);
+  assert_pov_frames_cleared (device);
+  assert_commands (0, GOODIX5125_COMMAND_FDT_MODE,
+                   GOODIX5125_COMMAND_FDT_DOWN,
+                   GOODIX5125_COMMAND_QUERY_STATE,
+                   GOODIX5125_COMMAND_FDT_DOWN, -1);
+
+  g_cancellable_cancel (cancellable);
+  iterate_until (&verify.done, NULL);
+  g_assert_error (verify.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  g_clear_error (&verify.error);
+  close_device (device);
+}
+
+/* Frames that are too old are dropped without a match */
+static void
+test_pov_frames_expired (void)
+{
+  g_autoptr(GCancellable) cancellable = g_cancellable_new ();
+  Result verify = { 0 };
+  FpDevice *device = open_device ();
+
+  set_pov_frames (device, GOODIX5125_POV_VALID_US + 1, FAKE_MATCH_FIRST, -1);
+  start_verify (device, cancellable, &verify);
+  g_assert_cmpuint (n_fake_match_calls, ==, 0);
+  assert_pov_frames_cleared (device);
+
+  g_cancellable_cancel (cancellable);
+  iterate_until (&verify.done, NULL);
+  g_assert_error (verify.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  g_clear_error (&verify.error);
+  close_device (device);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -683,6 +911,14 @@ main (int argc, char **argv)
                    test_unplug_before_removal);
   g_test_add_func ("/goodix5125/device/remove-while-suspended",
                    test_remove_while_suspended);
+  g_test_add_func ("/goodix5125/device/pov-frames-verify-match",
+                   test_pov_frames_verify_match);
+  g_test_add_func ("/goodix5125/device/pov-frames-identify-match",
+                   test_pov_frames_identify_match);
+  g_test_add_func ("/goodix5125/device/pov-frames-no-match",
+                   test_pov_frames_no_match);
+  g_test_add_func ("/goodix5125/device/pov-frames-expired",
+                   test_pov_frames_expired);
   result = g_test_run ();
   g_clear_pointer (&fake.commands, g_array_unref);
   return result;

@@ -66,6 +66,18 @@
  * identify() before giving up. */
 #define GOODIX5125_VERIFY_CAPTURE_ATTEMPTS 3
 
+/* Frames the MCU captured when the power button was pressed with a finger,
+ * see fetch_pov_frames ().  Off unless GOODIX5125_POWER_BUTTON_UNLOCK=1: the
+ * driver cannot tell what an action is for, so for about 180 s after a press
+ * that did not suspend the USB link, the first verify or identify (a lock
+ * screen, but also sudo, polkit, or fprintd's duplicate check before an
+ * enrolment) is answered without a touch. */
+#define GOODIX5125_POWER_BUTTON_UNLOCK_ENV "GOODIX5125_POWER_BUTTON_UNLOCK"
+#define GOODIX5125_POV_MAX_FRAMES 3
+#define GOODIX5125_POV_MARKER 0xaa
+#define GOODIX5125_POV_VALID_US (10 * G_USEC_PER_SEC)
+#define GOODIX5125_MCU_STATE_POV_VALID 0x01
+
 /* Bootstrap thresholds used only until cmd 0x36 measures this sensor's live
  * no-finger FDT baseline. Subsequent waits use dynamically derived values. */
 static const guint8 default_fdt_base[GOODIX5125_FDT_BASE_SIZE] = {
@@ -104,6 +116,12 @@ struct _FpDeviceGoodix5125
   gboolean          enroll_pair;
   gboolean          operation_active;
   gboolean          initialized;
+
+  /* Power-button frames, fetched by initialize_sensor () */
+  gboolean pov_enabled;
+  guint16  pov_frames[GOODIX5125_POV_MAX_FRAMES][OC_FRAME_PIXELS];
+  guint    n_pov_frames;
+  gint64   pov_time;
 
   /* Current enroll/verify/identify action state. */
   Goodix5125Action action_kind;
@@ -198,8 +216,10 @@ command_no_reply (FpDeviceGoodix5125 *self,
   return result != NULL;
 }
 
+/* @pov_valid (may be NULL): the MCU holds power-button frames */
 static gboolean
 query_state (FpDeviceGoodix5125 *self,
+             gboolean           *pov_valid,
              GError            **error)
 {
   static const guint8 payload[] = { 0x55 };
@@ -208,17 +228,20 @@ query_state (FpDeviceGoodix5125 *self,
     self, GOODIX5125_COMMAND_QUERY_STATE, payload, sizeof (payload), TRUE,
     GOODIX5125_OUTER_FLAG_MESSAGE, GOODIX5125_CHECKSUM_NORMAL,
     COMMAND_TIMEOUT_MS, error);
+  const guint8 *data;
   gsize length = 0;
 
   if (!response)
     return FALSE;
-  g_bytes_get_data (response, &length);
+  data = g_bytes_get_data (response, &length);
   if (length < 14)
     {
       g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
                            "Goodix MCU-state reply is shorter than 14 bytes");
       return FALSE;
     }
+  if (pov_valid)
+    *pov_valid = (data[1] & GOODIX5125_MCU_STATE_POV_VALID) != 0;
   return TRUE;
 }
 
@@ -560,8 +583,9 @@ establish_tls (FpDeviceGoodix5125 *self,
   return FALSE;
 }
 
+/* The whole image record: header, packed image, CRC and trailer */
 static GBytes *
-decrypt_packed (FpDeviceGoodix5125 *self,
+decrypt_record (FpDeviceGoodix5125 *self,
                 GBytes             *encrypted,
                 GError            **error)
 {
@@ -581,8 +605,21 @@ decrypt_packed (FpDeviceGoodix5125 *self,
                    plaintext->len, TLS_PLAINTEXT_SIZE);
       return NULL;
     }
-  return g_bytes_new (plaintext->data + TLS_HEADER_SIZE,
-                      plaintext->len - TLS_HEADER_SIZE - TLS_TRAILER_SIZE);
+  return g_byte_array_free_to_bytes (g_steal_pointer (&plaintext));
+}
+
+static GBytes *
+decrypt_packed (FpDeviceGoodix5125 *self,
+                GBytes             *encrypted,
+                GError            **error)
+{
+  g_autoptr(GBytes) record = decrypt_record (self, encrypted, error);
+
+  if (!record)
+    return NULL;
+  return g_bytes_new_from_bytes (record, TLS_HEADER_SIZE,
+                                 TLS_PLAINTEXT_SIZE - TLS_HEADER_SIZE -
+                                 TLS_TRAILER_SIZE);
 }
 
 static GBytes *
@@ -599,6 +636,119 @@ capture_packed (FpDeviceGoodix5125 *self,
   if (!encrypted)
     return NULL;
   return decrypt_packed (self, encrypted, error);
+}
+
+static gboolean
+fetch_pov_frame (FpDeviceGoodix5125 *self,
+                 guint16             frame[OC_FRAME_PIXELS],
+                 GError            **error)
+{
+  static const guint8 payload[] = { 0x00, 0x00 };
+
+  g_autoptr(GBytes) encrypted = command_sync (
+    self, GOODIX5125_COMMAND_GET_POV_IMAGE, payload, sizeof (payload), TRUE,
+    GOODIX5125_OUTER_FLAG_TLS, GOODIX5125_CHECKSUM_NORMAL,
+    COMMAND_TIMEOUT_MS, error);
+  g_autoptr(GBytes) record = NULL;
+  const guint8 *data;
+
+  if (!encrypted || !(record = decrypt_record (self, encrypted, error)))
+    return FALSE;
+
+  /* command, length (marker to trailer), 0xaa marker ... 0x88 trailer */
+  data = g_bytes_get_data (record, NULL);
+  if (data[0] != GOODIX5125_COMMAND_GET_POV_IMAGE ||
+      read_le16 (data + 1) != TLS_PLAINTEXT_SIZE - 3 ||
+      data[3] != GOODIX5125_POV_MARKER ||
+      data[TLS_PLAINTEXT_SIZE - 1] != 0x88)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                   "Goodix 0x%02x record is not a power-button frame",
+                   data[0]);
+      return FALSE;
+    }
+  if (!goodix5125_image_check_crc (data + TLS_HEADER_SIZE,
+                                   GOODIX5125_IMAGE_PACKED_SIZE +
+                                   GOODIX5125_IMAGE_CRC_SIZE, error))
+    return FALSE;
+  return goodix5125_image_decode_transposed (data + TLS_HEADER_SIZE,
+                                             GOODIX5125_IMAGE_PACKED_SIZE,
+                                             frame, OC_FRAME_PIXELS, error);
+}
+
+static void
+clear_pov_frames (FpDeviceGoodix5125 *self)
+{
+  self->n_pov_frames = 0;
+  memset (self->pov_frames, 0, sizeof (self->pov_frames));
+}
+
+/* A press of the power button with a finger makes the MCU capture up to three
+ * frames, kept for about 180 s or until the USB link is suspended.  They are
+ * fetched after a TLS handshake and before any GET_IMAGE (the capture
+ * overwrites the first one), one per 0xd2; the MCU clears the flag after the
+ * last.  The normal initialization follows with a new TLS session, so a
+ * failure here only loses the frames. */
+static void
+fetch_pov_frames (FpDeviceGoodix5125 *self)
+{
+  static const guint8 unlock_payload[] = { 0x00, 0x00 };
+
+  g_autoptr(GError) error = NULL;
+  guint8 psk[GOODIX5125_PSK_SIZE] = { 0 };
+  gboolean pov_valid = FALSE;
+  gboolean tls_requested = FALSE;
+
+  /* Frames of an earlier initialization that failed stay until they are
+   * used or expire: the MCU no longer has them. */
+  if (!self->pov_enabled ||
+      !query_state (self, &pov_valid, &error) || !pov_valid)
+    goto out;
+
+  clear_pov_frames (self);
+  if (goodix5125_pairing_load_psk (self->psk_path, psk, &error) !=
+      GOODIX5125_PSK_STATE_FOUND)
+    goto out;
+  tls_requested = TRUE;
+  if (!establish_tls (self, psk, &error))
+    goto out;
+
+  self->pov_time = g_get_monotonic_time ();
+  while (self->n_pov_frames < GOODIX5125_POV_MAX_FRAMES)
+    {
+      if (self->n_pov_frames > 0 &&
+          (!query_state (self, &pov_valid, &error) || !pov_valid))
+        break;
+      if (!fetch_pov_frame (self, self->pov_frames[self->n_pov_frames],
+                            &error))
+        break;
+      self->n_pov_frames++;
+    }
+
+out:
+  OPENSSL_cleanse (psk, sizeof (psk));
+  if (self->n_pov_frames > 0)
+    fp_info ("%u power-button frame(s)%s%s", self->n_pov_frames,
+             error ? ", then: " : "", error ? error->message : "");
+  else if (error)
+    fp_warn ("power-button frames not fetched: %s", error->message);
+  if (error)
+    {
+      /* The libfprint transfer helpers need an error location */
+      g_autoptr(GError) ignored = NULL;
+
+      /* a late image record must not reach the next command */
+      if (!goodix5125_usb_drain_sync (FP_DEVICE (self), NOP_TIMEOUT_MS,
+                                      &ignored))
+        g_clear_error (&ignored);
+      /* 0xd0 locks the MCU until 0xd4, also after a failed handshake */
+      if (tls_requested &&
+          !command_no_reply (self, GOODIX5125_COMMAND_TLS_ESTABLISHED,
+                             unlock_payload, sizeof (unlock_payload),
+                             &ignored))
+        fp_dbg ("TLS unlock after the failed fetch: %s", ignored->message);
+    }
+  g_clear_pointer (&self->tls, goodix5125_tls_free);
 }
 
 static gboolean
@@ -624,8 +774,14 @@ initialize_sensor (FpDeviceGoodix5125 *self,
 
   fp_dbg ("starting volatile ChicagoHS initialization");
   if (!goodix5125_usb_drain_sync (FP_DEVICE (self), NOP_TIMEOUT_MS, error) ||
-      !goodix5125_usb_nop_sync (FP_DEVICE (self), NOP_TIMEOUT_MS, error) ||
-      !command_no_reply (self, GOODIX5125_COMMAND_ENABLE,
+      !goodix5125_usb_nop_sync (FP_DEVICE (self), NOP_TIMEOUT_MS, error))
+    goto out;
+
+  /* before the reset and the configuration: whether they keep the frames
+   * is unknown */
+  fetch_pov_frames (self);
+
+  if (!command_no_reply (self, GOODIX5125_COMMAND_ENABLE,
                          enable_payload, sizeof (enable_payload), error) ||
       !goodix5125_usb_nop_sync (FP_DEVICE (self), NOP_TIMEOUT_MS, error) ||
       !reset_sensor (self, error))
@@ -710,7 +866,7 @@ initialize_sensor (FpDeviceGoodix5125 *self,
   data = g_bytes_get_data (response, &length);
   if (length < 1 || data[0] != 1 || !establish_tls (self, psk, error) ||
       !goodix5125_usb_nop_sync (FP_DEVICE (self), NOP_TIMEOUT_MS, error) ||
-      !query_state (self, error))
+      !query_state (self, NULL, error))
     goto out;
 
   fp_dbg ("TLS-PSK session established");
@@ -860,6 +1016,17 @@ save_algo_state (FpDeviceGoodix5125 *self)
 }
 
 static void
+clear_match_result (FpDeviceGoodix5125 *self)
+{
+  self->match_attempt = 0;
+  self->match_exhausted_bad_quality = FALSE;
+  self->match_decided = FALSE;
+  self->match_verify_result = FPI_MATCH_FAIL;
+  self->match_identify_match = NULL;
+  g_clear_pointer (&self->match_updated, g_variant_unref);
+}
+
+static void
 reset_action_state (FpDeviceGoodix5125 *self)
 {
   if (self->action_kind == GOODIX5125_ACTION_ENROLL && self->algo)
@@ -869,12 +1036,7 @@ reset_action_state (FpDeviceGoodix5125 *self)
   self->enroll_complete = FALSE;
   g_clear_object (&self->match_template);
   g_clear_pointer (&self->match_gallery, g_ptr_array_unref);
-  self->match_attempt = 0;
-  self->match_exhausted_bad_quality = FALSE;
-  self->match_decided = FALSE;
-  self->match_verify_result = FPI_MATCH_FAIL;
-  self->match_identify_match = NULL;
-  g_clear_pointer (&self->match_updated, g_variant_unref);
+  clear_match_result (self);
   self->cycle_should_continue = FALSE;
   g_clear_error (&self->cycle_error);
 }
@@ -922,12 +1084,7 @@ cycle_park (FpDeviceGoodix5125 *self,
 
   if (!finish && !self->cycle_error)
     {
-      self->match_attempt = 0;
-      self->match_exhausted_bad_quality = FALSE;
-      self->match_decided = FALSE;
-      self->match_verify_result = FPI_MATCH_FAIL;
-      self->match_identify_match = NULL;
-      g_clear_pointer (&self->match_updated, g_variant_unref);
+      clear_match_result (self);
       self->cycle_should_continue = TRUE;
     }
 
@@ -1103,6 +1260,64 @@ match_frame (FpDeviceGoodix5125 *self,
   goodix5125_match_step_clear (&step);
   self->match_decided = TRUE;
   self->cycle_should_continue = FALSE;
+}
+
+/* The power-button frames are tried before the first touch: a match ends the
+ * action at once.  Anything else (no match, low quality, an openchicago
+ * error) is not reported: the action waits for a touch as usual, so the
+ * frames never cost the user an attempt.  Returns TRUE on a match. */
+static gboolean
+match_pov_frames (FpDeviceGoodix5125 *self)
+{
+  gboolean matched = FALSE;
+
+  if (self->n_pov_frames == 0)
+    return FALSE;
+  if (g_get_monotonic_time () - self->pov_time > GOODIX5125_POV_VALID_US)
+    {
+      fp_dbg ("power-button frames expired");
+      clear_pov_frames (self);
+      return FALSE;
+    }
+
+  for (guint i = 0; i < self->n_pov_frames && !matched; i++)
+    {
+      match_frame (self, self->pov_frames[i]);
+      matched = !self->cycle_error && self->match_decided &&
+                (self->action_kind == GOODIX5125_ACTION_VERIFY ?
+                 self->match_verify_result == FPI_MATCH_SUCCESS :
+                 self->match_identify_match != NULL);
+      fp_info ("power-button frame %u/%u: %s", i + 1, self->n_pov_frames,
+               matched ? "match" :
+               self->cycle_error ? self->cycle_error->message :
+               self->match_decided ? "no match" : "not usable");
+      if (!matched)
+        {
+          g_clear_error (&self->cycle_error);
+          clear_match_result (self);
+          self->cycle_should_continue = FALSE;
+        }
+    }
+
+  /* one use only, and no raw biometric data left behind */
+  clear_pov_frames (self);
+  return matched;
+}
+
+/* A match is reported only after the verify or identify vfunc has returned:
+ * fprintd answers VerifyStart right after starting the action, and its
+ * clients drop any result that reaches them before that answer. */
+static void
+pov_match_report_cb (FpDevice *device,
+                     gpointer  user_data)
+{
+  FpDeviceGoodix5125 *self = FPI_DEVICE_GOODIX5125 (device);
+  GError *error = NULL;
+
+  if (g_cancellable_set_error_if_cancelled (fpi_device_get_cancellable (device),
+                                            &error))
+    set_cycle_error (self, error);
+  finish_action (self);
 }
 
 static void
@@ -1604,6 +1819,7 @@ goodix5125_open (FpDevice *device)
   g_autofree gchar *state_path = NULL;
   g_autofree gchar *learned_dir = NULL;
   const gchar *pair = NULL;
+  const gchar *pov = NULL;
   GError *error = NULL;
 
   /* Device emulation (umockdev tests) starts from an empty host state in a
@@ -1624,6 +1840,7 @@ goodix5125_open (FpDevice *device)
     {
       directory = state_directory ();
       pair = g_getenv (GOODIX5125_ENROLL_PAIR_ENV);
+      pov = g_getenv (GOODIX5125_POWER_BUTTON_UNLOCK_ENV);
     }
 
   g_free (self->psk_path);
@@ -1642,9 +1859,11 @@ goodix5125_open (FpDevice *device)
                             emulation ? NULL : GOODIX5125_LEARNED_DIR_ENV,
                             GOODIX5125_LEARNED_DIR_NAME);
   self->enroll_pair = !(pair && g_strcmp0 (pair, "0") == 0);
+  self->pov_enabled = g_strcmp0 (pov, "1") == 0;
   fp_dbg ("state %s, learned templates %s, PSK %s, "
-          "enrolment pairs %s", state_path, learned_dir, self->psk_path,
-          self->enroll_pair ? "on" : "off");
+          "enrolment pairs %s, power-button unlock %s", state_path,
+          learned_dir, self->psk_path, self->enroll_pair ? "on" : "off",
+          self->pov_enabled ? "on" : "off");
 
   g_clear_pointer (&self->algo, goodix5125_algo_free);
   self->algo = goodix5125_algo_new (state_path);
@@ -1681,6 +1900,7 @@ goodix5125_close (FpDevice *device)
   self->suspend_state = GOODIX5125_SUSPEND_NONE;
   save_algo_state (self);
   self->initialized = FALSE;
+  clear_pov_frames (self);
   g_clear_pointer (&self->tls, goodix5125_tls_free);
   g_clear_pointer (&self->algo, goodix5125_algo_free);
   clear_emulation_dir (self);
@@ -1706,6 +1926,7 @@ goodix5125_enroll (FpDevice *device)
 
   reset_action_state (self);
   self->action_kind = GOODIX5125_ACTION_ENROLL;
+  clear_pov_frames (self);   /* an enrolment needs deliberate touches */
   begin_wait_for_finger (self);
 }
 
@@ -1727,7 +1948,10 @@ goodix5125_verify (FpDevice *device)
   reset_action_state (self);
   self->action_kind = GOODIX5125_ACTION_VERIFY;
   self->match_template = g_object_ref (print);
-  begin_wait_for_finger (self);
+  if (match_pov_frames (self))
+    fpi_device_add_timeout (device, 0, pov_match_report_cb, NULL, NULL);
+  else
+    begin_wait_for_finger (self);
 }
 
 static void
@@ -1756,7 +1980,10 @@ goodix5125_identify (FpDevice *device)
   reset_action_state (self);
   self->action_kind = GOODIX5125_ACTION_IDENTIFY;
   self->match_gallery = g_ptr_array_ref (gallery);
-  begin_wait_for_finger (self);
+  if (match_pov_frames (self))
+    fpi_device_add_timeout (device, 0, pov_match_report_cb, NULL, NULL);
+  else
+    begin_wait_for_finger (self);
 }
 
 /* fprintd releases a device whose action fails, and libfprint refuses to
@@ -1860,6 +2087,7 @@ fpi_device_goodix5125_finalize (GObject *object)
   FpDeviceGoodix5125 *self = FPI_DEVICE_GOODIX5125 (object);
 
   reset_action_state (self);
+  clear_pov_frames (self);
   g_clear_object (&self->wait_cancellable);
   g_clear_pointer (&self->tls, goodix5125_tls_free);
   g_clear_pointer (&self->algo, goodix5125_algo_free);
