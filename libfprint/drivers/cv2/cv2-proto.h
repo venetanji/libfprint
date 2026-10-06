@@ -88,6 +88,8 @@ typedef enum {
   CV2_STATUS_OK              = 0x00,
   CV2_STATUS_NO_TEMPLATE     = 0x1b,
   CV2_STATUS_FW_TOO_OLD      = 0x24,
+  CV2_STATUS_NO_OBJECT_ENTRY = 0x25,  /* no free entry for a stored object */
+  CV2_STATUS_NO_FLASH        = 0x28,  /* no flash space for a stored object */
   CV2_STATUS_NO_TEMPLATES    = 0x47,
   CV2_STATUS_SAMPLE_REJECTED = 0x59,
   CV2_STATUS_CAPTURE_PENDING = 0x85,

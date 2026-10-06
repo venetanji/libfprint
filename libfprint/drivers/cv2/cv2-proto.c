@@ -612,6 +612,20 @@ cv2_status_classify (guint16 cmd, guint32 status, GError **error)
       return CV2_OUTCOME_ERROR;
     }
 
+  /* The chip keeps up to 200 objects of every kind (keys, certificates,
+   * templates) in its flash; per Broadcom's Citadel SDK, a commit that finds
+   * no free entry or no space fails with one of these. Not yet seen on a
+   * reader. */
+  if (cmd == CV2_CMD_ENROLL_COMMIT &&
+      (status == CV2_STATUS_NO_OBJECT_ENTRY || status == CV2_STATUS_NO_FLASH))
+    {
+      g_propagate_error (error,
+                         fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_FULL,
+                                                   "The reader's storage is full (status 0x%02x)",
+                                                   status));
+      return CV2_OUTCOME_ERROR;
+    }
+
   /* A handle that is not (or no longer) on the chip, e.g. deleted */
   if ((cmd == CV2_CMD_DELETE || cmd == CV2_CMD_MATCH) && status == CV2_STATUS_NO_TEMPLATE)
     {
