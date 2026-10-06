@@ -99,9 +99,10 @@ static const char SENSOR_RESET_REQ[] =
   "0100000038000000820040000200000000000000000000000000000000000000"
   "00000000000000000c000000000000000400000000000000";
 
-/* Enumerate, as the probe tool sent it (cvtool enum-hashes --hashes app-user) */
+/* Enumerate, from the tests/cv2 recording (its own session) */
+#define ENUMERATE_SESSION 0x14019e6c
 static const char ENUMERATE_REQ[] =
-  "010000006800000071004004020000008c9c0114000000000000000000000000"
+  "010000006800000071004004020000006c9e0114000000000000000000000000"
   "00000000000000003c0000000000000004000000140000000000000014000000"
   "9f1b5ac067d8f50cfc3fe375602a36021850c646000000000400000007000000"
   "0300000000040000";
@@ -159,13 +160,16 @@ static const char CANCEL_REPLY[] =
   "010000002c000000680040050200000000000000000000000000000000000000"
   "000000000000000000000000";
 
+/* Built from the recorded reply's layout: no recording lists nothing */
 static const char ENUMERATE_EMPTY_REPLY[] =
-  "010000003400000071004005020000008c9c0114000000000000000000000000"
+  "010000003400000071004005020000006c9e0114000000000000000000000000"
   "0000000000000000080000000300000000000000";
 
+/* From the tests/cv2 recording: six templates */
 static const char ENUMERATE_REPLY[] =
-  "010000003c00000071004005020000008c9c0114000000000000000000000000"
-  "0000000000000000100000000300000008000000c06ce60066384a00";
+  "010000004c00000071004005020000006c9e0114000000000000000000000000"
+  "0000000000000000200000000300000018000000c06ce6005cf45a00630e1100"
+  "5295e800dc465e00f5b7c700";
 
 static const char VERSION_REPLY[] =
   "0100000050030000390040010200000000000000000000000000000000000000"
@@ -244,7 +248,7 @@ test_build_requests (void)
   assert_message (cv2_build_delete (SESSION, 0x001dbdae), DELETE_REQ);
   assert_message (cv2_build_simple (CV2_CMD_GET_VERSION), VERSION_REQ);
   assert_message (cv2_build_simple (CV2_CMD_SENSOR_RESET), SENSOR_RESET_REQ);
-  assert_message (cv2_build_enumerate (SESSION), ENUMERATE_REQ);
+  assert_message (cv2_build_enumerate (ENUMERATE_SESSION), ENUMERATE_REQ);
 }
 
 static GByteArray *
@@ -382,9 +386,9 @@ test_parse_enumerate (void)
   g_assert_no_error (error);
   templates = cv2_reply_get_templates (two, &error);
   g_assert_no_error (error);
-  g_assert_cmpuint (templates->len, ==, 2);
+  g_assert_cmpuint (templates->len, ==, 6);
   g_assert_cmphex (g_array_index (templates, guint32, 0), ==, 0x00e66cc0);
-  g_assert_cmphex (g_array_index (templates, guint32, 1), ==, 0x004a3866);
+  g_assert_cmphex (g_array_index (templates, guint32, 5), ==, 0x00c7b7f5);
 }
 
 static Cv2Reply *
@@ -589,7 +593,7 @@ test_getters_reject_wrong_shape (void)
 
   /* Template list that is not a whole number of handles */
   msg = hex_array (ENUMERATE_REPLY);
-  msg->data[PARAM0_LEN] = 6;
+  msg->data[PARAM0_LEN] = 22;  /* padded to the 24 bytes there */
   listed = parse_array (msg, CV2_CMD_ENUMERATE, &error);
   g_assert_no_error (error);
   templates = cv2_reply_get_templates (listed, &error);

@@ -84,8 +84,21 @@ print('>>> Identify: press RIGHT THUMB (not enrolled)')
 match, _ = d.identify_sync(gallery)
 assert match is None
 
+def listed(stored, p):
+    return any(s.equal(p) for s in stored)
+
+
+# The reader may hold other prints too (e.g. the recording user's own)
+print('listing the prints on the reader')
+stored = d.list_prints_sync()
+assert listed(stored, p_right) and listed(stored, p_left)
+
 print('deleting the left print on the reader only')
 d.delete_print_sync(p_left)
+
+print('the deleted print is no longer listed')
+stored = d.list_prints_sync()
+assert listed(stored, p_right) and not listed(stored, p_left)
 
 # fprintd still has the left print. The reader fails a match whose list
 # holds a missing template; the driver must still find the right print.
