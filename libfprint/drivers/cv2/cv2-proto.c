@@ -36,6 +36,17 @@
 #define CV2_MATCH_ARG1 0x48
 #define CV2_MATCH_ARG2 0x53e2
 
+/* The session's app and user IDs, as Dell's Linux drivers send them */
+#define CV2_APP_ID "myAppID"
+#define CV2_USER_ID "myUserID"
+
+/* Enumerate: templates record the SHA-1 of the enrolling session's app ID
+ * and user ID, as declared at open (without the app ID's NUL) */
+#define CV2_OWNER_HASH_LEN 20
+#define CV2_OBJECT_FINGERPRINT 7
+/* Room for 256 handles */
+#define CV2_ENUMERATE_BUF_LEN 1024
+
 /* Padding after a parameter's data */
 #define CV2_PAD(len) ((4 - (len) % 4) % 4)
 
@@ -62,6 +73,7 @@ cmd_flags (Cv2Command cmd)
     case CV2_CMD_ENROLL_DISCARD:
     case CV2_CMD_ENROLL_COMMIT:
     case CV2_CMD_ENROLL_BEGIN:
+    case CV2_CMD_ENUMERATE:
       return 0x0440;
     }
 
@@ -141,8 +153,8 @@ cv2_build_open_session (void)
   GByteArray *msg = msg_new (CV2_CMD_OPEN_SESSION, 0);
 
   msg_add_u32 (msg, CV2_OPEN_ARG);
-  msg_add_param (msg, CV2_PARAM_STRING, 7, "myAppID", 8);
-  msg_add_param (msg, CV2_PARAM_STRING, 8, "myUserID", 8);
+  msg_add_param (msg, CV2_PARAM_STRING, strlen (CV2_APP_ID), CV2_APP_ID, sizeof (CV2_APP_ID));
+  msg_add_param (msg, CV2_PARAM_STRING, strlen (CV2_USER_ID), CV2_USER_ID, strlen (CV2_USER_ID));
   msg_add_param (msg, CV2_PARAM_STRING, 0, NULL, 0);
   return msg_finish (msg);
 }
@@ -238,6 +250,36 @@ cv2_build_delete (guint32 session, guint32 template_id)
   msg_add_u32 (msg, template_id);
   msg_add_param (msg, CV2_PARAM_BLOCK, sizeof (authorization),
                  authorization, sizeof (authorization));
+  return msg_finish (msg);
+}
+
+/*
+ * Lists the fingerprint templates this driver's sessions own: those enrolled
+ * here or by Dell's Linux driver (same app and user IDs), not those of other
+ * systems, e.g. Windows Hello on the same laptop. The arguments are the byte
+ * length of a list of owner hashes, the list (our one hash), the object type
+ * and the size offered for the reply. The session is only in the header.
+ *
+ * The first argument must be that length: the chip walks its storage once
+ * per hash, so a large value with nothing to list keeps it busy until it is
+ * powered off.
+ */
+GByteArray *
+cv2_build_enumerate (guint32 session)
+{
+  g_autoptr(GChecksum) sha1 = g_checksum_new (G_CHECKSUM_SHA1);
+  guint8 owner_hash[CV2_OWNER_HASH_LEN];
+  gsize hash_len = sizeof (owner_hash);
+  GByteArray *msg = msg_new (CV2_CMD_ENUMERATE, session);
+
+  g_checksum_update (sha1, (const guchar *) CV2_APP_ID, strlen (CV2_APP_ID));
+  g_checksum_update (sha1, (const guchar *) CV2_USER_ID, strlen (CV2_USER_ID));
+  g_checksum_get_digest (sha1, owner_hash, &hash_len);
+
+  msg_add_u32 (msg, sizeof (owner_hash));
+  msg_add_param (msg, CV2_PARAM_VALUE, sizeof (owner_hash), owner_hash, sizeof (owner_hash));
+  msg_add_u32 (msg, CV2_OBJECT_FINGERPRINT);
+  msg_add_param (msg, CV2_PARAM_BUFFER, CV2_ENUMERATE_BUF_LEN, NULL, 0);
   return msg_finish (msg);
 }
 
@@ -484,6 +526,42 @@ cv2_reply_get_match (const Cv2Reply *reply,
   *matched = value == 1;
   *template_id = FP_READ_UINT32_LE (handle->data);
   return TRUE;
+}
+
+/* The handles fill the buffer parameter, 4 bytes each; it is empty (3:0)
+ * when the chip holds none. Returns an array of guint32. */
+GArray *
+cv2_reply_get_templates (const Cv2Reply *reply, GError **error)
+{
+  const Cv2Param *param = get_param (reply, 0, CV2_PARAM_BUFFER, ANY_LEN, error);
+  GArray *templates;
+
+  if (!param)
+    return NULL;
+
+  if (param->len % 4 != 0)
+    {
+      set_proto_error (error, "Template list of %u bytes is not a list of handles", param->len);
+      return NULL;
+    }
+
+  /* A full buffer may have dropped handles, and fprintd deletes stored
+   * prints missing from the list */
+  if (param->len >= CV2_ENUMERATE_BUF_LEN)
+    {
+      set_proto_error (error, "Template list fills the %u bytes offered", param->len);
+      return NULL;
+    }
+
+  templates = g_array_sized_new (FALSE, FALSE, sizeof (guint32), param->len / 4);
+  for (guint32 i = 0; i < param->len; i += 4)
+    {
+      guint32 template_id = FP_READ_UINT32_LE (param->data + i);
+
+      g_array_append_val (templates, template_id);
+    }
+
+  return templates;
 }
 
 gchar *

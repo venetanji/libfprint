@@ -23,7 +23,10 @@
  * (Broadcom BCM5880, USB 0a5c:5834). Only interface 0 is used; the
  * smart-card interfaces are left alone.
  *
- * The protocol was worked out from USB captures of the reader only.
+ * The protocol was worked out from USB captures of the reader. The command
+ * that lists stored templates (enumerate) appears in no capture: its
+ * arguments come from Broadcom's public Citadel SDK (Apache-2.0), checked by
+ * probing the reader.
  *
  * Security: templates are stored and matched inside the chip, and no
  * fingerprint images or templates cross USB. The plaintext interface used
@@ -56,7 +59,8 @@
 typedef struct
 {
   /* Inputs */
-  GArray  *templates;          /* verify, identify: guint32 handles to match */
+  GArray  *templates;          /* verify, identify: guint32 handles to match;
+                                * list: the handles found */
   guint32  delete_id;          /* delete: the handle to delete */
   gboolean enroll;             /* enroll: begin the enrollment before each capture */
 
@@ -333,6 +337,32 @@ log_failure (const char *step, GError *error)
   g_clear_error (&error);
 }
 
+/* ---- Prints ----
+ *
+ * A print stores the chip's template handle as "(u)".
+ */
+
+static void
+cv2_print_set_template (FpPrint *print, guint32 template_id)
+{
+  fpi_print_set_type (print, FPI_PRINT_RAW);
+  fpi_print_set_device_stored (print, TRUE);
+  g_object_set (print, "fpi-data", g_variant_new ("(u)", template_id), NULL);
+}
+
+static gboolean
+cv2_print_get_template (FpPrint *print, guint32 *template_id)
+{
+  g_autoptr(GVariant) data = NULL;
+
+  g_object_get (print, "fpi-data", &data, NULL);
+  if (!data || !g_variant_check_format_string (data, "(u)", FALSE))
+    return FALSE;
+
+  g_variant_get (data, "(u)", template_id);
+  return TRUE;
+}
+
 /* ---- Operation lifecycle ----
  *
  * Each operation opens a chip session, runs, and closes it. If it fails or
@@ -376,7 +406,13 @@ cv2_task_complete (FpiDeviceCv2 *self, GError *error)
   FpDevice *dev = FP_DEVICE (self);
   FpiDeviceAction action = fpi_device_get_current_action (dev);
   guint32 enrolled_id = self->op.enrolled_id;
+
+  g_autoptr(GArray) listed = NULL;
+  g_autoptr(GPtrArray) prints = NULL;
   FpPrint *print;
+
+  if (action == FPI_DEVICE_ACTION_LIST)
+    listed = g_steal_pointer (&self->op.templates);
 
   cv2_op_clear (&self->op);
   fpi_device_report_finger_status (dev, FP_FINGER_STATUS_NONE);
@@ -390,9 +426,7 @@ cv2_task_complete (FpiDeviceCv2 *self, GError *error)
         }
 
       fpi_device_get_enroll_data (dev, &print);
-      fpi_print_set_type (print, FPI_PRINT_RAW);
-      fpi_print_set_device_stored (print, TRUE);
-      g_object_set (print, "fpi-data", g_variant_new ("(u)", enrolled_id), NULL);
+      cv2_print_set_template (print, enrolled_id);
       fpi_device_enroll_complete (dev, g_object_ref (print), NULL);
     }
   else if (action == FPI_DEVICE_ACTION_VERIFY)
@@ -418,6 +452,23 @@ cv2_task_complete (FpiDeviceCv2 *self, GError *error)
   else if (action == FPI_DEVICE_ACTION_DELETE)
     {
       fpi_device_delete_complete (dev, error);
+    }
+  else if (action == FPI_DEVICE_ACTION_LIST)
+    {
+      if (error)
+        {
+          fpi_device_list_complete (dev, NULL, error);
+          return;
+        }
+
+      prints = g_ptr_array_new_full (listed->len, g_object_unref);
+      for (guint i = 0; i < listed->len; i++)
+        {
+          print = fp_print_new (dev);
+          cv2_print_set_template (print, g_array_index (listed, guint32, i));
+          g_ptr_array_add (prints, g_object_ref_sink (print));
+        }
+      fpi_device_list_complete (dev, g_steal_pointer (&prints), NULL);
     }
   else
     {
@@ -877,20 +928,6 @@ enum {
   MATCH_NUM_STATES,
 };
 
-/* Prints store the chip's template handle as "(u)". */
-static gboolean
-cv2_print_get_template (FpPrint *print, guint32 *template_id)
-{
-  g_autoptr(GVariant) data = NULL;
-
-  g_object_get (print, "fpi-data", &data, NULL);
-  if (!data || !g_variant_check_format_string (data, "(u)", FALSE))
-    return FALSE;
-
-  g_variant_get (data, "(u)", template_id);
-  return TRUE;
-}
-
 static FpPrint *
 match_print_at (FpiDeviceCv2 *self, guint pos)
 {
@@ -1191,6 +1228,72 @@ cv2_delete (FpDevice *dev)
                   &(Cv2Op){ .delete_id = template_id });
 }
 
+/* ---- List ----
+ *
+ * Lists the fingerprint templates enrolled with this driver's session IDs,
+ * which Dell's Linux drivers share, and not those of other owners (e.g.
+ * Windows Hello on the same laptop), so fprintd never deletes those. When
+ * the reader is full, fprintd may delete listed templates it has no print
+ * for, e.g. from Dell's driver or another Linux install. The reader doesn't
+ * say which finger a template is for.
+ */
+
+enum {
+  LIST_OPEN_SESSION,
+  LIST_ENUMERATE,
+  LIST_CLOSE_SESSION,
+  LIST_NUM_STATES,
+};
+
+static void
+list_enumerate_cb (FpiDeviceCv2   *self,
+                   FpiSsm         *ssm,
+                   Cv2Outcome      outcome,
+                   const Cv2Reply *reply,
+                   GError         *error)
+{
+  if (!error)
+    self->op.templates = cv2_reply_get_templates (reply, &error);
+
+  if (error)
+    {
+      fpi_ssm_mark_failed (ssm, error);
+      return;
+    }
+
+  fp_info ("The reader holds %u of our templates", self->op.templates->len);
+  fpi_ssm_next_state (ssm);
+}
+
+static void
+list_run_state (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceCv2 *self = FPI_DEVICE_CV2 (dev);
+
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case LIST_OPEN_SESSION:
+      cv2_cmd (self, ssm, cv2_build_open_session (), open_session_cb);
+      break;
+
+    case LIST_ENUMERATE:
+      cv2_cmd (self, ssm, cv2_build_enumerate (self->op.session), list_enumerate_cb);
+      break;
+
+    case LIST_CLOSE_SESSION:
+      cv2_cmd_always (self, ssm, cv2_build_close_session (self->op.session), close_session_cb);
+      break;
+    }
+}
+
+static void
+cv2_list (FpDevice *dev)
+{
+  FpiDeviceCv2 *self = FPI_DEVICE_CV2 (dev);
+
+  cv2_start_task (self, list_run_state, LIST_NUM_STATES, "cv2-list", &(Cv2Op){ 0 });
+}
+
 /* ---- Device open and close ----
  *
  * Opening reads the firmware version and resets the sensor. A reader that
@@ -1358,9 +1461,7 @@ fpi_device_cv2_class_init (FpiDeviceCv2Class *klass)
   dev_class->verify = cv2_verify_identify;
   dev_class->identify = cv2_verify_identify;
   dev_class->delete = cv2_delete;
+  dev_class->list = cv2_list;
 
   fpi_device_class_auto_initialize_features (dev_class);
-  /* Prints live on the chip, but it can't list them; fprintd's storage is
-   * the source of truth. */
-  dev_class->features |= FP_DEVICE_FEATURE_STORAGE;
 }

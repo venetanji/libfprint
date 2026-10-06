@@ -79,6 +79,7 @@ typedef enum {
   CV2_CMD_ENROLL_SAMPLE  = 0x6c,
   CV2_CMD_ENROLL_DISCARD = 0x6d,
   CV2_CMD_ENROLL_COMMIT  = 0x6e,
+  CV2_CMD_ENUMERATE      = 0x71,
   CV2_CMD_SENSOR_RESET   = 0x82,
   CV2_CMD_ENROLL_BEGIN   = 0x8a,
 } Cv2Command;
@@ -143,6 +144,7 @@ GByteArray *cv2_build_match (guint32        session,
                              guint          n_templates);
 GByteArray *cv2_build_delete (guint32 session,
                               guint32 template_id);
+GByteArray *cv2_build_enumerate (guint32 session);
 
 /* Replies and interrupt messages */
 gboolean cv2_int_event_parse (const guint8 *buf,
@@ -174,6 +176,8 @@ gboolean cv2_reply_get_match (const Cv2Reply *reply,
                               gboolean       *matched,
                               guint32        *template_id,
                               GError        **error);
+GArray *cv2_reply_get_templates (const Cv2Reply *reply,
+                                 GError        **error);
 gchar *cv2_reply_get_version_text (const Cv2Reply *reply,
                                    GError        **error);
 

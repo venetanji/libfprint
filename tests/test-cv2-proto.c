@@ -20,6 +20,7 @@
 
 #include <string.h>
 
+#include "fpi-byte-utils.h"
 #include "fpi-device.h"
 #include "cv2-proto.h"
 
@@ -98,6 +99,13 @@ static const char SENSOR_RESET_REQ[] =
   "0100000038000000820040000200000000000000000000000000000000000000"
   "00000000000000000c000000000000000400000000000000";
 
+/* Enumerate, as the probe tool sent it (cvtool enum-hashes --hashes app-user) */
+static const char ENUMERATE_REQ[] =
+  "010000006800000071004004020000008c9c0114000000000000000000000000"
+  "00000000000000003c0000000000000004000000140000000000000014000000"
+  "9f1b5ac067d8f50cfc3fe375602a36021850c646000000000400000007000000"
+  "0300000000040000";
+
 static const char CAPTURE_ID[] = "ac27493d858230b6ace063b560297f594315db27";
 static const char FINAL_ID[] = "593f0a9481c697258513c8a921687629e44542f0";
 
@@ -150,6 +158,14 @@ static const char MATCH_EMPTY_REPLY[] =
 static const char CANCEL_REPLY[] =
   "010000002c000000680040050200000000000000000000000000000000000000"
   "000000000000000000000000";
+
+static const char ENUMERATE_EMPTY_REPLY[] =
+  "010000003400000071004005020000008c9c0114000000000000000000000000"
+  "0000000000000000080000000300000000000000";
+
+static const char ENUMERATE_REPLY[] =
+  "010000003c00000071004005020000008c9c0114000000000000000000000000"
+  "0000000000000000100000000300000008000000c06ce60066384a00";
 
 static const char VERSION_REPLY[] =
   "0100000050030000390040010200000000000000000000000000000000000000"
@@ -228,6 +244,7 @@ test_build_requests (void)
   assert_message (cv2_build_delete (SESSION, 0x001dbdae), DELETE_REQ);
   assert_message (cv2_build_simple (CV2_CMD_GET_VERSION), VERSION_REQ);
   assert_message (cv2_build_simple (CV2_CMD_SENSOR_RESET), SENSOR_RESET_REQ);
+  assert_message (cv2_build_enumerate (SESSION), ENUMERATE_REQ);
 }
 
 static GByteArray *
@@ -345,6 +362,63 @@ test_parse_match (void)
   g_assert_true (cv2_reply_get_match (miss, &matched, &template_id, &error));
   g_assert_false (matched);
   g_assert_cmphex (template_id, ==, 0);
+}
+
+static void
+test_parse_enumerate (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(Cv2Reply) empty = parse_hex (ENUMERATE_EMPTY_REPLY, CV2_CMD_ENUMERATE, &error);
+  g_autoptr(Cv2Reply) two = NULL;
+  g_autoptr(GArray) templates = NULL;
+
+  g_assert_no_error (error);
+  templates = cv2_reply_get_templates (empty, &error);
+  g_assert_no_error (error);
+  g_assert_cmpuint (templates->len, ==, 0);
+  g_clear_pointer (&templates, g_array_unref);
+
+  two = parse_hex (ENUMERATE_REPLY, CV2_CMD_ENUMERATE, &error);
+  g_assert_no_error (error);
+  templates = cv2_reply_get_templates (two, &error);
+  g_assert_no_error (error);
+  g_assert_cmpuint (templates->len, ==, 2);
+  g_assert_cmphex (g_array_index (templates, guint32, 0), ==, 0x00e66cc0);
+  g_assert_cmphex (g_array_index (templates, guint32, 1), ==, 0x004a3866);
+}
+
+static Cv2Reply *
+parse_enumerate_of_len (guint32 list_len, GError **error)
+{
+  g_autoptr(GByteArray) msg = hex_array (ENUMERATE_EMPTY_REPLY);
+
+  g_byte_array_set_size (msg, msg->len + list_len);
+  memset (msg->data + msg->len - list_len, 0, list_len);
+  FP_WRITE_UINT32_LE (msg->data + CV2_HDR_LEN, msg->len);
+  FP_WRITE_UINT32_LE (msg->data + CV2_HDR_PARAMS_LEN, msg->len - CV2_HEADER_LEN);
+  FP_WRITE_UINT32_LE (msg->data + CV2_HEADER_LEN + 4, list_len);
+  return parse_array (msg, CV2_CMD_ENUMERATE, error);
+}
+
+/* A list that fills the buffer offered may be truncated: refuse it, since
+ * fprintd deletes stored prints missing from the list */
+static void
+test_parse_enumerate_full (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(Cv2Reply) almost = parse_enumerate_of_len (1020, &error);
+  g_autoptr(Cv2Reply) full = NULL;
+  g_autoptr(GArray) templates = NULL;
+
+  g_assert_no_error (error);
+  templates = cv2_reply_get_templates (almost, &error);
+  g_assert_no_error (error);
+  g_assert_cmpuint (templates->len, ==, 255);
+
+  full = parse_enumerate_of_len (1024, &error);
+  g_assert_no_error (error);
+  g_assert_null (cv2_reply_get_templates (full, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
 }
 
 static void
@@ -475,10 +549,12 @@ test_getters_reject_wrong_shape (void)
   g_autoptr(Cv2Reply) start = parse_hex (CAPTURE_START_REPLY, CV2_CMD_CAPTURE_START, NULL);
   g_autoptr(Cv2Reply) open = parse_hex (OPEN_REPLY, CV2_CMD_OPEN_SESSION, NULL);
   g_autoptr(Cv2Reply) hit = NULL;
+  g_autoptr(Cv2Reply) listed = NULL;
   g_autoptr(GByteArray) msg = NULL;
   gboolean matched;
   guint32 value;
   gchar *text;
+  GArray *templates;
 
   /* 0:20 where 0:4 is expected */
   g_assert_false (cv2_reply_get_session (start, &value, &error));
@@ -501,6 +577,23 @@ test_getters_reject_wrong_shape (void)
   msg->data[PARAM0_DATA] = 2;
   hit = parse_array (msg, CV2_CMD_MATCH, NULL);
   g_assert_false (cv2_reply_get_match (hit, &matched, &value, &error));
+  assert_proto_error (error);
+  g_clear_error (&error);
+  g_clear_pointer (&msg, g_byte_array_unref);
+
+  /* Not a buffer parameter */
+  templates = cv2_reply_get_templates (open, &error);
+  g_assert_null (templates);
+  assert_proto_error (error);
+  g_clear_error (&error);
+
+  /* Template list that is not a whole number of handles */
+  msg = hex_array (ENUMERATE_REPLY);
+  msg->data[PARAM0_LEN] = 6;
+  listed = parse_array (msg, CV2_CMD_ENUMERATE, &error);
+  g_assert_no_error (error);
+  templates = cv2_reply_get_templates (listed, &error);
+  g_assert_null (templates);
   assert_proto_error (error);
 }
 
@@ -653,6 +746,8 @@ main (int argc, char *argv[])
   g_test_add_func ("/cv2/parse/capture-and-samples", test_parse_capture_and_samples);
   g_test_add_func ("/cv2/parse/commit-trailing-byte", test_parse_commit_with_trailing_byte);
   g_test_add_func ("/cv2/parse/match", test_parse_match);
+  g_test_add_func ("/cv2/parse/enumerate", test_parse_enumerate);
+  g_test_add_func ("/cv2/parse/enumerate-full", test_parse_enumerate_full);
   g_test_add_func ("/cv2/parse/header-only", test_parse_header_only);
   g_test_add_func ("/cv2/parse/version", test_parse_version);
   g_test_add_func ("/cv2/parse/malformed", test_parse_malformed);

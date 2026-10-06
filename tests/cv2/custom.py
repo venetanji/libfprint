@@ -24,7 +24,7 @@ assert d.has_feature(FPrint.DeviceFeature.VERIFY)
 assert d.has_feature(FPrint.DeviceFeature.IDENTIFY)
 assert d.has_feature(FPrint.DeviceFeature.STORAGE)
 assert d.has_feature(FPrint.DeviceFeature.STORAGE_DELETE)
-assert not d.has_feature(FPrint.DeviceFeature.STORAGE_LIST)
+assert d.has_feature(FPrint.DeviceFeature.STORAGE_LIST)
 assert not d.has_feature(FPrint.DeviceFeature.STORAGE_CLEAR)
 assert not d.has_feature(FPrint.DeviceFeature.DUPLICATES_CHECK)
 
