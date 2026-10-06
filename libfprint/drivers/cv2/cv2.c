@@ -849,7 +849,7 @@ enroll_commit_cb (FpiDeviceCv2   *self,
                   const Cv2Reply *reply,
                   GError         *error)
 {
-  /* 0x24: the firmware rejected the commit; name its version */
+  /* 0x24: the firmware rejected the commit's attributes; name its version */
   if (g_error_matches (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_SUPPORTED))
     {
       g_clear_error (&error);

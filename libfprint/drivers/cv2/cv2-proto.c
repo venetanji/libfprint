@@ -606,7 +606,7 @@ cv2_status_classify (guint16 cmd, guint32 status, GError **error)
   if (cmd == CV2_CMD_MATCH && status == CV2_STATUS_NO_TEMPLATES)
     return CV2_OUTCOME_NO_MATCH;
 
-  if (cmd == CV2_CMD_ENROLL_COMMIT && status == CV2_STATUS_FW_TOO_OLD)
+  if (cmd == CV2_CMD_ENROLL_COMMIT && status == CV2_STATUS_BAD_ATTRIBUTES)
     {
       g_propagate_error (error, cv2_firmware_error (NULL));
       return CV2_OUTCOME_ERROR;
@@ -665,8 +665,9 @@ GError *
 cv2_firmware_error (const gchar *upgrade_ver)
 {
   return fpi_device_error_new_msg (FP_DEVICE_ERROR_NOT_SUPPORTED,
-                                   "The reader rejected the enrollment (status 0x24, "
-                                   "ControlVault2 firmware %s). Updating the firmware with "
+                                   "The reader rejected the new template's storage attributes "
+                                   "(status 0x24, ControlVault2 firmware %s). Updating the "
+                                   "firmware with "
                                    "Dell's ControlVault2 Driver and Firmware package version "
                                    "%s or newer, installed from Windows, may fix this.",
                                    upgrade_ver ? upgrade_ver : "version unknown",

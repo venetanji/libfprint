@@ -51,7 +51,9 @@
  *
  * - 00047026 (4.7.26, 2017; factory, Latitude 7480) and 00412001 (4.12.001;
  *   factory, Latitude 7490): every enrollment commit sent with empty
- *   attribute and authorization blocks failed with 0x24.
+ *   attribute and authorization blocks failed with 0x24, which Broadcom's
+ *   Citadel SDK names CV_OBJECT_ATTRIBUTES_INVALID: the empty block lacks
+ *   the attribute that says where to store the template.
  * - With the vendor's blocks (cv2_build_enroll_commit ()), 00412001 enrolls,
  *   matches and deletes (Precision 3520). 00047026 is untested with them.
  * - 00412015 (4.12.015, built Aug 2025): works either way.
@@ -87,7 +89,7 @@ typedef enum {
 typedef enum {
   CV2_STATUS_OK              = 0x00,
   CV2_STATUS_NO_TEMPLATE     = 0x1b,
-  CV2_STATUS_FW_TOO_OLD      = 0x24,
+  CV2_STATUS_BAD_ATTRIBUTES  = 0x24,
   CV2_STATUS_NO_OBJECT_ENTRY = 0x25,  /* no free entry for a stored object */
   CV2_STATUS_NO_FLASH        = 0x28,  /* no flash space for a stored object */
   CV2_STATUS_NO_TEMPLATES    = 0x47,
