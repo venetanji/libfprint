@@ -64,6 +64,7 @@ drivers_tests = {
     'focaltech_moc-6553': {},
     'mafpmoc': {},
     'secugen': {},
+    'goodix5125': { 'timeout': 120 },
 }
 
 if get_option('introspection')
@@ -377,6 +378,81 @@ foreach test_name: unit_tests
         },
     )
 endforeach
+
+if 'goodix5125' in drivers
+    goodix5125_test = executable('test-goodix5125',
+        sources: [
+            'goodix5125.c',
+            '../libfprint/drivers/goodix5125/goodix5125-proto.c',
+            '../libfprint/drivers/goodix5125/goodix5125-calib.c',
+            '../libfprint/drivers/goodix5125/goodix5125-fdt.c',
+            '../libfprint/drivers/goodix5125/goodix5125-image.c',
+            '../libfprint/drivers/goodix5125/goodix5125-pairing.c',
+            '../libfprint/drivers/goodix5125/goodix5125-usb.c',
+            '../libfprint/drivers/goodix5125/chicago/openchicago.c',
+            '../libfprint/drivers/goodix5125/chicago/goodix-chicago-calibration.c',
+            '../libfprint/drivers/goodix5125/chicago/goodix-chicago-enrollment.c',
+            '../libfprint/drivers/goodix5125/chicago/goodix-chicago-feature.c',
+            '../libfprint/drivers/goodix5125/chicago/goodix-chicago-late-rejection.c',
+            '../libfprint/drivers/goodix5125/chicago/goodix-chicago-match.c',
+            '../libfprint/drivers/goodix5125/chicago/goodix-chicago-preprocess.c',
+            '../libfprint/drivers/goodix5125/chicago/goodix-chicago-runtime.c',
+            '../libfprint/drivers/goodix5125/chicago/goodix-chicago-template.c',
+        ],
+        include_directories: include_directories('../libfprint/drivers/goodix5125'),
+        dependencies: [libfprint_private_dep],
+        c_args: common_cflags,
+    )
+    test('goodix5125',
+        goodix5125_test,
+        suite: ['unit-tests'],
+        env: envs,
+    )
+
+    goodix5125_device_test = executable('test-goodix5125-device',
+        sources: [
+            'goodix5125-device.c',
+            '../libfprint/drivers/goodix5125/goodix5125-algo.c',
+            '../libfprint/drivers/goodix5125/goodix5125-proto.c',
+            '../libfprint/drivers/goodix5125/goodix5125-calib.c',
+            '../libfprint/drivers/goodix5125/goodix5125-fdt.c',
+            '../libfprint/drivers/goodix5125/goodix5125-image.c',
+            '../libfprint/drivers/goodix5125/goodix5125-pairing.c',
+            '../libfprint/drivers/goodix5125/goodix5125-tls.c',
+            '../libfprint/drivers/goodix5125/chicago/openchicago.c',
+            '../libfprint/drivers/goodix5125/chicago/goodix-chicago-calibration.c',
+            '../libfprint/drivers/goodix5125/chicago/goodix-chicago-enrollment.c',
+            '../libfprint/drivers/goodix5125/chicago/goodix-chicago-feature.c',
+            '../libfprint/drivers/goodix5125/chicago/goodix-chicago-late-rejection.c',
+            '../libfprint/drivers/goodix5125/chicago/goodix-chicago-match.c',
+            '../libfprint/drivers/goodix5125/chicago/goodix-chicago-preprocess.c',
+            '../libfprint/drivers/goodix5125/chicago/goodix-chicago-runtime.c',
+            '../libfprint/drivers/goodix5125/chicago/goodix-chicago-template.c',
+        ],
+        include_directories: include_directories('../libfprint/drivers/goodix5125'),
+        dependencies: [libfprint_private_dep],
+        c_args: common_cflags,
+    )
+    test('goodix5125-device',
+        goodix5125_device_test,
+        suite: ['unit-tests'],
+        env: envs,
+    )
+
+    goodix5125_tls_test = executable('test-goodix5125-tls',
+        sources: [
+            'goodix5125-tls.c',
+            '../libfprint/drivers/goodix5125/goodix5125-tls.c',
+        ],
+        dependencies: [libfprint_private_dep],
+        c_args: common_cflags,
+    )
+    test('goodix5125-tls',
+        goodix5125_tls_test,
+        suite: ['unit-tests'],
+        env: envs,
+    )
+endif
 
 # Run udev rule generator with fatal warnings
 hwdb_envs = envs
