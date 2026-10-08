@@ -1270,30 +1270,6 @@ fp_enroll_wait_int (FpiDeviceMafpmoc *self)
 }
 
 static void
-fp_empty_cb (FpiDeviceMafpmoc    *self,
-             mafp_cmd_response_t *resp,
-             GError              *error)
-{
-  if (error)
-    {
-      fp_dbg ("error: %s", error->message);
-      g_clear_error (&error);
-    }
-  else
-    {
-      fp_dbg ("result: %d", resp ? resp->result : -1);
-    }
-
-  fpi_ssm_next_state (self->task_ssm);
-}
-
-static void
-mafp_check_empty (FpiDeviceMafpmoc *self)
-{
-  mafp_sensor_cmd (self, MOC_CMD_EMPTY, NULL, 0, fp_empty_cb);
-}
-
-static void
 fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
 {
   FpiDeviceMafpmoc *self = FPI_DEVICE_MAFPMOC (device);
@@ -1305,10 +1281,6 @@ fp_enroll_sm_run_state (FpiSsm *ssm, FpDevice *device)
     {
     case MAFP_ENROLL_PWR_BTN_SHIELD_ON:
       mafp_pwr_btn_shield_on (self, 1);
-      break;
-
-    case MAFP_ENROLL_CHECK_EMPTY:
-      mafp_check_empty (self);
       break;
 
     case MAFP_ENROLL_TEMPLATE_TABLE:
