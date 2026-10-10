@@ -33,7 +33,7 @@ All file access is read-only. The original Windows volume and any saved calibrat
 
 Start with the reader clear. Opening obtains a fresh paired background: three FDT snapshots, two differently flagged background images, the original shifted-word FDT gates and strict cropped image MAD below 200. The free preprocessor additionally rejects an invalid reference range. A finger-covered reference is not an acceptable workaround.
 
-Each contact uses a new authenticated hardware context, the established ten-frame settled capture recipe and the final integrity-checked native 80×64 frame. A current FDT-down event supplies the translated base for a separately armed, checksummed FDT-up event. ACK alone cannot satisfy finger removal. Contact images never pass through the old min/max/resize/invert preview path.
+Each contact uses a new authenticated hardware context, the established ten-frame settled capture recipe and the final integrity-checked native 80×64 frame. After the final validated frame, an acknowledged volatile write restores sensor register `0x022c` to `0x020a` before either removal-arm phase. This restores the Windows image-success-to-FDT transition while leaving the ten-frame burst unchanged; a failed restore aborts the contact. A current FDT-down event supplies the translated base for a separately armed, checksummed FDT-up event. ACK alone cannot satisfy finger removal. Contact images never pass through the old min/max/resize/invert preview path.
 
 Before enrollment, fprintd performs a duplicate-identification capture even when
 no prints are stored. An empty gallery still uses the ordinary capture and
@@ -58,6 +58,13 @@ a newly installed build after a failed open in an older process, restart fprintd
 through the normal local administrator workflow before this test.
 
 Use two ordinary user terminals after that separate administrator step.
+Run exactly one enrollment client, without `sudo`; do not start another sudo
+or authentication operation during the test. The monitor observes this device's
+properties for **all clients**, not just your enrollment process. If guidance
+appears before your intended enrollment starts, or the CLI reports AlreadyInUse,
+stop and identify the other client before attributing a timeout to this test.
+Record the intended CLI's start time and keep its output with the corresponding
+journal interval; monitor guidance alone does not establish who owns capture.
 Terminal 1, from this checkout:
 
 ```sh

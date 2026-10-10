@@ -112,6 +112,19 @@ def main():
         (build / 'psk-reply.inc').write_text(segment(
             source, 'void goodix_receive_preset_psk_read',
             'void goodix_receive_firmware_version'))
+        register = (segment(source, 'static GSource *goodix_add_timeout',
+                            'static void goodix_stop_read_loop') +
+                    segment(source, 'void goodix_reset_state', 'gboolean goodix_dev_deinit') +
+                    segment(source, 'static void goodix_fdt_up_done', 'void goodix_receive_default') +
+                    segment(source, 'static void goodix_receive_ack_full', 'void goodix_receive_data_cb') +
+                    segment(source, 'void goodix_receive_timeout_cb', 'void goodix_start_read_loop') +
+                    segment(source, 'gboolean goodix_send_pack', 'void goodix_send_nop') +
+                    segment(source, 'void goodix_send_write_sensor_register', 'void goodix_send_read_sensor_register'))
+        (build / 'register.inc').write_text(register)
+        run([*real_glib, SOURCE / 'goodix_proto.c',
+             TESTS / 'goodix521d-transport-register.c',
+             *glib_libs, *linker_flags, '-o', build / 'register'])
+        run([build / 'register'])
         for case in ('lifecycle', 'cancel', 'open', 'send', 'psk-reply'):
             run([*real_glib, TESTS / ('goodix521d-transport-' + case + '.c'),
                  *glib_libs, '-lcrypto', *linker_flags, '-o', build / case])

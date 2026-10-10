@@ -40,7 +40,7 @@ acquisition_continue (GoodixAcquisition *self, FpiSsm *ssm)
 #include "goodix-paired-reference.h"
 
 enum { CONTACT_DOWN0, CONTACT_DOWN1, CONTACT_MODE, CONTACT_REGISTER,
-       CONTACT_IMAGE, CONTACT_UP0, CONTACT_UP1, CONTACT_STATES };
+       CONTACT_IMAGE, CONTACT_RESTORE, CONTACT_UP0, CONTACT_UP1, CONTACT_STATES };
 
 static void
 acquisition_complete (FpiSsm *ssm, FpDevice *device, GError *error)
@@ -97,7 +97,7 @@ contact_image (FpDevice *device, guint8 *data, guint16 length, gpointer user_dat
   if (++self->frames < 10)
     fpi_ssm_jump_to_state (ssm, CONTACT_MODE);
   else
-    fpi_ssm_jump_to_state (ssm, CONTACT_UP0);
+    fpi_ssm_jump_to_state (ssm, CONTACT_RESTORE);
 }
 
 typedef struct { GoodixAcquisition *self; FpDevice *device; guint64 generation; } UpOwner;
@@ -164,6 +164,12 @@ contact_run (FpiSsm *ssm, FpDevice *device)
       break;
     case CONTACT_REGISTER:
       goodix_send_write_sensor_register (device,0x022c,(self->otp[23]&0x80)?0x0305:0x030a,contact_register,ssm);
+      break;
+    case CONTACT_RESTORE:
+      /* The GF5298 Windows image-success wrapper restores this register before
+       * returning to FDT arming (RVA 5a2bc/5a2f7). Preserve the established burst,
+       * then require this volatile write's ACK before either UP phase. */
+      goodix_send_write_sensor_register(device,0x022c,0x020a,contact_register,ssm);
       break;
     case CONTACT_UP0:
     case CONTACT_UP1: {

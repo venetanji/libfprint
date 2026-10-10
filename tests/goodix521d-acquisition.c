@@ -17,6 +17,11 @@
 static guint frames,done,up_arms;
 static gboolean event_first,fail_up,cancel_present,cancel_removal;
 static FpFingerStatusFlags current_status;
+static guint restores;
+static guint restore_failure;
+static gboolean restore_acknowledged, hold_restore, cancel_restore, corrupt_last_image, capture_mode;
+static GoodixNoneCallback restore_callback;
+static gpointer restore_data;
 static GError *result_error;
 static GoodixDefaultCallback event_callback;
 static gpointer event_data;
@@ -38,12 +43,25 @@ void mock_goodix_send_mcu_switch_to_fdt_mode(FpDevice *dev,guint8 *data,guint16 
  (void)data;g_assert_cmpuint(length,==,27);g_assert_false(reply);g_assert_null(destroy);cb(dev,NULL,0,user,NULL);
 }
 void mock_goodix_send_write_sensor_register(FpDevice *dev,guint16 address,guint16 value,GoodixNoneCallback cb,gpointer user) {
- g_assert_cmpuint(address,==,0x022c);g_assert_cmpuint(value,==,0x030a);cb(dev,user,NULL);
+ g_assert_cmpuint(address,==,0x022c);
+ if (value==0x020a) {
+   g_assert_cmpuint(frames,==,10);g_assert_cmpuint(up_arms,==,0);
+   g_assert_cmpuint(current_status,==,FP_FINGER_STATUS_NEEDED|FP_FINGER_STATUS_PRESENT);
+   g_assert_cmpuint(++restores,==,1);
+   if (hold_restore) {restore_callback=cb;restore_data=user;return;}
+   if (restore_failure) {
+     cb(dev,user,g_error_new_literal(restore_failure==1?FP_DEVICE_ERROR:G_IO_ERROR,
+        restore_failure==1?FP_DEVICE_ERROR_PROTO:G_IO_ERROR_TIMED_OUT,"synthetic restore failure"));return;
+   }
+   restore_acknowledged=TRUE;
+   if (cancel_restore) goodix_acquisition_cancel(capture);
+ } else g_assert_cmpuint(value,==,(capture_mode?0x0305:0x030a));
+ cb(dev,user,NULL);
 }
 void mock_goodix_tls_read_image(FpDevice *dev,guint8 *data,guint16 length,GoodixImageCallback cb,gpointer user) {
  g_assert_cmpuint(current_status,==,FP_FINGER_STATUS_NEEDED|FP_FINGER_STATUS_PRESENT);
  guint8 *request=data;g_assert_cmpuint(length,==,10);g_assert_cmpuint(request[0],==,0x45);
- guint8 raw[7684]={0};memcpy(raw+7680,"\xb1\x49\xc0\xf0",4);frames++;cb(dev,raw,sizeof raw,user,NULL);
+ guint8 raw[7684]={0};memcpy(raw+7680,"\xb1\x49\xc0\xf0",4);frames++;if(corrupt_last_image && frames==10)raw[7680]^=1;cb(dev,raw,sizeof raw,user,NULL);
 }
 void mock_goodix_wait_fdt_up(FpDevice *dev,guint timeout,GoodixDefaultCallback cb,gpointer data,GDestroyNotify destroy) {
  g_assert_true(dev==test_device);g_assert_cmpuint(timeout,==,30000);g_assert_null(event_callback);
@@ -55,6 +73,7 @@ static void release_event(GError *error) {
  guint8 reply[20]={0,2,255,0};cb(test_device,reply,20,data,error);destroy(data);
 }
 void mock_goodix_send_protocol(FpDevice *dev,guint8 opcode,guint8 *data,guint16 length,GDestroyNotify destroy,gboolean checksum,guint timeout,gboolean reply,GoodixCmdCallback cb,gpointer user) {
+ g_assert_true(restore_acknowledged);g_assert_cmpuint(restores,==,1);
  g_assert_cmpuint(opcode,==,0x34);g_assert_cmpuint(length,==,40);g_assert_null(destroy);g_assert_true(checksum);g_assert_cmpuint(timeout,==,1000);g_assert_false(reply);
  g_assert_cmpuint(data[0],==,0x8e);for(guint i=27;i<40;i++)g_assert_cmpuint(data[i],==,0);
  up_arms++;
@@ -67,13 +86,34 @@ static void acquired(FpDevice *dev,const GxImage *image,gpointer user,GError *er
  goodix_acquisition_free(capture);capture=NULL;
 }
 static void run(gboolean early,gboolean error) {
+ restores=0;restore_acknowledged=FALSE;restore_callback=NULL;restore_data=NULL;
  current_status=FP_FINGER_STATUS_NONE;frames=done=up_arms=0;event_first=early;fail_up=error;g_clear_error(&result_error);
  test_device=g_object_new(FPI_TYPE_DEVICE_FAKE,NULL);
- guint8 otp[64]={0};otp[23]=0x6e;otp[26]=40;otp[33]=41;otp[40]=7;otp[41]=42;otp[42]=43;otp[43]=44;otp[44]=45;otp[45]=46;otp[46]=47;
+ guint8 otp[64]={0};otp[23]=0x6e;otp[26]=40;otp[33]=41;otp[40]=7;otp[41]=42;otp[42]=43;otp[43]=44;otp[44]=45;otp[45]=46;otp[46]=47;if(capture_mode)otp[23]|=0x80;
  capture=goodix_acquisition_new(test_device,otp);goodix_acquisition_start(capture,FALSE,acquired,NULL);
  if(cancel_present) {
    g_assert_cmpuint(frames,==,0);g_assert_cmpuint(up_arms,==,0);g_assert_cmpuint(done,==,1);
    g_assert_error(result_error,G_IO_ERROR,G_IO_ERROR_CANCELLED);g_clear_error(&result_error);g_object_unref(test_device);return;
+ }
+ if (corrupt_last_image) {
+   g_assert_cmpuint(frames,==,10);g_assert_cmpuint(restores,==,0);g_assert_cmpuint(up_arms,==,0);
+   g_assert_cmpuint(done,==,1);g_assert_error(result_error,FP_DEVICE_ERROR,FP_DEVICE_ERROR_PROTO);
+   g_assert_null(event_callback);g_assert_cmpuint(current_status,!=,FP_FINGER_STATUS_PRESENT);
+   g_clear_error(&result_error);g_object_unref(test_device);return;
+ }
+ if (hold_restore) {
+   g_assert_cmpuint(frames,==,10);g_assert_cmpuint(up_arms,==,0);g_assert_cmpuint(done,==,0);
+   g_assert_cmpuint(current_status,==,FP_FINGER_STATUS_NEEDED|FP_FINGER_STATUS_PRESENT);
+   g_assert_nonnull(restore_callback);restore_acknowledged=TRUE;
+   restore_callback(test_device,restore_data,NULL);restore_callback=NULL;restore_data=NULL;
+ }
+ if (restore_failure || cancel_restore) {
+   g_assert_cmpuint(frames,==,10);g_assert_cmpuint(restores,==,1);
+   g_assert_cmpuint(up_arms,==,0);g_assert_cmpuint(done,==,1);g_assert_null(event_callback);
+   if (restore_failure==1)g_assert_error(result_error,FP_DEVICE_ERROR,FP_DEVICE_ERROR_PROTO);
+   else g_assert_error(result_error,G_IO_ERROR,(cancel_restore?G_IO_ERROR_CANCELLED:G_IO_ERROR_TIMED_OUT));
+   g_assert_cmpuint(current_status,!=,FP_FINGER_STATUS_PRESENT);
+   g_clear_error(&result_error);g_object_unref(test_device);return;
  }
  g_assert_cmpuint(frames,==,10);g_assert_cmpuint(up_arms,==,2);
  if(cancel_removal) {
@@ -86,4 +126,9 @@ static void run(gboolean early,gboolean error) {
  if(error)g_assert_error(result_error,G_IO_ERROR,G_IO_ERROR_CANCELLED);else g_assert_no_error(result_error);
  g_clear_error(&result_error);g_object_unref(test_device);
 }
-int main(int argc,char **argv) {g_test_init(&argc,&argv,NULL);run(FALSE,FALSE);run(TRUE,FALSE);run(TRUE,TRUE);cancel_present=TRUE;run(FALSE,FALSE);cancel_present=FALSE;cancel_removal=TRUE;run(FALSE,FALSE);return 0;}
+int main(int argc,char **argv) {g_test_init(&argc,&argv,NULL);run(FALSE,FALSE);run(TRUE,FALSE);run(TRUE,TRUE);cancel_present=TRUE;run(FALSE,FALSE);cancel_present=FALSE;cancel_removal=TRUE;run(FALSE,FALSE);cancel_removal=FALSE;
+ hold_restore=TRUE;run(FALSE,FALSE);hold_restore=FALSE;
+ restore_failure=1;run(FALSE,FALSE);restore_failure=2;run(FALSE,FALSE);restore_failure=0;
+ cancel_restore=TRUE;run(FALSE,FALSE);cancel_restore=FALSE;
+ corrupt_last_image=TRUE;run(FALSE,FALSE);corrupt_last_image=FALSE;
+ capture_mode=TRUE;run(FALSE,FALSE);return 0;}
