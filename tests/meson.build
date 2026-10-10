@@ -49,6 +49,7 @@ drivers_tests = {
     'vfs5011': {},
     'vfs7552': {},
     'goodixmoc': {},
+    'canvasbio': {},
     'nb1010': {},
     'egis0570': {},
     'egismoc': {},
@@ -322,7 +323,16 @@ if 'virtual_image' in drivers
     ]
 endif
 
-unit_tests_deps = { 'fpi-assembling' : [cairo_dep] }
+if 'canvasbio' in drivers
+    unit_tests += [
+        'canvasbio-ncc',
+    ]
+endif
+
+unit_tests_deps = {
+    'fpi-assembling' : [cairo_dep],
+    'canvasbio-ncc' : [declare_dependency(link_with: libfprint_drivers)],
+}
 
 foreach test_name: unit_tests
     if unit_tests_deps.has_key(test_name)
