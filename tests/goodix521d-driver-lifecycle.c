@@ -46,7 +46,6 @@
 #define oc_identify mock_identify
 #define gx_print_envelope_export mock_envelope_export
 #include <glib-object.h>
-GType fpi_device_goodix521d_get_type (void);
 #include "../libfprint/drivers/goodix521d/goodix521d.c"
 
 /* A mutex-protected gate holds a real worker inside an algorithm boundary.

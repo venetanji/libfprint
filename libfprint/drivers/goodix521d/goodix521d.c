@@ -34,6 +34,7 @@ typedef struct _FpiDeviceGoodix521d {
 } FpiDeviceGoodix521d;
 
 typedef FpiDeviceGoodixTlsClass FpiDeviceGoodix521dClass;
+GType fpi_device_goodix521d_get_type (void);
 G_DEFINE_TYPE (FpiDeviceGoodix521d, fpi_device_goodix521d, FPI_TYPE_DEVICE_GOODIXTLS)
 #define SELF(dev) ((FpiDeviceGoodix521d *)(dev))
 

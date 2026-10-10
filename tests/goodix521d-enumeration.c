@@ -5,6 +5,12 @@
 #include <gusb.h>
 #include <stdarg.h>
 #include <json-glib/json-glib.h>
+__typeof__ (g_usb_context_new) __wrap_g_usb_context_new;
+__typeof__ (g_usb_context_set_debug) __wrap_g_usb_context_set_debug;
+__typeof__ (g_usb_context_enumerate) __wrap_g_usb_context_enumerate;
+__typeof__ (g_async_initable_new_async) __wrap_g_async_initable_new_async;
+__typeof__ (g_async_initable_new_finish) __wrap_g_async_initable_new_finish;
+
 GUsbContext *__wrap_g_usb_context_new(GError **error) {
  (void)error;return g_object_new(G_USB_TYPE_CONTEXT,NULL);
 }

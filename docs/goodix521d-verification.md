@@ -41,3 +41,12 @@ The separate `egis_etu905` cancellation-replay failure is being compared against
 unchanged upstream code; it must not be hidden with `--nocheck`. The original
 GitHub run passed 18 targets and skipped 33 fixture-dependent targets, including
 that replay, so its green result did not establish full Arch replay coverage.
+
+The subsequent Arch warning report is addressed with exact prior prototypes,
+explicit loop braces and an idempotent feature-macro definition. The symlink
+input test now asserts successful fixture creation, permissions and symlink
+identity; injecting an `EPERM` failure into `symlink()` correctly fails the test.
+The test-only ctypes normalization helper explicitly declares its void result.
+All-driver compilation passes `--werror`; the complete selected-driver suites
+pass in both ordinary and Arch-style LTO builds. CI enforces warning-free builds.
+The only production change in this cleanup is a GType function declaration.

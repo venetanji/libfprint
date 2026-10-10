@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* Compile the actual paired SSM against an offline transport boundary. */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <gio/gio.h>
 #include <glib/gstdio.h>
 #include <string.h>

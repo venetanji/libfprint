@@ -117,7 +117,7 @@ class Profiles(unittest.TestCase):
   gen=self.lib.goodix_chicago_calibration_generate_for_profile;gen.argtypes=[C.POINTER(C.c_uint16),C.c_uint,C.c_void_p];gen.restype=C.c_void_p
   fn=self.lib.goodix_chicago_preprocessor_new_for_profile;fn.argtypes=[C.c_void_p,C.POINTER(C.c_uint16),C.c_uint,C.c_void_p];fn.restype=C.c_void_p
   payload=gen(ref,17,None);gf=fn(payload,ref,17,None);out=self.Frame();aux=self.Frame()
-  normalize=self.lib.goodix_test_normalize;normalize.argtypes=[C.c_void_p,C.POINTER(C.c_uint16),C.POINTER(C.c_uint16),C.c_int,C.POINTER(C.c_uint16),C.POINTER(C.c_uint16)]
+  normalize=self.lib.goodix_test_normalize;normalize.restype=None;normalize.argtypes=[C.c_void_p,C.POINTER(C.c_uint16),C.POINTER(C.c_uint16),C.c_int,C.POINTER(C.c_uint16),C.POINTER(C.c_uint16)]
   try:
    normalize(gf,raw,ref,0,out,aux)
    self.assertEqual(list(out),[3*(4000-v) for v in raw]);self.assertEqual(list(aux),list(out))

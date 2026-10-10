@@ -4,9 +4,16 @@
 #include "goodix-chicago-calibration.h"
 #include "goodix-chicago-runtime.h"
 #include <string.h>
+__typeof__ (goodix_chicago_runtime_preprocess) __wrap_goodix_chicago_runtime_preprocess;
+
 gboolean __wrap_goodix_chicago_runtime_preprocess(GoodixChicagoPreprocessor *p,const guint16 *raw,gboolean enroll,GoodixChicagoRuntimeFrame *f) {
  (void)p;(void)raw;(void)enroll;memset(f,0,sizeof *f);f->quality=80;f->coverage=100;f->context[4]=100;
- for(guint y=0;y<64;y++)for(guint x=0;x<80;x++)f->enhanced[y*80+x]=((x/5+y/5)%2)?240:10;return TRUE;
+ for (guint y = 0; y < 64; y++) {
+   for (guint x = 0; x < 80; x++) {
+     f->enhanced[y * 80 + x] = ((x / 5 + y / 5) % 2) ? 240 : 10;
+   }
+ }
+ return TRUE;
 }
 int main(void) {
  guint16 base[OC_FRAME_PIXELS];for(guint i=0;i<OC_FRAME_PIXELS;i++)base[i]=1000+(i%7);
