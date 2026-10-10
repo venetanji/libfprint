@@ -6,6 +6,7 @@
 #include <gio/gio.h>
 #include <glib/gstdio.h>
 #include <string.h>
+#include <stdarg.h>
 #include <unistd.h>
 #include "goodix-profile.h"
 
@@ -23,11 +24,23 @@ typedef void (*Reply)(FpDevice *, guint8 *, guint16, gpointer, GError *);
 typedef void (*NoneReply)(FpDevice *, gpointer, GError *);
 #define FPI_DEVICE_GOODIXTLS52XD(dev) (dev)
 #define FP_IMAGE_DEVICE(dev) (dev)
-#define FP_DEVICE_ERROR G_IO_ERROR
+#define FP_DEVICE_ERROR (g_quark_from_static_string("test-fp-device-error"))
 #define FP_DEVICE_ERROR_PROTO G_IO_ERROR_INVALID_DATA
 #define FP_DEVICE_ERROR_NOT_SUPPORTED G_IO_ERROR_NOT_SUPPORTED
 #define GOODIX_TIMEOUT 1000
-#define fp_warn(...) g_test_message(__VA_ARGS__)
+static gchar *last_warning;
+static GString *all_warnings;
+static void test_warn(const gchar *format, ...) G_GNUC_PRINTF(1,2);
+static void test_warn(const gchar *format, ...)
+{
+    va_list args;
+    va_start(args,format);
+    g_free(last_warning);last_warning=g_strdup_vprintf(format,args);
+    va_end(args);
+    if (all_warnings)g_string_append_printf(all_warnings,"%s\n",last_warning);
+    g_test_message("%s",last_warning);
+}
+#define fp_warn(...) test_warn(__VA_ARGS__)
 
 static GError *session_error;
 static guint submissions, completed;
@@ -125,6 +138,9 @@ static void setup(void)
     directory = g_dir_make_tmp("goodix-paired-ssm-XXXXXX", &error);
     g_assert_no_error(error);
     g_setenv("GOODIX_RAW_EXPORT_DIR", directory, TRUE);
+    g_clear_pointer(&last_warning,g_free);
+    if (all_warnings)g_string_free(all_warnings,TRUE);
+    all_warnings=g_string_new(NULL);
     submissions = completed = 0; fail_state = unstable_fdt = -1;
     image_length = 7684;
     memset(raw, 0, sizeof raw);
@@ -143,6 +159,8 @@ static void teardown(void)
     g_dir_close(dir); g_assert_cmpint(rmdir(directory), ==, 0);
     g_clear_pointer(&directory, g_free); g_clear_error(&session_error);
     g_unsetenv("GOODIX_RAW_EXPORT_DIR");
+    g_clear_pointer(&last_warning,g_free);
+    if (all_warnings) { g_string_free(all_warnings,TRUE);all_warnings=NULL; }
 }
 static void run(void)
 {
@@ -178,6 +196,8 @@ static void unstable_f2_stops_before_image2(void)
     g_assert_cmpuint(submissions, ==, 7); g_assert_cmpuint(completed, ==, 0);
     g_assert_error(session_error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
     g_assert_nonnull(strstr(session_error->message, "pair=1/2 max-delta=15 threshold=0"));
+    g_assert_nonnull(strstr(all_warnings->str, "pair=1/2 max-delta=15 threshold=0"));
+    g_assert_nonnull(strstr(last_warning, "domain=fp-device-error-quark domain_id="));
     teardown();
 }
 static void unstable_f3_rejects_completion(void)
@@ -186,6 +206,8 @@ static void unstable_f3_rejects_completion(void)
     g_assert_cmpuint(submissions, ==, 12); g_assert_cmpuint(completed, ==, 0);
     g_assert_error(session_error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
     g_assert_nonnull(strstr(session_error->message, "pair=2/3 max-delta=15 threshold=0"));
+    g_assert_nonnull(strstr(all_warnings->str, "pair=2/3 max-delta=15 threshold=0"));
+    g_assert_nonnull(strstr(last_warning, "domain=fp-device-error-quark domain_id="));
     teardown();
 }
 static void all_command_errors_stop(void)

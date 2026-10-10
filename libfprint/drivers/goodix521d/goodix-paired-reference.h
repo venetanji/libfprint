@@ -23,8 +23,10 @@ enum {
 
 static void paired_reference_fail(FpiSsm *ssm, GError *error, guint length)
 {
-    fp_warn("paired-reference-error stage=%u domain=%u code=%d reply-length=%u",
-            fpi_ssm_get_cur_state(ssm), (guint)error->domain, error->code, length);
+    const gchar *domain = error->domain == FP_DEVICE_ERROR ? "fp-device-error-quark" :
+                          error->domain == G_IO_ERROR ? "g-io-error-quark" : "other-domain-redacted";
+    fp_warn("paired-reference-error stage=%u domain=%s domain_id=%u code=%d reply-length=%u",
+            fpi_ssm_get_cur_state(ssm), domain, (guint)error->domain, error->code, length);
     fpi_ssm_mark_failed(ssm, error);
 }
 
@@ -120,6 +122,8 @@ static void paired_reference_fdt_done(FpDevice *dev, guint8 *data, guint16 lengt
                                                 self->paired_fdt[index - 1], fields.timing)) {
         guint delta = paired_reference_fdt_max_delta(self->paired_fdt[index - 2],
                                                       self->paired_fdt[index - 1]);
+        fp_warn("paired-reference-fdt pair=%u/%u max-delta=%u threshold=%u",
+                index - 1, index, delta, fields.timing);
         paired_reference_fail(ssm,
             g_error_new(FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
                         "Paired-reference FDT stability check failed: pair=%u/%u max-delta=%u threshold=%u; keep reader clear during open",

@@ -1,4 +1,9 @@
 #include "goodix521d-transport-receiver-shim.h"
+#include <stdarg.h>
+static char warning[256];
+static void record_warning(const char *format, ...) { va_list args;va_start(args,format);vsnprintf(warning,sizeof warning,format,args);va_end(args); }
+#undef fp_warn
+#define fp_warn(...) record_warning(__VA_ARGS__)
 #include "receiver.inc"
 static FpDevice dev;
 static int calls,errors;
@@ -14,4 +19,16 @@ setup(0x20);goodix_receive_pack(&dev,notice,10);assert(errors==1&&private_state.
 setup(0x90);memcpy(joined+20,notice,10);goodix_receive_pack(&dev,joined,30);assert(private_state.configuration_missing);puts("coalesced trailing configuration loss retained");
 setup(0x90);yes[9]=0x88;goodix_receive_pack(&dev,ack,10);goodix_receive_pack(&dev,yes,10);assert(errors==1);puts("90 null checksum bypass rejected");
 setup(0x90);packet(yes,0x90,1,0);packet(notice,0xb0,0x90,3);memcpy(joined,ack,10);memcpy(joined+10,yes,10);memcpy(joined+20,notice,10);goodix_receive_pack(&dev,joined,30);assert(errors==1&&private_state.configuration_missing);puts("trailing same-echo configuration loss rejected");
+for (unsigned i=0;i<3;i++) {
+  const guint8 owned[]={0x36,0x20,0x34};
+  setup(owned[i]);warning[0]=0;
+  packet(notice,0x32,2,0);packet(ack,0xb0,owned[i],1);packet(yes,owned[i],1,0);
+  memcpy(joined,notice,10);memcpy(joined+10,ack,10);memcpy(joined+20,yes,10);
+  goodix_receive_pack(&dev,joined,30);
+  assert(calls==1&&!errors);
+  char expected[32];snprintf(expected,sizeof expected,"expected=0x%02x",owned[i]);
+  assert(strstr(warning,"received=0x32")&&strstr(warning,expected));
+  assert(strstr(warning,"ack-pending=1 reply-pending=1"));
+}
+puts("unmatched DOWN is diagnosed and discarded before owned completion");
 free(private_state.data);return 0;}

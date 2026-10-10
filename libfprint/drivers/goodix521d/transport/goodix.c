@@ -531,7 +531,10 @@ static void goodix_receive_protocol_full(FpDevice *dev, guint8 *data,
                               "MCU image rejected: TLS unavailable"));
       return;
     }
-    fp_warn("Invalid protocol command: 0x%02x", cmd);
+    fp_warn("Unmatched protocol command: received=0x%02x expected=0x%02x "
+            "ack-pending=%u reply-pending=%u operation=%" G_GUINT64_FORMAT,
+            cmd, priv->cmd, (guint) priv->ack, (guint) priv->reply,
+            priv->operation_generation);
     return;
   }
 

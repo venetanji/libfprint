@@ -23,7 +23,7 @@ typedef struct _FpiDeviceGoodix521d {
   OcSession *session;
   FpiSsm *boot;
   Action action;
-  gboolean transport_open, processing, cancelled, in_cancel, finishing;
+  gboolean transport_open, processing, algorithm_started, cancelled, in_cancel, finishing;
   GError *deferred_error;
   guint contacts;
   GSource *deadline;
@@ -75,7 +75,12 @@ operation_error_complete (FpDevice *device, GError *error)
   Action action = self->action;
   clear_deadline (self);
   self->action = ACTION_NONE;self->finishing=FALSE;
-  g_clear_pointer (&self->session,oc_session_free);
+  /* A failed capture leaves the public device open. Preserve an untouched
+   * matching context so the next attempt can capture again, but never reuse
+   * state after interrupted computation or incomplete transport teardown. */
+  if ((action != ACTION_VERIFY && action != ACTION_IDENTIFY) ||
+      self->algorithm_started || self->transport_open)
+    g_clear_pointer (&self->session,oc_session_free);
   g_clear_pointer (&self->templates,g_ptr_array_unref);
   fpi_device_report_finger_status (device,FP_FINGER_STATUS_NONE);
   switch (action) {
@@ -181,6 +186,7 @@ begin_action (FpDevice *device, Action action, guint milliseconds)
 {
   FpiDeviceGoodix521d *self = SELF (device);
   self->action=action; self->cancelled=FALSE; self->contacts=0;self->finishing=FALSE;
+  self->algorithm_started=FALSE;
   g_clear_error (&self->abort_error);
   self->deadline=fpi_device_add_timeout (device,milliseconds,operation_timeout,NULL,NULL);
   self->deadline_us=g_get_monotonic_time ()+(gint64)milliseconds*1000;
@@ -370,6 +376,7 @@ acquired_process (FpDevice *device, const GxImage *image, GError *error)
    * cancelled. No result is committed after cancellation. */
   g_task_set_return_on_cancel(task,FALSE);
   self->processing=TRUE;
+  self->algorithm_started=TRUE;
   g_task_run_in_thread(task,process_thread);
 }
 

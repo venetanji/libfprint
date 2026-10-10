@@ -53,9 +53,24 @@
 #undef fpi_device_open_complete
 #undef fpi_device_close_complete
 #undef fpi_device_enroll_complete
+#undef fpi_device_verify_complete
+#undef fpi_device_verify_report
+#undef fpi_device_identify_complete
+#undef fpi_device_identify_report
+#undef fpi_device_get_identify_data
+#undef gx_print_envelope_export
+#include "goodix-chicago-enrollment.h"
 void fpi_device_open_complete (FpDevice *device, GError *error);
 void fpi_device_close_complete (FpDevice *device, GError *error);
 void fpi_device_enroll_complete (FpDevice *device, FpPrint *print, GError *error);
+void fpi_device_verify_complete (FpDevice *device, GError *error);
+void fpi_device_identify_complete (FpDevice *device, GError *error);
+void fpi_device_identify_report (FpDevice *device, FpPrint *match, FpPrint *print, GError *error);
+void fpi_device_get_identify_data (FpDevice *device, GPtrArray **prints);
+void fpi_device_verify_report (FpDevice *device, FpiMatchResult result,
+                              FpPrint *print, GError *error);
+GVariant *gx_print_envelope_export (const GxPrintIdentity *identity, gboolean completed,
+                                   GBytes *blob, GError **error);
 
 /* A mutex-protected gate holds a real worker inside an algorithm boundary.
  * Cancellation/timeout remains on the main thread, never races test state. */
@@ -69,11 +84,16 @@ static struct {
   guint completed[5], succeeded[5], close_completed;
   guint progress, reports, captures, starts, stops, cancels, exports;
   guint matcher_calls, matcher_count, identify_matches;
-  gboolean matcher_fail, report_retry;
+  gboolean matcher_fail, matcher_nonmatch, report_retry;
+  FpiMatchResult last_match_report;
+  FpDevice *checked_match_device;
+  OcSession *expected_match_session;
+  GBytes *expected_template;
+  guint expected_stops_before_match;
   OcReject matcher_reject;
   guint sessions_created, sessions_freed, acquisitions_created, acquisitions_freed;
   GError *error;
-  gboolean public_api, usb_open, public_success;
+  gboolean public_api, usb_open, public_success, public_match;
   guint usb_opens, usb_closes, public_callbacks;
   FpDevice *usb_owner;
   GError *public_error;
@@ -143,8 +163,24 @@ void mock_open_complete (FpDevice *device, GError *error)
     complete (ACTION_OPEN, error);
   }
 }
-void mock_verify_complete (FpDevice *device, GError *error) { complete (ACTION_VERIFY, error); }
-void mock_identify_complete (FpDevice *device, GError *error) { complete (ACTION_IDENTIFY, error); }
+void mock_verify_complete (FpDevice *device, GError *error)
+{
+  if (state.public_api) {
+    complete (ACTION_VERIFY, error ? g_error_copy (error) : NULL);
+    fpi_device_verify_complete (device, error);
+  } else {
+    complete (ACTION_VERIFY, error);
+  }
+}
+void mock_identify_complete (FpDevice *device, GError *error)
+{
+  if (state.public_api) {
+    complete (ACTION_IDENTIFY, error ? g_error_copy (error) : NULL);
+    fpi_device_identify_complete (device, error);
+  } else {
+    complete (ACTION_IDENTIFY, error);
+  }
+}
 void mock_enroll_complete (FpDevice *device, FpPrint *print, GError *error)
 {
   if (state.public_api) {
@@ -177,16 +213,34 @@ void mock_verify_report (FpDevice *device, FpiMatchResult result, FpPrint *print
 {
   state.reports++;
   state.report_retry = error && error->domain == FP_DEVICE_RETRY;
-  g_clear_error (&error);
+  state.last_match_report = result;
+  if (state.public_api)
+    fpi_device_verify_report (device, result, print, error);
+  else
+    g_clear_error (&error);
   if (state.cancel_report)
     cancel_operation (device);
 }
 void mock_identify_report (FpDevice *device, FpPrint *match, FpPrint *print, GError *error)
 {
   if (match) state.identify_matches++;
-  mock_verify_report (device, FPI_MATCH_SUCCESS, print, error);
+  if (state.public_api) {
+    state.reports++;
+    state.report_retry = error && error->domain == FP_DEVICE_RETRY;
+    fpi_device_identify_report (device, match, print, error);
+    if (state.cancel_report)
+      cancel_operation (device);
+  } else {
+    mock_verify_report (device, FPI_MATCH_SUCCESS, print, error);
+  }
 }
-void mock_get_identify_data (FpDevice *device, GPtrArray **prints) { *prints = state.prints; }
+void mock_get_identify_data (FpDevice *device, GPtrArray **prints)
+{
+  if (state.public_api)
+    fpi_device_get_identify_data (device, prints);
+  else
+    *prints = state.prints;
+}
 gboolean mock_report_finger_status (FpDevice *device, FpFingerStatusFlags status) { return TRUE; }
 
 static void
@@ -340,6 +394,14 @@ gboolean mock_identify (OcSession *session, GBytes *const *templates, guint coun
                        const guint16 frame[OC_FRAME_PIXELS], OcVerifyResult *result,
                        gint *match, GBytes **updated, GError **error)
 {
+  if (state.checked_match_device) {
+    g_assert_false (SELF (state.checked_match_device)->transport_open);
+    g_assert_cmpuint (state.stops, ==, state.expected_stops_before_match);
+    g_assert_true (session == state.expected_match_session);
+    g_assert_cmpuint (count, ==, 1);
+    g_assert_true (g_bytes_equal (templates[0], state.expected_template));
+    g_assert_null (updated); /* Verification never requests template study. */
+  }
   worker_gate ();
   state.matcher_calls++;
   state.matcher_count = count;
@@ -347,10 +409,10 @@ gboolean mock_identify (OcSession *session, GBytes *const *templates, guint coun
     g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED, "synthetic matcher failure");
     return FALSE;
   }
-  result->match = count > 0;
-  result->score = count ? 42 : 0;
+  result->match = count > 0 && !state.matcher_nonmatch;
+  result->score = result->match ? 42 : 0;
   result->reject = state.matcher_reject;
-  *match = count ? 0 : -1;
+  *match = result->match ? 0 : -1;
   return TRUE;
 }
 GVariant *mock_envelope_export (const GxPrintIdentity *identity, gboolean completed,
@@ -419,6 +481,7 @@ finish_state (FpDevice *device)
   g_assert_cmpuint (state.acquisitions_created, ==, state.acquisitions_freed);
   g_clear_object (&state.cancellable);
   g_clear_pointer (&state.prints, g_ptr_array_unref);
+  g_clear_pointer (&state.expected_template, g_bytes_unref);
   g_clear_error (&state.error);
   g_clear_error (&state.public_error);
   g_assert_null (state.drain_device);
@@ -486,7 +549,8 @@ wait_completed (Action action, guint count)
 }
 
 static void
-assert_failure_once (FpDevice *device, Action action, GIOErrorEnum code)
+assert_failure_once_with_session (FpDevice *device, Action action, GIOErrorEnum code,
+                                  OcSession *expected_session)
 {
   wait_completed (action, 1);
   g_assert_cmpuint (state.completed[action], ==, 1);
@@ -497,7 +561,7 @@ assert_failure_once (FpDevice *device, Action action, GIOErrorEnum code)
   g_assert_cmpuint (state.reports, ==, 0);
   g_assert_cmpint (SELF (device)->action, ==, ACTION_NONE);
   g_assert_false (SELF (device)->processing);
-  g_assert_null (SELF (device)->session);
+  g_assert_true (SELF (device)->session == expected_session);
   g_assert_null (SELF (device)->templates);
   g_assert_null (SELF (device)->deadline);
   /* Duplicate/stale failures cannot complete an idle action a second time. */
@@ -505,6 +569,12 @@ assert_failure_once (FpDevice *device, Action action, GIOErrorEnum code)
   cancel_operation (device);
   while (g_main_context_iteration (NULL, FALSE));
   g_assert_cmpuint (state.completed[action], ==, 1);
+}
+
+static void
+assert_failure_once (FpDevice *device, Action action, GIOErrorEnum code)
+{
+  assert_failure_once_with_session (device, action, code, NULL);
 }
 
 static void
@@ -708,12 +778,13 @@ test_cancel_unwind_completes_once (void)
   reset_state ();
   FpDevice *device = prepare_action (ACTION_VERIFY);
   SELF (device)->transport_open = TRUE;
+  OcSession *session = SELF (device)->session;
   state.cancel_unwinds_error = TRUE;
   cancel_operation (device);
   g_assert_cmpuint (state.stops, ==, 0);
   g_assert_cmpuint (state.completed[ACTION_VERIFY], ==, 0);
   state.cancel_unwinds_error = FALSE;
-  assert_failure_once (device, ACTION_VERIFY, G_IO_ERROR_CANCELLED);
+  assert_failure_once_with_session (device, ACTION_VERIFY, G_IO_ERROR_CANCELLED, session);
   g_assert_cmpuint (state.stops, ==, 1);
   g_assert_false (SELF (device)->transport_open);
   finish_state (device);
@@ -1041,6 +1112,355 @@ test_public_cancel_during_failed_open_drain (void)
   finish_state (device);
 }
 
+/* These tests exercise public FpDevice actions and real print import/storage,
+ * but the algorithm and sensor remain synthetic. They establish lifecycle and
+ * template immutability, not real matching/calibration accuracy. */
+static void
+open_with_reference (FpDevice *device)
+{
+  guint next_callback = state.public_callbacks + 1;
+  state.block_worker = FALSE;
+  state.worker_entered = state.release_worker = FALSE;
+  fp_device_open (device, NULL, public_open_done, NULL);
+  g_assert_nonnull (state.capture_callback);
+  GxImage reference = {0};
+  reference.valid = TRUE;
+  state.capture_callback (device, &reference, state.capture_data, NULL);
+  wait_public_callbacks (next_callback);
+  g_assert_true (state.public_success);
+  g_assert_no_error (state.public_error);
+  g_assert_nonnull (SELF (device)->session);
+}
+
+static FpPrint *
+make_verification_print (FpDevice *device)
+{
+  g_autoptr(GoodixChicagoEnrollment) enrollment = goodix_chicago_enrollment_new ();
+  GoodixChicagoFeatureRecord record = {
+    .foreground = 1, .refined_x = 20, .refined_y = 25, .strength = 200,
+  };
+  GoodixChicagoEnrollmentResult inserted;
+  GoodixChicagoMetricData metrics = {0};
+  g_autoptr(GError) error = NULL;
+  g_assert_true (goodix_chicago_enrollment_insert_first (enrollment, &record, 1,
+                 1, 70, 90, &metrics, &inserted, &error));
+  g_assert_no_error (error);
+  state.expected_template = goodix_chicago_enrollment_pack (enrollment, &error);
+  g_assert_no_error (error);
+  g_autoptr(GVariant) envelope = gx_print_envelope_export (&SELF (device)->identity,
+                               TRUE, state.expected_template, &error);
+  g_assert_no_error (error);
+  FpPrint *print = g_object_ref_sink (fp_print_new (device));
+  fpi_print_set_type (print, FPI_PRINT_RAW);
+  g_object_set (print, "fpi-data", envelope, NULL);
+  return print;
+}
+
+static GBytes *
+serialized_print (FpPrint *print)
+{
+  guint8 *data = NULL;
+  gsize length = 0;
+  g_autoptr(GError) error = NULL;
+  g_assert_true (fp_print_serialize (print, &data, &length, &error));
+  g_assert_no_error (error);
+  return g_bytes_new_take (data, length);
+}
+
+static void
+assert_print_unchanged (FpPrint *print, GBytes *original)
+{
+  g_autoptr(GBytes) serialized = serialized_print (print);
+  g_assert_true (g_bytes_equal (serialized, original));
+}
+
+static void
+public_verify_done (GObject *object, GAsyncResult *result, gpointer unused)
+{
+  g_clear_error (&state.public_error);
+  state.public_success = fp_device_verify_finish (FP_DEVICE (object), result,
+                        &state.public_match, NULL, &state.public_error);
+  state.public_callbacks++;
+}
+
+static void
+public_identify_done (GObject *object, GAsyncResult *result, gpointer unused)
+{
+  g_autoptr(FpPrint) match = NULL;
+  g_clear_error (&state.public_error);
+  state.public_success = fp_device_identify_finish (FP_DEVICE (object), result,
+                         &match, NULL, &state.public_error);
+  state.public_match = match != NULL;
+  state.public_callbacks++;
+}
+
+static void
+start_public_match (FpDevice *device, FpPrint *print, Action action)
+{
+  if (action == ACTION_VERIFY) {
+    fp_device_verify (device, print, state.cancellable, NULL, NULL, NULL,
+                      public_verify_done, NULL);
+  } else {
+    g_ptr_array_set_size (state.prints, 0);
+    g_ptr_array_add (state.prints, print);
+    fp_device_identify (device, state.prints, state.cancellable, NULL, NULL, NULL,
+                        public_identify_done, NULL);
+  }
+}
+
+static void
+assert_action_idle (FpDevice *device)
+{
+  FpiDeviceGoodix521d *self = SELF (device);
+  g_assert_cmpint (self->action, ==, ACTION_NONE);
+  g_assert_false (self->processing);
+  g_assert_false (self->finishing);
+  g_assert_false (self->in_cancel);
+  g_assert_false (self->transport_open);
+  g_assert_null (self->boot);
+  g_assert_null (self->templates);
+  g_assert_null (self->deadline);
+  g_assert_cmpint (self->deadline_us, ==, 0);
+  g_assert_null (self->deferred_error);
+  g_assert_null (self->abort_error);
+}
+
+static void
+run_verification (FpDevice *device, FpPrint *print, guint8 frame_tag, gboolean cancel)
+{
+  guint next_callback = state.public_callbacks + 1;
+  guint next_completion = state.completed[ACTION_VERIFY] + 1;
+  guint next_matcher = state.matcher_calls + 1;
+  guint reports_before = state.reports;
+  state.checked_match_device = device;
+  state.expected_match_session = SELF (device)->session;
+  state.expected_stops_before_match = state.stops + 1;
+  state.worker_entered = state.release_worker = FALSE;
+  state.block_worker = cancel;
+  fp_device_verify (device, print, state.cancellable, NULL, NULL, NULL,
+                    public_verify_done, NULL);
+  g_assert_cmpint (SELF (device)->action, ==, ACTION_VERIFY);
+  g_assert_false (SELF (device)->cancelled);
+  g_assert_false (SELF (device)->finishing);
+  g_assert_null (SELF (device)->abort_error);
+  g_assert_null (SELF (device)->deferred_error);
+  g_assert_true (SELF (device)->transport_open);
+  g_assert_cmpuint (SELF (device)->contacts, ==, 1);
+  GxImage image = {0};
+  image.valid = TRUE;
+  image.pixels[0] = frame_tag; /* A distinct capture, never a replayed frame. */
+  state.capture_callback (device, &image, state.capture_data, NULL);
+  if (cancel) {
+    gboolean entered = FALSE;
+    gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+    while (!entered) {
+      g_assert_cmpint (g_get_monotonic_time (), <, deadline);
+      while (g_main_context_iteration (NULL, FALSE));
+      g_mutex_lock (&state.mutex);
+      entered = state.worker_entered;
+      g_mutex_unlock (&state.mutex);
+      if (!entered) g_usleep (1000);
+    }
+    g_cancellable_cancel (state.cancellable);
+    while (g_main_context_iteration (NULL, FALSE));
+    g_assert_true (SELF (device)->cancelled);
+    g_assert_cmpuint (state.completed[ACTION_VERIFY], ==, next_completion - 1);
+    release_processing ();
+  }
+  wait_public_callbacks (next_callback);
+  g_assert_cmpuint (state.completed[ACTION_VERIFY], ==, next_completion);
+  g_assert_cmpuint (state.matcher_calls, ==, next_matcher);
+  g_assert_cmpuint (state.reports, ==, reports_before + (cancel ? 0 : 1));
+  assert_action_idle (device);
+  g_assert_true (state.usb_open);
+  g_assert_true (fp_device_is_open (device));
+  if (!cancel) {
+    g_assert_true (SELF (device)->session == state.expected_match_session);
+    g_assert_false (SELF (device)->cancelled);
+  }
+}
+
+static void
+test_public_repeated_verify_results (void)
+{
+  reset_state ();
+  FpDevice *device = new_public_device ();
+  open_with_reference (device);
+  OcSession *session = SELF (device)->session;
+  g_autoptr(FpPrint) print = make_verification_print (device);
+  g_autoptr(GBytes) original = serialized_print (print);
+  for (guint attempt = 0; attempt < 5; attempt++) {
+    state.matcher_nonmatch = attempt == 1;
+    state.matcher_reject = attempt == 3 ? OC_REJECT_NO_FEATURES : OC_REJECT_NONE;
+    run_verification (device, print, attempt + 1, FALSE);
+    g_assert_true (SELF (device)->session == session);
+    assert_print_unchanged (print, original);
+    if (attempt == 3) {
+      g_assert_false (state.public_success);
+      g_assert_error (state.public_error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_GENERAL);
+      g_assert_cmpint (state.last_match_report, ==, FPI_MATCH_ERROR);
+    } else {
+      g_assert_true (state.public_success);
+      g_assert_no_error (state.public_error);
+      g_assert_cmpint (state.public_match, ==, attempt != 1);
+      g_assert_cmpint (state.last_match_report, ==,
+                       attempt == 1 ? FPI_MATCH_FAIL : FPI_MATCH_SUCCESS);
+    }
+  }
+  g_assert_cmpuint (state.sessions_created, ==, 1);
+  g_assert_cmpuint (state.sessions_freed, ==, 0);
+  g_assert_cmpuint (state.exports, ==, 0);
+  g_assert_cmpuint (state.starts, ==, 6); /* reference plus five captures */
+  g_assert_cmpuint (state.stops, ==, 6);
+  g_clear_error (&state.public_error);
+  g_assert_true (fp_device_close_sync (device, NULL, &state.public_error));
+  g_assert_no_error (state.public_error);
+  g_clear_object (&print);
+  finish_state (device);
+}
+
+static void
+test_public_cancel_verify_requires_reopen (void)
+{
+  reset_state ();
+  FpDevice *device = new_public_device ();
+  open_with_reference (device);
+  g_autoptr(FpPrint) print = make_verification_print (device);
+  g_autoptr(GBytes) original = serialized_print (print);
+  run_verification (device, print, 1, TRUE);
+  g_assert_false (state.public_success);
+  g_assert_error (state.public_error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  g_assert_null (SELF (device)->session);
+  g_assert_cmpuint (state.sessions_freed, ==, 1);
+  assert_print_unchanged (print, original);
+
+  /* Cancellation intentionally invalidates algorithm state. A verify on the
+   * still-open object fails early rather than using that discarded session. */
+  g_clear_object (&state.cancellable);
+  state.cancellable = g_cancellable_new ();
+  guint next_callback = state.public_callbacks + 1;
+  guint starts_before = state.starts;
+  fp_device_verify (device, print, state.cancellable, NULL, NULL, NULL,
+                    public_verify_done, NULL);
+  wait_public_callbacks (next_callback);
+  g_assert_false (state.public_success);
+  g_assert_error (state.public_error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL);
+  g_assert_cmpuint (state.matcher_calls, ==, 1);
+  g_assert_cmpuint (state.starts, ==, starts_before);
+  g_assert_cmpuint (state.completed[ACTION_VERIFY], ==, 2);
+  g_assert_false (SELF (device)->cancelled);
+  assert_action_idle (device);
+  assert_print_unchanged (print, original);
+
+  g_clear_error (&state.public_error);
+  g_assert_true (fp_device_close_sync (device, NULL, &state.public_error));
+  g_assert_no_error (state.public_error);
+  open_with_reference (device);
+  g_assert_cmpuint (state.sessions_created, ==, 2);
+  run_verification (device, print, 2, FALSE);
+  g_assert_true (state.public_success);
+  g_assert_true (state.public_match);
+  g_assert_no_error (state.public_error);
+  g_assert_cmpuint (state.completed[ACTION_VERIFY], ==, 3);
+  assert_print_unchanged (print, original);
+  g_assert_cmpuint (state.exports, ==, 0);
+  g_assert_true (fp_device_close_sync (device, NULL, &state.public_error));
+  g_assert_no_error (state.public_error);
+  g_clear_object (&print);
+  finish_state (device);
+}
+
+static void
+test_public_capture_error_can_match_again (gconstpointer data)
+{
+  Action action = GPOINTER_TO_INT (data);
+  reset_state ();
+  FpDevice *device = new_public_device ();
+  open_with_reference (device);
+  OcSession *session = SELF (device)->session;
+  g_autoptr(FpPrint) print = make_verification_print (device);
+  g_autoptr(GBytes) original = serialized_print (print);
+  guint next_callback = state.public_callbacks + 1;
+  start_public_match (device, print, action);
+  state.capture_callback (device, NULL, state.capture_data,
+                          g_error_new_literal (G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
+                                               "synthetic capture failure before matching"));
+  wait_public_callbacks (next_callback);
+  g_assert_error (state.public_error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT);
+  g_assert_false (state.public_success);
+  g_assert_cmpuint (state.matcher_calls, ==, 0);
+  g_assert_cmpuint (state.completed[action], ==, 1);
+  g_assert_true (fp_device_is_open (device));
+  assert_action_idle (device);
+  assert_print_unchanged (print, original);
+
+  /* A capture failure has not touched the calibrated algorithm context. The
+   * next real matching action on this same open object must reach acquisition again. */
+  state.capture_callback = NULL;
+  next_callback = state.public_callbacks + 1;
+  start_public_match (device, print, action);
+  g_assert_nonnull (state.capture_callback);
+  g_assert_true (SELF (device)->session == session);
+  state.checked_match_device = device;
+  state.expected_match_session = session;
+  state.expected_stops_before_match = state.stops + 1;
+  GxImage image = {0};
+  image.valid = TRUE;
+  image.pixels[0] = 1;
+  state.capture_callback (device, &image, state.capture_data, NULL);
+  wait_public_callbacks (next_callback);
+  g_assert_true (state.public_success);
+  g_assert_true (state.public_match);
+  g_assert_no_error (state.public_error);
+  g_assert_cmpuint (state.matcher_calls, ==, 1);
+  g_assert_cmpuint (state.completed[action], ==, 2);
+  g_assert_cmpuint (state.sessions_created, ==, 1);
+  g_assert_cmpuint (state.sessions_freed, ==, 0);
+  assert_action_idle (device);
+  assert_print_unchanged (print, original);
+  g_assert_true (fp_device_close_sync (device, NULL, &state.public_error));
+  g_assert_no_error (state.public_error);
+  g_clear_object (&print);
+  finish_state (device);
+}
+
+static void
+test_public_capture_cleanup_failure_discards_session (gconstpointer data)
+{
+  Action action = GPOINTER_TO_INT (data);
+  reset_state ();
+  FpDevice *device = new_public_device ();
+  open_with_reference (device);
+  g_autoptr(FpPrint) print = make_verification_print (device);
+  g_autoptr(GBytes) original = serialized_print (print);
+  guint next_callback = state.public_callbacks + 1;
+  start_public_match (device, print, action);
+  state.fail_cleanup = TRUE;
+  state.capture_callback (device, NULL, state.capture_data,
+                          g_error_new_literal (G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
+                                               "synthetic capture failure before matching"));
+  wait_public_callbacks (next_callback);
+  g_assert_false (state.public_success);
+  g_assert_error (state.public_error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT);
+  g_assert_cmpuint (state.completed[action], ==, 1);
+  g_assert_cmpuint (state.matcher_calls, ==, 0);
+  g_assert_null (SELF (device)->session);
+  g_assert_cmpuint (state.sessions_freed, ==, 1);
+  g_assert_true (SELF (device)->transport_open);
+  g_assert_cmpint (SELF (device)->action, ==, ACTION_NONE);
+  g_assert_false (SELF (device)->processing);
+  g_assert_false (SELF (device)->finishing);
+  g_assert_null (SELF (device)->deferred_error);
+  g_assert_true (fp_device_is_open (device));
+  assert_print_unchanged (print, original);
+  state.fail_cleanup = FALSE;
+  g_clear_error (&state.public_error);
+  g_assert_true (fp_device_close_sync (device, NULL, &state.public_error));
+  g_assert_no_error (state.public_error);
+  g_clear_object (&print);
+  finish_state (device);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1086,5 +1506,17 @@ main (int argc, char **argv)
                         GINT_TO_POINTER (1), test_public_early_open_failure);
   g_test_add_func ("/goodix521d/lifecycle/public-cancel-during-failed-open-drain",
                    test_public_cancel_during_failed_open_drain);
+  g_test_add_func ("/goodix521d/lifecycle/public-repeated-verify-results",
+                   test_public_repeated_verify_results);
+  g_test_add_func ("/goodix521d/lifecycle/public-cancel-verify-requires-reopen",
+                   test_public_cancel_verify_requires_reopen);
+  g_test_add_data_func ("/goodix521d/lifecycle/public-capture-error-can-verify-again",
+                        GINT_TO_POINTER (ACTION_VERIFY), test_public_capture_error_can_match_again);
+  g_test_add_data_func ("/goodix521d/lifecycle/public-capture-error-can-identify-again",
+                        GINT_TO_POINTER (ACTION_IDENTIFY), test_public_capture_error_can_match_again);
+  g_test_add_data_func ("/goodix521d/lifecycle/public-verify-cleanup-failure-discards-session",
+                        GINT_TO_POINTER (ACTION_VERIFY), test_public_capture_cleanup_failure_discards_session);
+  g_test_add_data_func ("/goodix521d/lifecycle/public-identify-cleanup-failure-discards-session",
+                        GINT_TO_POINTER (ACTION_IDENTIFY), test_public_capture_cleanup_failure_discards_session);
   return g_test_run ();
 }
