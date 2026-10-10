@@ -3,7 +3,6 @@
 import traceback
 import sys
 import gi
-import time
 
 gi.require_version('FPrint', '2.0')
 from gi.repository import FPrint, GLib
@@ -41,19 +40,11 @@ print("enroll done")
 
 # Verify
 print("verifying")
-matched = False
-while not matched:
-    try:
-        verify_res, verify_print = d.verify_sync(p)
-        if verify_res:
-            print("verify done (MATCH)")
-            matched = True
-        else:
-            print("verify done (NO MATCH)")
-            matched = True # We can exit loop on no-match or retry? No match means false reject, but it's a valid result. Let's just finish the test.
-    except GLib.GError as e:
-        print("verify retry: " + str(e))
-        time.sleep(1)
+verify_res, verify_print = d.verify_sync(p)
+if verify_res:
+    print("verify done (MATCH)")
+else:
+    print("verify done (NO MATCH)")
 
 assert verify_res == True
 
