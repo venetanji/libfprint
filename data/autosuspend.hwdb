@@ -73,7 +73,6 @@ usb:v08FFp5501*
 
 # Supported by libfprint driver canvasbio
 usb:v2DF0p0003*
-usb:v2DF0p0007*
  ID_AUTOSUSPEND=1
  ID_PERSIST=0
 

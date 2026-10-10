@@ -25,7 +25,7 @@
  *
  * Device specifications:
  *   - Vendor ID:  0x2DF0 (CanvasBio)
- *   - Product IDs: 0x0003, 0x0007
+ *   - Product IDs: 0x0003
  *   - Image size: 80x64 pixels (5120 bytes)
  *   - Interface:  USB bulk transfers + vendor control requests
  *
@@ -62,7 +62,6 @@
 /* USB Vendor and Product IDs */
 #define CB2000_VID 0x2df0
 #define CB2000_PID_1 0x0003
-#define CB2000_PID_2 0x0007
 
 /* USB Endpoints */
 #define CB2000_EP_OUT 0x01
@@ -5255,7 +5254,6 @@ deactivation_force_cb (gpointer user_data)
 
 static const FpIdEntry id_table[] = {
   { .vid = CB2000_VID, .pid = CB2000_PID_1 },
-  { .vid = CB2000_VID, .pid = CB2000_PID_2 },
   { .vid = 0, .pid = 0 },
 };
 
