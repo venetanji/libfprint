@@ -86,6 +86,16 @@ def main():
         real_glib = [*compiler, *flags, '-Wno-unused-parameter',
                      '-Wno-unused-function', '-Wno-unused-variable', '-Wno-address', *glib_cflags,
                      '-I' + str(SOURCE), '-I' + str(build)]
+        health = ''
+        if 'gboolean goodix_transport_health(' in source:
+            health += segment(source, 'gboolean goodix_transport_health(', '/* End transport health */')
+            tls_source = (SOURCE / 'goodixtls.c').read_text()
+            health = segment(tls_source, 'gboolean goodix_tls_server_health(', '/* End TLS health */') + health
+            health += segment(source, 'void goodix_send_reset(', 'void goodix_send_firmware_version')
+        (build / 'health.inc').write_text(health)
+        run([*real_glib, TESTS / 'goodix521d-transport-health.c',
+             *glib_libs, *linker_flags, '-o', build / 'health'])
+        run([build / 'health'])
         stop_loop = segment(source, 'static void goodix_stop_read_loop',
                             '// TODO remove every GDestroyNotify')
         lifecycle = (segment(source, 'typedef struct {\n    FpDevice *dev;',

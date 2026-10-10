@@ -1039,6 +1039,7 @@ fp_device_task_return_in_idle_cb (gpointer user_data)
   FpDeviceTaskReturnData *data = user_data;
   FpDevicePrivate *priv = fp_device_get_instance_private (data->device);
   FpiDeviceAction action;
+  gboolean close_aborted;
 
   if (!g_log_writer_default_would_drop (G_LOG_LEVEL_DEBUG, G_LOG_DOMAIN))
     {
@@ -1047,6 +1048,10 @@ fp_device_task_return_in_idle_cb (gpointer user_data)
       g_debug ("Completing action %s in idle!", action_str);
     }
 
+  /* Consume the exception before exposing an idle device or invoking any
+   * completion-side notifications. Every subsequent action starts unmarked. */
+  close_aborted = priv->current_close_aborted;
+  priv->current_close_aborted = FALSE;
   task = g_steal_pointer (&priv->current_task);
   action = priv->current_action;
   priv->current_action = FPI_DEVICE_ACTION_NONE;
@@ -1062,7 +1067,7 @@ fp_device_task_return_in_idle_cb (gpointer user_data)
       priv->is_open = TRUE;
       g_object_notify (G_OBJECT (data->device), "open");
     }
-  else if (action == FPI_DEVICE_ACTION_CLOSE)
+  else if (action == FPI_DEVICE_ACTION_CLOSE && !close_aborted)
     {
       /* Always consider the device closed. Drivers should try hard to close the
        * device. Generally, e.g. cancellations should be ignored.
@@ -1334,6 +1339,38 @@ fpi_device_close_complete (FpDevice *device, GError *error)
                                     GUINT_TO_POINTER (TRUE));
   else
     fpi_device_return_task_in_idle (device, FP_DEVICE_TASK_RETURN_ERROR, error);
+}
+
+/**
+ * fpi_device_close_abort:
+ * @device: The #FpDevice
+ * @error: (transfer full): A non-NULL #GError explaining incomplete teardown
+ *
+ * Fail an ongoing close without closing its USB handle or changing the open
+ * property. Use only when driver teardown has not completed safely. The driver
+ * must retain ownership of unfinished resources and prevent new acquisitions
+ * until a later close retry can finish teardown and call
+ * fpi_device_close_complete(). This function does not schedule that retry.
+ *
+ * Ordinary close errors must still use fpi_device_close_complete(). Consumers
+ * may discard their claim bookkeeping after an error, so an aborted close does
+ * not guarantee automatic recovery on the next claim.
+ */
+void
+fpi_device_close_abort (FpDevice *device, GError *error)
+{
+  FpDevicePrivate *priv;
+
+  g_return_if_fail (FP_IS_DEVICE (device));
+  priv = fp_device_get_instance_private (device);
+  g_return_if_fail (priv->current_action == FPI_DEVICE_ACTION_CLOSE);
+  g_return_if_fail (priv->current_task_idle_return_source == NULL);
+  g_return_if_fail (error != NULL);
+
+  clear_device_cancel_action (device);
+  fpi_device_report_finger_status (device, FP_FINGER_STATUS_NONE);
+  priv->current_close_aborted = TRUE;
+  fpi_device_return_task_in_idle (device, FP_DEVICE_TASK_RETURN_ERROR, error);
 }
 
 /**

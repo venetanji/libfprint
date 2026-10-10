@@ -66,6 +66,7 @@ typedef struct {
     gboolean checksum_bypass, ack_additive, command_received, configuration_missing, configuration_conflict;
     guint8 ack_echo, ack_flags, ack_checksum;
     gboolean first_error_logged;
+    gboolean terminal_error;
     gint rx_endpoint;
     gssize rx_requested,rx_actual;
 
@@ -244,6 +245,8 @@ void goodix_receive_done(FpDevice *dev, guint8 *data, guint16 length,
                          GError *error) {
   FpiDeviceGoodixTls *self = FPI_DEVICE_GOODIXTLS(dev);
   FpiDeviceGoodixTlsPrivate *priv = fpi_device_goodixtls_get_instance_private(self);
+  /* Preserve idle errors too: no command callback does not imply health. */
+  if (error) priv->terminal_error = TRUE;
   GoodixCmdCallback callback = priv->callback;
   gpointer user_data = priv->user_data;
   if (!(priv->ack || priv->reply)) {
@@ -566,6 +569,7 @@ static void goodix_receive_protocol_full(FpDevice *dev, guint8 *data,
       return;
     }
     priv->configuration_missing=FALSE;
+    priv->configuration_generation++;
   }
   goodix_receive_done(dev, payload, payload_len, NULL);
 }
@@ -1350,6 +1354,12 @@ void goodix_send_enable_chip(FpDevice *dev, gboolean enable,
 
 void goodix_send_reset(FpDevice *dev, gboolean reset_sensor, guint8 sleep_time,
                        GoodixResetCallback callback, gpointer user_data) {
+  /* An attempted reset invalidates any previously measured reference even
+   * if submission fails. Only a new acknowledged configuration restores it. */
+  FpiDeviceGoodixTlsPrivate *priv =
+      fpi_device_goodixtls_get_instance_private(FPI_DEVICE_GOODIXTLS(dev));
+  priv->configuration_missing = TRUE;
+  priv->configuration_generation++;
   // Only support reset sensor
 
   GoodixReset payload = {.soft_reset_mcu = FALSE,
@@ -1511,6 +1521,10 @@ gboolean goodix_dev_init(FpDevice *dev, GError **error) {
     g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_BUSY, "Goodix transport already initialized");
     return FALSE;
   }
+  priv->terminal_error=FALSE;
+  priv->configuration_missing=TRUE;
+  priv->configuration_conflict=FALSE;
+  priv->configuration_generation++;
   priv->first_error_logged=FALSE;
   priv->rx_endpoint=-1;priv->rx_requested=priv->rx_actual=-1;
   priv->timeout = NULL;
@@ -1914,3 +1928,37 @@ void goodix_cancel(FpDevice *dev)
 static void fpi_device_goodixtls_init(FpiDeviceGoodixTls *self) {}
 
 static void fpi_device_goodixtls_class_init(FpiDeviceGoodixTlsClass *class) {}
+
+gboolean goodix_transport_health(FpDevice *dev, GoodixTransportHealth *snapshot,
+                                  GError **error)
+{
+    FpiDeviceGoodixTlsPrivate *priv =
+        fpi_device_goodixtls_get_instance_private(FPI_DEVICE_GOODIXTLS(dev));
+    g_return_val_if_fail(snapshot != NULL, FALSE);
+    *snapshot = (GoodixTransportHealth) {0};
+    if (priv->terminal_error || !priv->inited ||
+        priv->cancelling || !priv->transfer_cancel_tkn ||
+        g_cancellable_is_cancelled(priv->transfer_cancel_tkn)) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_CLOSED,
+                            "Goodix receive transport is not healthy");
+        return FALSE;
+    }
+    if (priv->configuration_missing || priv->configuration_conflict) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_INITIALIZED,
+                            "Acquisition configuration unavailable");
+        return FALSE;
+    }
+    if (priv->ack || priv->reply || priv->callback || priv->fdt_up_callback ||
+        priv->tls_ssm || priv->tls_ready_callback || priv->timeout || priv->length) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_BUSY,
+                            "Goodix transport has an unfinished operation");
+        return FALSE;
+    }
+    if (!goodix_tls_server_health(priv->tls_hop, error)) return FALSE;
+    *snapshot = (GoodixTransportHealth) {
+        priv->read_loop_generation, priv->tls_generation,
+        priv->configuration_generation
+    };
+    return TRUE;
+}
+/* End transport health */

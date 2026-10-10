@@ -291,6 +291,8 @@ void fpi_device_open_complete (FpDevice *device,
                                GError   *error);
 void fpi_device_close_complete (FpDevice *device,
                                 GError   *error);
+void fpi_device_close_abort (FpDevice *device,
+                             GError   *error);
 void fpi_device_enroll_complete (FpDevice *device,
                                  FpPrint  *print,
                                  GError   *error);

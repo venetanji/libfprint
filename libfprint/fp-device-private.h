@@ -75,6 +75,8 @@ typedef struct
   gulong              current_task_cancellable_id;
   GSource            *current_idle_cancel_source;
   GSource            *current_task_idle_return_source;
+  /* One close result only; consumed/reset before its idle completion. */
+  gboolean            current_close_aborted;
 
   /* State for tasks */
   gboolean            wait_for_finger;

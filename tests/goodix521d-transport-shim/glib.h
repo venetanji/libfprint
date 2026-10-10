@@ -34,6 +34,7 @@ typedef pthread_cond_t GCond;
 #define G_IO_ERROR_CONNECTION_CLOSED 7
 #define G_IO_ERROR_CANCELLED 8
 #define G_IO_ERROR_PERMISSION_DENIED 9
+#define G_IO_ERROR_NOT_INITIALIZED 10
 #define g_assert assert
 #define g_strerror strerror
 static inline GError *g_error_new_literal(int domain, int code, const char *msg) {
@@ -51,6 +52,7 @@ static inline void g_set_error(GError **e,int domain,int code,const char *fmt,..
 }
 static inline void g_mutex_init(GMutex *m) { assert(!pthread_mutex_init(m,NULL)); }
 static inline void g_mutex_clear(GMutex *m) { assert(!pthread_mutex_destroy(m)); }
+static inline gboolean g_mutex_trylock(GMutex *m) { return pthread_mutex_trylock(m)==0; }
 static inline void g_mutex_lock(GMutex *m) { assert(!pthread_mutex_lock(m)); }
 static inline void g_mutex_unlock(GMutex *m) { assert(!pthread_mutex_unlock(m)); }
 static inline void g_cond_init(GCond *c) {

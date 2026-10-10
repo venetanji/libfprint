@@ -31,4 +31,9 @@ for (unsigned i=0;i<3;i++) {
   assert(strstr(warning,"ack-pending=1 reply-pending=1"));
 }
 puts("unmatched DOWN is diagnosed and discarded before owned completion");
+
+setup(0x20);private_state.ack=private_state.reply=0;
+goodix_receive_done(&dev,NULL,0,g_error_new_literal(G_IO_ERROR,G_IO_ERROR_INVALID_DATA,"idle failure"));
+assert(private_state.terminal_error && calls==0);goodix_reset_state(&dev);assert(private_state.terminal_error);
+puts("idle receive error is latched across command reset");
 free(private_state.data);return 0;}

@@ -19,6 +19,7 @@ typedef struct {
  GCancellable *transfer_cancel_tkn;
  guint8 cmd,*data;guint32 length;GSource *timeout;
  GoodixCmdCallback callback;gpointer user_data;
+ gboolean terminal_error;
 } FpiDeviceGoodixTlsPrivate;
 static FpiDeviceGoodixTlsPrivate state;
 static guint commands,tls_callbacks,transitions,failed_ssms,send_calls,event_calls,event_destroys;

@@ -354,6 +354,9 @@ foreach test_name: unit_tests
         sources: basename + '.c',
         dependencies: [ libfprint_private_dep ] + extra_deps,
         c_args: common_cflags,
+        link_args: test_name == 'fpi-device' ? [
+            '-Wl,--wrap=g_usb_device_close',
+        ] : [],
         link_whole: test_utils,
         install: installed_tests,
         install_dir: installed_tests_execdir,
@@ -474,7 +477,7 @@ endif
 if 'goodix521d' in drivers
     goodix521d_inc = include_directories('../libfprint/drivers/goodix521d',
                                          '../libfprint/drivers/goodix521d/chicago')
-    foreach test_name : ['input', 'up-request', 'paired-reference', 'session', 'print-envelope', 'registration', 'driver-lifecycle']
+    foreach test_name : ['timing', 'input', 'up-request', 'paired-reference', 'session', 'print-envelope', 'registration', 'driver-lifecycle']
         test_link_args = []
         gx_test = executable('goodix521d-' + test_name,
             'goodix521d-' + test_name + '.c',

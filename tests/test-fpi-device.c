@@ -29,6 +29,7 @@
 #include "fpi-log.h"
 #include "test-device-fake.h"
 #include "fp-print-private.h"
+#include "fp-device-private.h"
 
 /* gcc 12.0.1 is complaining about dangling pointers in the auto_close* functions */
 #if G_GNUC_CHECK_VERSION (12, 0)
@@ -991,6 +992,224 @@ test_driver_close_error (void)
   g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL);
   g_assert (error == g_steal_pointer (&fake_dev->ret_error));
   g_assert_false (fp_device_is_open (device));
+}
+
+/* Keep the real public task machinery and driver close vfunc. Only GUsb's
+ * external handle calls are replaced for this fixture; no USB is opened. */
+static gboolean close_abort_usb_fixture;
+static guint close_abort_usb_closes, close_abort_driver_calls;
+static guint close_abort_mode;
+static guint close_abort_cancel_when;
+static GCancellable *close_abort_cancellable;
+
+gboolean __real_g_usb_device_close (GUsbDevice *device, GError **error);
+gboolean __wrap_g_usb_device_close (GUsbDevice *device, GError **error);
+
+gboolean
+__wrap_g_usb_device_close (GUsbDevice *device, GError **error)
+{
+  if (!close_abort_usb_fixture)
+    return __real_g_usb_device_close (device, error);
+  g_assert_null (device);
+  close_abort_usb_closes++;
+  return TRUE;
+}
+
+static void
+fake_device_close_abort (FpDevice *device)
+{
+  close_abort_driver_calls++;
+  g_assert_cmpuint (fpi_device_get_current_action (device), ==, FPI_DEVICE_ACTION_CLOSE);
+  if (close_abort_mode == 0)
+    {
+      if (close_abort_cancel_when == 1)
+        g_cancellable_cancel (close_abort_cancellable);
+      fpi_device_close_abort (device,
+          g_error_new_literal (G_IO_ERROR, G_IO_ERROR_TIMED_OUT, "Synthetic incomplete teardown"));
+      if (close_abort_cancel_when == 2)
+        g_cancellable_cancel (close_abort_cancellable);
+    }
+  else if (close_abort_mode == 3)
+    {
+      g_test_expect_message (G_LOG_DOMAIN, G_LOG_LEVEL_CRITICAL,
+                             "*assertion*error != NULL*failed*");
+      fpi_device_close_abort (device, NULL);
+      g_test_assert_expected_messages ();
+      fpi_device_close_complete (device, NULL);
+    }
+  else if (close_abort_mode == 4)
+    {
+      g_autoptr(GError) duplicate = fpi_device_error_new (FP_DEVICE_ERROR_GENERAL);
+      fpi_device_close_abort (device,
+          g_error_new_literal (G_IO_ERROR, G_IO_ERROR_TIMED_OUT, "Synthetic incomplete teardown"));
+      g_test_expect_message (G_LOG_DOMAIN, G_LOG_LEVEL_CRITICAL,
+                             "*assertion*current_task_idle_return_source == NULL*failed*");
+      fpi_device_close_abort (device, duplicate);
+      g_test_assert_expected_messages ();
+    }
+  else
+    fpi_device_close_complete (device, close_abort_mode == 2 ?
+        fpi_device_error_new (FP_DEVICE_ERROR_GENERAL) : NULL);
+}
+
+static void
+close_abort_open_notified (GObject *object, GParamSpec *spec, gpointer data)
+{
+  guint *count = data;
+  (void) object;
+  (void) spec;
+  (*count)++;
+}
+
+static void
+close_abort_open_without_usb (FpDevice *device)
+{
+  /* Open through the real public API with the virtual fake backend, then
+   * select the USB close branch. This does not fake task/open-state handling.
+   * It avoids opening a physical handle solely to count its close boundary. */
+  FpDeviceClass *base_class = g_type_class_peek_static (FP_TYPE_DEVICE);
+  FpDevicePrivate *priv = G_STRUCT_MEMBER_P (device,
+      g_type_class_get_instance_private_offset (base_class));
+  priv->type = FP_DEVICE_TYPE_VIRTUAL;
+  g_assert_true (fp_device_open_sync (device, NULL, NULL));
+  priv->type = FP_DEVICE_TYPE_USB;
+}
+
+static FpDevice *
+close_abort_device_new (FpDeviceClass *dev_class)
+{
+  close_abort_usb_fixture = TRUE;
+  close_abort_usb_closes = close_abort_driver_calls = 0;
+  close_abort_mode = close_abort_cancel_when = 0;
+  close_abort_cancellable = NULL;
+  dev_class->type = FP_DEVICE_TYPE_VIRTUAL;
+  dev_class->close = fake_device_close_abort;
+  FpDevice *device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  close_abort_open_without_usb (device);
+  return device;
+}
+
+static void
+test_driver_close_abort_and_retry (void)
+{
+  g_autoptr(FpAutoResetClass) dev_class = auto_reset_device_class ();
+  g_autoptr(FpDevice) device = close_abort_device_new (dev_class);
+  g_autoptr(GError) error = NULL;
+  guint notifications = 0;
+  g_signal_connect (device, "notify::open", G_CALLBACK (close_abort_open_notified), &notifications);
+
+  g_assert_false (fp_device_close_sync (device, NULL, &error));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT);
+  g_clear_error (&error);
+  g_assert_true (fp_device_is_open (device));
+  g_assert_cmpuint (fpi_device_get_current_action (device), ==, FPI_DEVICE_ACTION_NONE);
+  g_assert_cmpuint (close_abort_usb_closes, ==, 0);
+  g_assert_cmpuint (close_abort_driver_calls, ==, 1);
+  g_assert_cmpuint (notifications, ==, 0);
+  g_assert_false (fp_device_open_sync (device, NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_ALREADY_OPEN);
+  g_clear_error (&error);
+
+  close_abort_mode = 1;
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_false (fp_device_is_open (device));
+  g_assert_cmpuint (close_abort_usb_closes, ==, 1);
+  g_assert_cmpuint (close_abort_driver_calls, ==, 2);
+  g_assert_cmpuint (notifications, ==, 1);
+  g_assert_false (fp_device_close_sync (device, NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_NOT_OPEN);
+  g_clear_error (&error);
+  g_assert_cmpuint (close_abort_usb_closes, ==, 1);
+  g_assert_cmpuint (close_abort_driver_calls, ==, 2);
+
+  /* An aborted action cannot poison a later open/normal error-close cycle. */
+  close_abort_open_without_usb (device);
+  close_abort_mode = 2;
+  g_assert_false (fp_device_close_sync (device, NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL);
+  g_assert_false (fp_device_is_open (device));
+  g_assert_cmpuint (close_abort_usb_closes, ==, 2);
+  close_abort_usb_fixture = FALSE;
+}
+
+static void
+test_driver_close_abort_cancelled (void)
+{
+  for (guint when = 1; when <= 2; when++)
+    {
+      g_autoptr(FpAutoResetClass) dev_class = auto_reset_device_class ();
+      g_autoptr(FpDevice) device = close_abort_device_new (dev_class);
+      g_autoptr(GCancellable) cancellable = g_cancellable_new ();
+      g_autoptr(GError) error = NULL;
+      close_abort_cancellable = cancellable;
+      close_abort_cancel_when = when;
+      g_assert_false (fp_device_close_sync (device, cancellable, &error));
+      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+      g_clear_error (&error);
+      g_assert_true (fp_device_is_open (device));
+      g_assert_cmpuint (close_abort_usb_closes, ==, 0);
+      g_assert_cmpuint (close_abort_driver_calls, ==, 1);
+      close_abort_mode = 1;
+      close_abort_cancel_when = 0;
+      g_assert_true (fp_device_close_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      g_assert_false (fp_device_is_open (device));
+      g_assert_cmpuint (close_abort_usb_closes, ==, 1);
+      close_abort_cancellable = NULL;
+      close_abort_usb_fixture = FALSE;
+    }
+}
+
+static void
+test_driver_close_normal_usb_error (void)
+{
+  g_autoptr(FpAutoResetClass) dev_class = auto_reset_device_class ();
+  g_autoptr(FpDevice) device = close_abort_device_new (dev_class);
+  g_autoptr(GError) error = NULL;
+  close_abort_mode = 2;
+  g_assert_false (fp_device_close_sync (device, NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL);
+  g_assert_false (fp_device_is_open (device));
+  g_assert_cmpuint (close_abort_usb_closes, ==, 1);
+  close_abort_usb_fixture = FALSE;
+}
+
+static void
+test_driver_close_abort_guards (void)
+{
+  g_autoptr(FpAutoResetClass) dev_class = auto_reset_device_class ();
+  g_autoptr(FpDevice) device = close_abort_device_new (dev_class);
+  g_autoptr(GError) error = fpi_device_error_new (FP_DEVICE_ERROR_GENERAL);
+
+  /* An idle device cannot acquire a close result marker. */
+  g_test_expect_message (G_LOG_DOMAIN, G_LOG_LEVEL_CRITICAL,
+                         "*assertion*current_action == FPI_DEVICE_ACTION_CLOSE*failed*");
+  fpi_device_close_abort (device, error);
+  g_test_assert_expected_messages ();
+  g_clear_error (&error);
+  g_assert_true (fp_device_is_open (device));
+  g_assert_cmpuint (close_abort_usb_closes, ==, 0);
+
+  close_abort_mode = 3;
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_false (fp_device_is_open (device));
+  g_assert_cmpuint (close_abort_usb_closes, ==, 1);
+
+  close_abort_open_without_usb (device);
+  close_abort_mode = 4;
+  g_assert_false (fp_device_close_sync (device, NULL, &error));
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT);
+  g_clear_error (&error);
+  g_assert_true (fp_device_is_open (device));
+  g_assert_cmpuint (close_abort_usb_closes, ==, 1);
+  close_abort_mode = 1;
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_false (fp_device_is_open (device));
+  g_assert_cmpuint (close_abort_usb_closes, ==, 2);
+  close_abort_usb_fixture = FALSE;
 }
 
 static void
@@ -4109,6 +4328,10 @@ main (int argc, char *argv[])
   g_test_add_func ("/driver/open/error", test_driver_open_error);
   g_test_add_func ("/driver/close", test_driver_close);
   g_test_add_func ("/driver/close/error", test_driver_close_error);
+  g_test_add_func ("/driver/close/abort-and-retry", test_driver_close_abort_and_retry);
+  g_test_add_func ("/driver/close/abort-cancelled", test_driver_close_abort_cancelled);
+  g_test_add_func ("/driver/close/normal-usb-error", test_driver_close_normal_usb_error);
+  g_test_add_func ("/driver/close/abort-guards", test_driver_close_abort_guards);
   g_test_add_func ("/driver/enroll", test_driver_enroll);
   g_test_add_func ("/driver/enroll/error", test_driver_enroll_error);
   g_test_add_func ("/driver/enroll/error/no_print", test_driver_enroll_error_no_print);

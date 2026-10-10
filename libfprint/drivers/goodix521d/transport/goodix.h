@@ -270,3 +270,14 @@ void goodix_tls_read_image(FpDevice* dev, guint8* payload, guint16 length, Goodi
                            gpointer user_data);
 
 // ---- TLS SECTION END ----
+
+/* Main-thread-only, read-only readiness snapshot. Zeroes snapshot on failure.
+ * Equality is required across reuse; never treat a stopped/restarted transport
+ * as the same reference context. This does not perform I/O or authenticate. */
+typedef struct {
+    guint64 read_loop;
+    guint64 tls;
+    guint64 configuration;
+} GoodixTransportHealth;
+gboolean goodix_transport_health(FpDevice *dev, GoodixTransportHealth *snapshot,
+                                  GError **error);

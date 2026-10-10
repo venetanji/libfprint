@@ -3,6 +3,7 @@
  * 2021 Alexander Meiler, Matthieu CHARETTE and Michael Teuscher. */
 #define FP_COMPONENT "goodix521d"
 #include "goodix-acquire.h"
+#include "goodix-timing.h"
 #include "transport/goodix.h"
 #include <string.h>
 
@@ -22,7 +23,47 @@ struct _GoodixAcquisition {
   GoodixAcquired callback;
   gpointer user_data;
   gboolean reference, cancelled;
+  GxTiming timing;
+  guint timing_contact;
+  const char *timing_phase;
+  gboolean timing_active;
 };
+
+/* Diagnostic-only monotonic wall times. Neither these timestamps nor the
+ * context identifiers participate in ownership, cancellation or deadlines. */
+static void
+acquisition_timing_log (GoodixAcquisition *self, const char *phase,
+                        const char *status, gint64 elapsed_us)
+{
+  g_message ("goodix-timing action_id=%" G_GUINT64_FORMAT
+             " reference=%u contact=%u phase=%s status=%s elapsed_us=%" G_GINT64_FORMAT,
+             self->timing.action_id, (guint) self->reference, self->timing_contact,
+             phase, status, elapsed_us);
+}
+
+static void
+acquisition_timing_transition (GoodixAcquisition *self, const char *next_phase)
+{
+  if (!self->timing_active) return;
+  gint64 now = g_get_monotonic_time ();
+  acquisition_timing_log (self, self->timing_phase, "ok",
+                          gx_timing_mark (&self->timing, now));
+  self->timing_phase = next_phase;
+}
+
+static void
+acquisition_timing_complete (GoodixAcquisition *self, const GError *error)
+{
+  if (!self->timing_active) return;
+  self->timing_active = FALSE;
+  gint64 now = g_get_monotonic_time ();
+  const char *status = !error ? "ok" :
+      g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED) ? "cancelled" : "error";
+  acquisition_timing_log (self, self->timing_phase, status,
+                          gx_timing_mark (&self->timing, now));
+  acquisition_timing_log (self, "acquisition-total", status,
+                          gx_timing_total (&self->timing, now));
+}
 
 static gboolean
 acquisition_cancelled (GoodixAcquisition *self)
@@ -51,6 +92,7 @@ acquisition_complete (FpiSsm *ssm, FpDevice *device, GError *error)
   GoodixAcquired callback = self->callback;
   gpointer user_data = self->user_data;
   GxImage image = self->reference ? self->paired_images[0] : self->contact;
+  acquisition_timing_complete (self, error);
   self->ssm = NULL;
   self->callback = NULL;
   memset (self->paired_images, 0, sizeof self->paired_images);
@@ -69,6 +111,7 @@ contact_command (FpDevice *device, guint8 *data, guint16 length, gpointer user_d
       error=fpi_device_error_new_msg(FP_DEVICE_ERROR_PROTO,"Invalid current Goodix DOWN event");
     else {
       memcpy(self->last_down,data,20);
+      acquisition_timing_transition (self, "contact-burst");
       fpi_device_report_finger_status(device,FP_FINGER_STATUS_NEEDED | FP_FINGER_STATUS_PRESENT);
       if (!acquisition_continue(self,ssm)) return;
     }
@@ -82,7 +125,11 @@ contact_register (FpDevice *device, gpointer user_data, GError *error)
 {
   (void)device;
   if (error) fpi_ssm_mark_failed (user_data, error);
-  else fpi_ssm_next_state (user_data);
+  else {
+    if (fpi_ssm_get_cur_state (user_data) == CONTACT_RESTORE)
+      acquisition_timing_transition (fpi_ssm_get_data (user_data), "contact-up");
+    fpi_ssm_next_state (user_data);
+  }
 }
 
 static void
@@ -98,8 +145,10 @@ contact_image (FpDevice *device, guint8 *data, guint16 length, gpointer user_dat
     { fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO)); return; }
   if (++self->frames < 10)
     fpi_ssm_jump_to_state (ssm, CONTACT_MODE);
-  else
+  else {
+    acquisition_timing_transition (self, "contact-restore");
     fpi_ssm_jump_to_state (ssm, CONTACT_RESTORE);
+  }
 }
 
 typedef struct { GoodixAcquisition *self; FpDevice *device; guint64 generation; } UpOwner;
@@ -242,10 +291,21 @@ goodix_acquisition_free (GoodixAcquisition *self)
 }
 
 void
+goodix_acquisition_set_timing_context (GoodixAcquisition *self, guint64 action_id, guint contact)
+{
+  g_return_if_fail (self && !self->ssm);
+  self->timing.action_id = action_id;
+  self->timing_contact = contact;
+}
+
+void
 goodix_acquisition_start (GoodixAcquisition *self, gboolean reference, GoodixAcquired callback, gpointer user_data)
 {
   g_return_if_fail (self && !self->ssm && callback);
   self->reference=reference; self->frames=0;self->generation++;self->cancelled=FALSE;
+  gx_timing_begin (&self->timing, self->timing.action_id, g_get_monotonic_time ());
+  self->timing_phase = reference ? "reference-acquire" : "contact-down";
+  self->timing_active = TRUE;
   memset(self->last_down,0,sizeof self->last_down);
   self->callback=callback; self->user_data=user_data;
   self->paired_retry_count=0;self->paired_f1_valid=FALSE;

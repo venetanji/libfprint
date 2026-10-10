@@ -3,6 +3,11 @@
  * Substitute only the external boundaries while compiling the exact production
  * source. Linker --wrap is too late for LTO: GCC can bind/integrate definitions
  * from libfprint-private before the linker gets an undefined symbol to wrap. */
+#include <glib.h>
+#include <stdio.h>
+static gint64 timing_clock_us = 1000;
+static gint64 timing_clock_read(void) { return timing_clock_us; }
+#define g_get_monotonic_time timing_clock_read
 #define fpi_device_get_cancellable mock_fpi_device_get_cancellable
 #define fpi_device_report_finger_status mock_fpi_device_report_finger_status
 #define goodix_send_mcu_switch_to_fdt_down mock_goodix_send_mcu_switch_to_fdt_down
@@ -12,8 +17,33 @@
 #define goodix_wait_fdt_up mock_goodix_wait_fdt_up
 #define goodix_send_protocol mock_goodix_send_protocol
 #include "../libfprint/drivers/goodix521d/goodix-acquire.c"
+#undef g_get_monotonic_time
 #include "test-device-fake.h"
 #include <string.h>
+typedef struct {
+ guint64 action_id;
+ guint reference,contact;
+ char phase[32],status[16];
+ gint64 elapsed_us;
+} AcquisitionTiming;
+static GArray *timing_records;
+static void capture_timing(const gchar *domain,GLogLevelFlags level,const gchar *message,gpointer data) {
+ (void)domain;(void)level;(void)data;
+ if (!g_str_has_prefix(message,"goodix-timing ")) return;
+ AcquisitionTiming record={0};int end=0;
+ g_assert_cmpint(sscanf(message,"goodix-timing action_id=%" G_GUINT64_FORMAT
+   " reference=%u contact=%u phase=%31s status=%15s elapsed_us=%" G_GINT64_FORMAT "%n",
+   &record.action_id,&record.reference,&record.contact,record.phase,record.status,&record.elapsed_us,&end),==,6);
+ g_assert_cmpint(message[end],==,0);g_assert_cmpint(record.elapsed_us,>=,0);
+ g_array_append_val(timing_records,record);
+}
+static void reset_timing(void) {g_array_set_size(timing_records,0);timing_clock_us=1000;}
+static const AcquisitionTiming *timing_at(guint index,const char *phase,const char *status) {
+ g_assert_cmpuint(index,<,timing_records->len);
+ const AcquisitionTiming *record=&g_array_index(timing_records,AcquisitionTiming,index);
+ g_assert_cmpstr(record->phase,==,phase);g_assert_cmpstr(record->status,==,status);
+ return record;
+}
 static guint frames,done,up_arms;
 static gboolean event_first,fail_up,cancel_present,cancel_removal;
 static gboolean event_phase0, fail_up0, cancel_up0, hold_up1, up_event_pending;
@@ -57,14 +87,17 @@ gboolean mock_fpi_device_report_finger_status(FpDevice *dev,FpFingerStatusFlags 
  return TRUE;
 }
 void mock_goodix_send_mcu_switch_to_fdt_down(FpDevice *dev,guint8 *data,guint16 length,gboolean reply,GDestroyNotify destroy,GoodixDefaultCallback cb,gpointer user) {
+ timing_clock_us+=100;
  g_assert_cmpuint(length,==,39);g_assert_null(destroy);g_assert_cmpuint(data[26],==,reply);
  guint8 response[20]={2,0,255,0};cb(dev,reply?response:NULL,reply?20:0,user,NULL);
 }
 void mock_goodix_send_mcu_switch_to_fdt_mode(FpDevice *dev,guint8 *data,guint16 length,gboolean reply,GDestroyNotify destroy,GoodixDefaultCallback cb,gpointer user) {
+ timing_clock_us+=100;
  (void)data;g_assert_cmpuint(length,==,27);g_assert_false(reply);g_assert_null(destroy);cb(dev,NULL,0,user,NULL);
 }
 void mock_goodix_send_write_sensor_register(FpDevice *dev,guint16 address,guint16 value,GoodixNoneCallback cb,gpointer user) {
  if (reference_mode) { reference_register(dev,address,value,cb,user); return; }
+ timing_clock_us+=100;
  g_assert_cmpuint(address,==,0x022c);
  if (value==0x020a) {
    g_assert_cmpuint(frames,==,10);g_assert_cmpuint(up_arms,==,0);
@@ -82,6 +115,7 @@ void mock_goodix_send_write_sensor_register(FpDevice *dev,guint16 address,guint1
 }
 void mock_goodix_tls_read_image(FpDevice *dev,guint8 *data,guint16 length,GoodixImageCallback cb,gpointer user) {
  if (reference_mode) { reference_image(dev,data,length,cb,user); return; }
+ timing_clock_us+=100;
  g_assert_cmpuint(current_status,==,FP_FINGER_STATUS_NEEDED|FP_FINGER_STATUS_PRESENT);
  guint8 *request=data;g_assert_cmpuint(length,==,10);g_assert_cmpuint(request[0],==,0x45);
  guint8 raw[7684]={0};memcpy(raw+7680,"\xb1\x49\xc0\xf0",4);frames++;if(corrupt_last_image && frames==10)raw[7680]^=1;cb(dev,raw,sizeof raw,user,NULL);
@@ -93,6 +127,7 @@ void mock_goodix_wait_fdt_up(FpDevice *dev,guint timeout,GoodixDefaultCallback c
  event_callback=cb;event_data=data;event_destroy=destroy;
 }
 static void release_event(GError *error) {
+ timing_clock_us+=100;
  GoodixDefaultCallback cb=event_callback;gpointer data=event_data;GDestroyNotify destroy=event_destroy;
  event_callback=NULL;event_data=NULL;event_destroy=NULL;
  /* Successful delivery is transport-gated by both ACKs. A late callback
@@ -112,6 +147,7 @@ static void finish_up1(FpDevice *dev, GoodixCmdCallback cb, gpointer user) {
 }
 void mock_goodix_send_protocol(FpDevice *dev,guint8 opcode,guint8 *data,guint16 length,GDestroyNotify destroy,gboolean checksum,guint timeout,gboolean reply,GoodixCmdCallback cb,gpointer user) {
  if (reference_mode) { reference_protocol(dev,opcode,data,length,destroy,checksum,timeout,reply,cb,user); return; }
+ timing_clock_us+=100;
  g_assert_true(restore_acknowledged);g_assert_cmpuint(restores,==,1);
  g_assert_cmpuint(opcode,==,0x34);g_assert_cmpuint(length,==,40);g_assert_null(destroy);g_assert_true(checksum);g_assert_cmpuint(timeout,==,1000);g_assert_false(reply);
  g_assert_cmpuint(data[0],==,0x8e);for(guint i=27;i<40;i++)g_assert_cmpuint(data[i],==,0);
@@ -142,13 +178,16 @@ static void acquired(FpDevice *dev,const GxImage *image,gpointer user,GError *er
  goodix_acquisition_free(capture);capture=NULL;
 }
 static void run(gboolean early,gboolean error) {
+ reset_timing();
  restores=0;restore_acknowledged=FALSE;restore_callback=NULL;restore_data=NULL;
  up_ack_mask=removal_reports=none_reports=0;up_event_pending=FALSE;
  pending_up1=NULL;pending_up1_data=NULL;
  current_status=FP_FINGER_STATUS_NONE;frames=done=up_arms=0;event_first=early;fail_up=error;g_clear_error(&result_error);
  test_device=g_object_new(FPI_TYPE_DEVICE_FAKE,NULL);
  guint8 otp[64]={0};otp[23]=0x6e;otp[26]=40;otp[33]=41;otp[40]=7;otp[41]=42;otp[42]=43;otp[43]=44;otp[44]=45;otp[45]=46;otp[46]=47;if(capture_mode)otp[23]|=0x80;
- capture=goodix_acquisition_new(test_device,otp);goodix_acquisition_start(capture,FALSE,acquired,NULL);
+ capture=goodix_acquisition_new(test_device,otp);
+ goodix_acquisition_set_timing_context(capture,1234567,4);
+ goodix_acquisition_start(capture,FALSE,acquired,NULL);
  if(cancel_present) {
    g_assert_cmpuint(frames,==,0);g_assert_cmpuint(up_arms,==,0);g_assert_cmpuint(done,==,1);
    g_assert_error(result_error,G_IO_ERROR,G_IO_ERROR_CANCELLED);g_clear_error(&result_error);g_object_unref(test_device);return;
@@ -163,6 +202,8 @@ static void run(gboolean early,gboolean error) {
    g_assert_cmpuint(frames,==,10);g_assert_cmpuint(up_arms,==,0);g_assert_cmpuint(done,==,0);
    g_assert_cmpuint(current_status,==,FP_FINGER_STATUS_NEEDED|FP_FINGER_STATUS_PRESENT);
    g_assert_nonnull(restore_callback);restore_acknowledged=TRUE;
+   g_assert_cmpuint(timing_records->len,==,2); /* No restore success before ACK. */
+   timing_clock_us+=700;
    restore_callback(test_device,restore_data,NULL);restore_callback=NULL;restore_data=NULL;
  }
  if (restore_failure || cancel_restore) {
@@ -190,6 +231,8 @@ static void run(gboolean early,gboolean error) {
    g_assert_cmpuint(done,==,0);g_assert_cmpuint(removal_reports,==,0);
    g_assert_cmpuint(none_reports,==,0);
    g_assert_cmpuint(current_status,==,FP_FINGER_STATUS_NEEDED|FP_FINGER_STATUS_PRESENT);
+   g_assert_cmpuint(timing_records->len,==,3); /* No UP completion before event. */
+   timing_clock_us+=500;
    finish_up1(test_device,pending_up1,pending_up1_data);
    pending_up1=NULL;pending_up1_data=NULL;
  }
@@ -270,6 +313,7 @@ reference_note(gpointer data)
   }
   g_assert_true(reference.ssm==ssm);
   reference.commands++;
+  timing_clock_us+=100;
   return state;
 }
 
@@ -404,6 +448,7 @@ reference_acquired(FpDevice *dev, const GxImage *image, gpointer data, GError *e
 static void
 reference_setup(void)
 {
+  reset_timing();
   guint8 otp[64]={0};
   otp[23]=0x40;otp[26]=37;otp[33]=47;otp[40]=7;
   otp[41]=39;otp[42]=49;otp[43]=41;otp[44]=97;otp[45]=101;otp[46]=103;
@@ -413,6 +458,7 @@ reference_setup(void)
   g_clear_error(&result_error);
   test_device=g_object_new(FPI_TYPE_DEVICE_FAKE,NULL);
   capture=goodix_acquisition_new(test_device,otp);
+  goodix_acquisition_set_timing_context(capture,87654321,0);
 }
 
 static void
@@ -515,9 +561,117 @@ reference_new_start_resets_retry(void)
   reference_teardown();
 }
 
+static void timing_reference_success(void)
+{
+ reference_setup();
+ goodix_acquisition_start(capture,TRUE,reference_acquired,NULL);
+ g_assert_cmpuint(reference.commands,==,12);g_assert_cmpuint(reference.completions,==,1);
+ g_assert_cmpuint(timing_records->len,==,2);
+ const AcquisitionTiming *phase=timing_at(0,"reference-acquire","ok");
+ g_assert_cmpuint(phase->reference,==,1);g_assert_cmpuint(phase->contact,==,0);
+ g_assert_cmpuint(phase->action_id,==,87654321);g_assert_cmpint(phase->elapsed_us,==,1200);
+ g_assert_cmpint(timing_at(1,"acquisition-total","ok")->elapsed_us,==,1200);
+ reference_teardown();
+}
+static void timing_contact_success(void)
+{
+ run(FALSE,FALSE);
+ g_assert_cmpuint(timing_records->len,==,5);
+ const char *phases[]={"contact-down","contact-burst","contact-restore","contact-up","acquisition-total"};
+ const gint64 elapsed[]={200,3000,100,300,3600};
+ for(guint i=0;i<5;i++) {
+   const AcquisitionTiming *record=timing_at(i,phases[i],"ok");
+   g_assert_cmpuint(record->reference,==,0);g_assert_cmpuint(record->action_id,==,1234567);
+   g_assert_cmpuint(record->contact,==,4);g_assert_cmpint(record->elapsed_us,==,elapsed[i]);
+ }
+ g_assert_cmpuint(frames,==,10);g_assert_cmpuint(restores,==,1);g_assert_cmpuint(up_arms,==,2);
+}
+
+static void timing_reference_retry_and_error(void)
+{
+ reference_setup();reference.reject_state=PAIRED_REFERENCE_F2_PHASE1;
+ goodix_acquisition_start(capture,TRUE,reference_acquired,NULL);
+ g_assert_cmpuint(reference.attempts,==,2);g_assert_cmpuint(reference.commands,==,19);
+ g_assert_cmpuint(timing_records->len,==,2);
+ g_assert_cmpint(timing_at(0,"reference-acquire","ok")->elapsed_us,==,1900);
+ g_assert_cmpint(timing_at(1,"acquisition-total","ok")->elapsed_us,==,1900);
+ reference_teardown();
+ reference_setup();reference.fail_state=PAIRED_REFERENCE_F2_PHASE1;
+ goodix_acquisition_start(capture,TRUE,reference_acquired,NULL);
+ g_assert_cmpuint(reference.commands,==,7);g_assert_cmpuint(timing_records->len,==,2);
+ g_assert_cmpint(timing_at(0,"reference-acquire","error")->elapsed_us,==,700);
+ g_assert_cmpint(timing_at(1,"acquisition-total","error")->elapsed_us,==,700);
+ reference_teardown();
+ reference_setup();reference.fail_state=PAIRED_REFERENCE_IMAGE1;reference.failure_kind=2;
+ goodix_acquisition_start(capture,TRUE,reference_acquired,NULL);
+ g_assert_cmpuint(reference.commands,==,4);g_assert_cmpuint(timing_records->len,==,2);
+ g_assert_cmpint(timing_at(0,"reference-acquire","cancelled")->elapsed_us,==,400);
+ timing_at(1,"acquisition-total","cancelled");
+ reference_teardown();
+}
+static void timing_contact_failure_and_cancel(void)
+{
+ restore_failure=2;run(FALSE,FALSE);restore_failure=0;
+ g_assert_cmpuint(timing_records->len,==,4);
+ g_assert_cmpint(timing_at(0,"contact-down","ok")->elapsed_us,==,200);
+ g_assert_cmpint(timing_at(1,"contact-burst","ok")->elapsed_us,==,3000);
+ g_assert_cmpint(timing_at(2,"contact-restore","error")->elapsed_us,==,100);
+ g_assert_cmpint(timing_at(3,"acquisition-total","error")->elapsed_us,==,3300);
+ corrupt_last_image=TRUE;run(FALSE,FALSE);corrupt_last_image=FALSE;
+ g_assert_cmpuint(timing_records->len,==,3);
+ timing_at(1,"contact-burst","error");timing_at(2,"acquisition-total","error");
+ cancel_present=TRUE;run(FALSE,FALSE);cancel_present=FALSE;
+ g_assert_cmpuint(timing_records->len,==,3);
+ timing_at(0,"contact-down","ok");timing_at(1,"contact-burst","cancelled");
+ g_assert_cmpint(timing_at(2,"acquisition-total","cancelled")->elapsed_us,==,200);
+ cancel_removal=TRUE;run(FALSE,FALSE);cancel_removal=FALSE;
+ /* run() delivers a late event after cancellation. It cannot duplicate logs. */
+ g_assert_cmpuint(timing_records->len,==,5);
+ timing_at(3,"contact-up","cancelled");timing_at(4,"acquisition-total","cancelled");
+}
+static void timing_waits_for_verified_boundaries(void)
+{
+ hold_restore=TRUE;run(FALSE,FALSE);hold_restore=FALSE;
+ g_assert_cmpuint(timing_records->len,==,5);
+ g_assert_cmpint(timing_at(2,"contact-restore","ok")->elapsed_us,==,800);
+ g_assert_cmpint(timing_at(4,"acquisition-total","ok")->elapsed_us,==,4300);
+ event_phase0=TRUE;hold_up1=TRUE;run(TRUE,FALSE);hold_up1=FALSE;event_phase0=FALSE;
+ g_assert_cmpuint(timing_records->len,==,5);
+ g_assert_cmpint(timing_at(3,"contact-up","ok")->elapsed_us,==,800);
+ g_assert_cmpint(timing_at(4,"acquisition-total","ok")->elapsed_us,==,4100);
+}
+static void timing_context_reuse_and_clamp(void)
+{
+ reference_setup();
+ goodix_acquisition_start(capture,TRUE,reference_acquired,NULL);
+ g_assert_cmpuint(timing_records->len,==,2);
+ memset(&reference,0,sizeof reference);reference.fail_state=reference.reject_state=-1;
+ goodix_acquisition_set_timing_context(capture,87654322,9);
+ timing_clock_us=5000;g_array_set_size(timing_records,0);
+ goodix_acquisition_start(capture,TRUE,reference_acquired,NULL);
+ g_assert_cmpuint(timing_records->len,==,2);
+ const AcquisitionTiming *record=timing_at(1,"acquisition-total","ok");
+ g_assert_cmpuint(record->action_id,==,87654322);g_assert_cmpuint(record->contact,==,9);
+ g_assert_cmpint(record->elapsed_us,==,1200);
+ /* Test only the timing layer under a synthetic clock regression. It must
+  * never produce negative elapsed values or affect acquisition generation. */
+ guint64 generation=capture->generation;
+ g_array_set_size(timing_records,0);capture->timing_active=TRUE;
+ capture->timing_phase="reference-acquire";gx_timing_begin(&capture->timing,99,7000);
+ timing_clock_us=6999;acquisition_timing_complete(capture,NULL);
+ g_assert_cmpuint(timing_records->len,==,2);
+ g_assert_cmpint(timing_at(0,"reference-acquire","ok")->elapsed_us,==,0);
+ g_assert_cmpint(timing_at(1,"acquisition-total","ok")->elapsed_us,==,0);
+ acquisition_timing_complete(capture,NULL);g_assert_cmpuint(timing_records->len,==,2);
+ g_assert_cmpuint(capture->generation,==,generation);
+ reference_teardown();
+}
+
 int main(int argc, char **argv)
 {
   g_test_init(&argc,&argv,NULL);
+  timing_records=g_array_new(FALSE,FALSE,sizeof(AcquisitionTiming));
+  guint log_handler=g_log_set_handler("libfprint-goodix521d",G_LOG_LEVEL_MESSAGE,capture_timing,NULL);
   g_test_add_func("/goodix521d/acquisition/contact",contact_cases);
   g_test_add_func("/goodix521d/acquisition/contact-phase0-event-waits-both-acks",contact_phase0_event_waits_for_both_acks);
   g_test_add_func("/goodix521d/acquisition/contact-phase0-error-stops-phase1",contact_phase0_error_stops_phase1);
@@ -527,5 +681,13 @@ int main(int argc, char **argv)
   g_test_add_func("/goodix521d/acquisition/reference-cancel-no-retry",reference_cancel_prevents_retry);
   g_test_add_func("/goodix521d/acquisition/reference-command-errors-no-retry",reference_command_errors_do_not_retry);
   g_test_add_func("/goodix521d/acquisition/reference-new-start-resets-retry",reference_new_start_resets_retry);
-  return g_test_run();
+  g_test_add_func("/goodix521d/acquisition/timing-reference",timing_reference_success);
+  g_test_add_func("/goodix521d/acquisition/timing-contact",timing_contact_success);
+  g_test_add_func("/goodix521d/acquisition/timing-reference-retry-error",timing_reference_retry_and_error);
+  g_test_add_func("/goodix521d/acquisition/timing-contact-error-cancel",timing_contact_failure_and_cancel);
+  g_test_add_func("/goodix521d/acquisition/timing-context-reuse-clamp",timing_context_reuse_and_clamp);
+  g_test_add_func("/goodix521d/acquisition/timing-verified-boundaries",timing_waits_for_verified_boundaries);
+  int result=g_test_run();
+  g_log_remove_handler("libfprint-goodix521d",log_handler);g_array_unref(timing_records);
+  return result;
 }
