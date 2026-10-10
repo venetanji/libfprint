@@ -14,7 +14,7 @@
  * DRIVER OVERVIEW
  * ============================================================================
  *
- * DRIVER VERSION TAG: V44
+ * DRIVER VERSION TAG: V45
  * Keep this tag updated at every iteration to make runtime/source identification
  * unambiguous across logs, backups and manual syncs.
  *
@@ -42,18 +42,13 @@
  */
 
 #define FP_COMPONENT "canvasbio"
-#define CB2000_DRIVER_VERSION_TAG "V44"
+#define CB2000_DRIVER_VERSION_TAG "V45"
 
 #include "drivers_api.h"
-#include <stdio.h>   /* For raw dump file operations */
-#include <time.h>    /* For timestamp in filename */
 #include <string.h>  /* For memcpy/strlen */
 #include <math.h>    /* For sqrt() in NCC */
 #include <gio/gio.h>
 #include "canvasbio-ncc.h"
-
-/* Raw dump configuration for stride debugging */
-#define CB2000_RAW_DUMP_ENABLED 1
 
 /* ============================================================================
  * DEVICE CONSTANTS
@@ -849,17 +844,6 @@ invert_image_u8 (guint8 *data, gsize len)
     data[i] = 0xff - data[i];
 }
 
-static gboolean
-cb2000_dump_binarized_enabled (void)
-{
-  const gchar *v = g_getenv ("CB2000_DUMP_BIN");
-
-  if (!v)
-    return FALSE;
-  return g_ascii_strcasecmp (v, "1") == 0 ||
-         g_ascii_strcasecmp (v, "true") == 0 ||
-         g_ascii_strcasecmp (v, "yes") == 0;
-}
 
 /*
  * Parse a boolean env var with explicit defaults.
@@ -1249,128 +1233,6 @@ cb2000_action_label (FpiDeviceAction action)
   return "capture";
 }
 
-/*
- * Persist last frame per action for fast offline inspection even when the
- * higher-level example does not emit a PGM (e.g. verify ending in retry).
- * Files are written to $HOME by default.
- */
-static gboolean
-cb2000_should_save_debug_pgm (FpiDeviceAction action)
-{
-  gboolean global_default = cb2000_get_env_bool ("CB2000_DEBUG_SAVE_PGM", TRUE);
-
-  switch (action)
-    {
-    case FPI_DEVICE_ACTION_NONE:
-    case FPI_DEVICE_ACTION_PROBE:
-    case FPI_DEVICE_ACTION_OPEN:
-    case FPI_DEVICE_ACTION_CLOSE:
-    case FPI_DEVICE_ACTION_LIST:
-    case FPI_DEVICE_ACTION_DELETE:
-    case FPI_DEVICE_ACTION_CLEAR_STORAGE:
-      return global_default;
-
-    case FPI_DEVICE_ACTION_VERIFY:
-      return cb2000_get_env_bool ("CB2000_DEBUG_SAVE_VERIFY", global_default);
-
-    case FPI_DEVICE_ACTION_IDENTIFY:
-      return cb2000_get_env_bool ("CB2000_DEBUG_SAVE_IDENTIFY", global_default);
-
-    case FPI_DEVICE_ACTION_ENROLL:
-      return cb2000_get_env_bool ("CB2000_DEBUG_SAVE_ENROLL", global_default);
-
-    case FPI_DEVICE_ACTION_CAPTURE:
-      return cb2000_get_env_bool ("CB2000_DEBUG_SAVE_CAPTURE", global_default);
-
-    default:
-      return global_default;
-    }
-}
-
-static const gchar *
-cb2000_debug_pgm_name (FpiDeviceAction action)
-{
-  switch (action)
-    {
-    case FPI_DEVICE_ACTION_NONE:
-    case FPI_DEVICE_ACTION_PROBE:
-    case FPI_DEVICE_ACTION_OPEN:
-    case FPI_DEVICE_ACTION_CLOSE:
-    case FPI_DEVICE_ACTION_LIST:
-    case FPI_DEVICE_ACTION_DELETE:
-    case FPI_DEVICE_ACTION_CLEAR_STORAGE:
-      return "canvasbio_debug.pgm";
-
-    case FPI_DEVICE_ACTION_CAPTURE:
-      return "finger.pgm";
-
-    case FPI_DEVICE_ACTION_ENROLL:
-      return "enrolled.pgm";
-
-    case FPI_DEVICE_ACTION_VERIFY:
-    case FPI_DEVICE_ACTION_IDENTIFY:
-      return "verify.pgm";
-
-    default:
-      return "canvasbio_debug.pgm";
-    }
-}
-
-static const gchar *
-cb2000_get_output_dir (void)
-{
-  const gchar *out_dir = g_getenv ("CB2000_OUTPUT_DIR");
-  const gchar *home;
-
-  if (out_dir && *out_dir)
-    return out_dir;
-
-  home = g_get_home_dir ();
-  if (home && *home)
-    return home;
-
-  return ".";
-}
-
-static void
-cb2000_save_debug_pgm (FpImage *img, FpiDeviceAction action)
-{
-  const gchar *out_dir;
-  g_autofree gchar *pgm_path = NULL;
-  g_autofree gchar *header = NULL;
-  g_autofree guint8 *pgm_data = NULL;
-  gsize pixels;
-  gsize header_len;
-  gsize total_len;
-
-  g_autoptr(GError) error = NULL;
-
-  if (!img || !cb2000_should_save_debug_pgm (action))
-    return;
-
-  out_dir = cb2000_get_output_dir ();
-  g_mkdir_with_parents (out_dir, 0755);
-  pgm_path = g_build_filename (out_dir, cb2000_debug_pgm_name (action), NULL);
-
-  pixels = (gsize) img->width * (gsize) img->height;
-  header = g_strdup_printf ("P5\n%d %d\n255\n", img->width, img->height);
-  header_len = strlen (header);
-  total_len = header_len + pixels;
-  pgm_data = g_malloc (total_len);
-
-  memcpy (pgm_data, header, header_len);
-  memcpy (pgm_data + header_len, img->data, pixels);
-
-  if (!g_file_set_contents (pgm_path, (const gchar *) pgm_data, total_len, &error))
-    {
-      fp_dbg ("Failed to save debug PGM %s: %s", pgm_path,
-              error ? error->message : "unknown");
-      return;
-    }
-
-  fp_dbg ("Saved debug PGM: %s (%dx%d)", pgm_path, img->width, img->height);
-}
-
 static int
 cb2000_get_area_min_pct (FpiDeviceAction action)
 {
@@ -1714,63 +1576,6 @@ cb2000_minutiae_precheck_cb (GObject *source, GAsyncResult *res, gpointer user_d
   g_free (ctx);
 }
 
-static void
-cb2000_dump_binarized_cb (GObject *source, GAsyncResult *res, gpointer user_data)
-{
-  FpImage *img = FP_IMAGE (source);
-
-  g_autoptr(GError) error = NULL;
-  g_autofree gchar *label = user_data;
-
-  if (!fp_image_detect_minutiae_finish (img, res, &error))
-    {
-      fp_warn ("Binarized dump: minutiae detect failed: %s",
-               error ? error->message : "unknown");
-      g_object_unref (img);
-      return;
-    }
-
-  gsize len = 0;
-  const guchar *bin = fp_image_get_binarized (img, &len);
-  if (!bin || len != (gsize) (img->width * img->height))
-    {
-      fp_warn ("Binarized dump: invalid buffer");
-      g_object_unref (img);
-      return;
-    }
-
-  g_autofree gchar *dump_dir = g_build_filename (
-    g_get_user_special_dir (G_USER_DIRECTORY_DOWNLOAD),
-    "canvasbio_bin", NULL);
-  g_mkdir_with_parents (dump_dir, 0755);
-
-  time_t raw = time (NULL);
-  struct tm *tm_info = localtime (&raw);
-  char timestamp[32];
-  strftime (timestamp, sizeof (timestamp), "%Y%m%d_%H%M%S", tm_info);
-
-  g_autofree gchar *dump_name =
-    g_strdup_printf ("canvasbio_%s_%s_bin.pgm", label, timestamp);
-  g_autofree gchar *dump_path = g_build_filename (dump_dir, dump_name, NULL);
-
-  g_autofree guint8 *pgm = g_malloc (len);
-  for (gsize i = 0; i < len; i++)
-    pgm[i] = bin[i] ? 0x00 : 0xff;     /* 1=ridge => black, 0=valley => white */
-
-  g_autofree gchar *header =
-    g_strdup_printf ("P5\n%u %u\n255\n", img->width, img->height);
-  gsize header_len = strlen (header);
-  g_autofree gchar *out = g_malloc (header_len + len);
-  memcpy (out, header, header_len);
-  memcpy (out + header_len, pgm, len);
-
-  if (g_file_set_contents (dump_path, out, header_len + len, NULL))
-    fp_info ("BIN DUMP: %zu bytes -> %s", header_len + len, dump_path);
-  else
-    fp_warn ("BIN DUMP: failed to save %s", dump_path);
-
-  g_object_unref (img);
-}
 
 /*
  * Run a table-driven USB command sequence inside a sub-SSM.
@@ -2419,14 +2224,24 @@ cmd_transfer_cb (FpiUsbTransfer *transfer,
                  GError         *error)
 {
   FpiDeviceCanvasbio *self = FPI_DEVICE_CANVASBIO (dev);
-  Cb2000CmdContext *ctx;
-  const Cb2000Command *cmd;
+  Cb2000CmdContext *ctx = fpi_ssm_get_data (transfer->ssm);
+  const Cb2000Command *cmd = &ctx->commands[ctx->cmd_index];
 
   if (error)
     {
-      fp_warn ("Command transfer failed: %s", error->message);
-      fpi_ssm_mark_failed (transfer->ssm, error);
-      return;
+      if (error->message && strstr (error->message, "more data than requested"))
+        {
+          fp_warn ("Command transfer overflow tolerated: %s", error->message);
+          g_clear_error (&error);
+          if (transfer->actual_length == 0 || transfer->actual_length == (gsize) -1)
+            transfer->actual_length = cmd->len;
+        }
+      else
+        {
+          fp_warn ("Command transfer failed: %s", error->message);
+          fpi_ssm_mark_failed (transfer->ssm, error);
+          return;
+        }
     }
 
   if (self->deactivating || self->deactivation_in_progress || fpi_device_action_is_cancelled (dev))
@@ -2438,8 +2253,6 @@ cmd_transfer_cb (FpiUsbTransfer *transfer,
       return;
     }
 
-  ctx = fpi_ssm_get_data (transfer->ssm);
-  cmd = &ctx->commands[ctx->cmd_index];
   cb2000_log_cmd_rx_data (dev, ctx, cmd, transfer);
   ctx->cmd_index++;
   fpi_ssm_jump_to_state (transfer->ssm, 0);
@@ -4155,29 +3968,6 @@ cycle_run_state (FpiSsm *ssm, FpDevice *dev)
       fp_dbg ("Cycle: SUBMIT_IMAGE (got %zu/%d bytes)",
               self->image_offset, CB2000_IMG_SIZE);
 
-      /* === RAW DUMP ===
-       * Enabled only for debugging and protocol validation. */
-        #if CB2000_RAW_DUMP_ENABLED
-      {
-        time_t now = time (NULL);
-        struct tm *tm_info = localtime (&now);
-        char timestamp[32];
-        strftime (timestamp, sizeof (timestamp), "%Y%m%d_%H%M%S", tm_info);
-        const gchar *out_dir = cb2000_get_output_dir ();
-        g_autofree gchar *dump_name = g_strdup_printf ("canvasbio_%s.raw", timestamp);
-        g_autofree gchar *dump_path = NULL;
-
-        g_mkdir_with_parents (out_dir, 0755);
-        dump_path = g_build_filename (out_dir, dump_name, NULL);
-
-        if (g_file_set_contents (dump_path,
-                                 (const gchar *) self->image_buffer,
-                                 self->image_offset, NULL))
-          fp_info ("RAW DUMP: %zu bytes -> %s", self->image_offset, dump_path);
-        else
-          fp_dbg ("RAW DUMP: failed to save %s", dump_path);
-      }
-        #endif
 
       /* Create and submit image to libfprint for MoH processing. */
       {
@@ -4339,21 +4129,6 @@ cycle_run_state (FpiSsm *ssm, FpDevice *dev)
               }
           }
 
-        /* Save action-scoped PGM for debug (latest frame always available). */
-        cb2000_save_debug_pgm (img, action);
-
-        if (cb2000_dump_binarized_enabled ())
-          {
-            FpImage *dbg = fp_image_new (CB2000_IMG_WIDTH, CB2000_IMG_HEIGHT);
-            dbg->ppmm = img->ppmm;
-            dbg->flags = img->flags;
-            memcpy (dbg->data, img->data, CB2000_IMG_SIZE);
-
-            g_autofree gchar *label =
-              g_strdup (cb2000_action_label (action));
-            fp_image_detect_minutiae (dbg, NULL, cb2000_dump_binarized_cb,
-                                      g_steal_pointer (&label));
-          }
 
         fp_info ("Captured fingerprint: %zu bytes (%dx%d)",
                  self->image_offset, img->width, img->height);
