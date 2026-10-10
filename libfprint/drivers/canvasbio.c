@@ -19,8 +19,8 @@
  * unambiguous across logs, backups and manual syncs.
  *
  * Current Linux implementation uses the host-side matching path (MoH behavior):
- * the sensor captures a raw grayscale image, and libfprint performs minutiae
- * extraction/matching. A runtime-gated skeleton hook exists for future
+ * the sensor captures a raw grayscale image, and the driver performs image-based
+ * NCC matching. A runtime-gated skeleton hook exists for future
  * device-assisted verify experiments without changing the default behavior.
  *
  * Device specifications:
@@ -28,6 +28,15 @@
  *   - Product IDs: 0x0003
  *   - Image size: 80x64 pixels (5120 bytes)
  *   - Interface:  USB bulk transfers + vendor control requests
+ *
+ * ARCHITECTURE DECISION: FpDevice vs FpImageDevice
+ * The CB2000 sensor has a very small physical capture area (80x64 pixels).
+ * Upstream FpImageDevice utilizes the NBIS matcher, which struggles to
+ * reliably extract and match minutiae from such small partial prints.
+ * Because of this limitation, the driver subclasses FpDevice directly and
+ * implements its own custom Normalized Cross-Correlation (NCC) image matching
+ * algorithm (in canvasbio-ncc.c). This ensures acceptable FAR/FRR performance
+ * that NBIS cannot achieve for this specific hardware dimension.
  *
  * Architecture: Master cycle SSM + sub-SSMs per phase.
  * First cycle does USB reset + full activation. Subsequent cycles do soft rearm:
