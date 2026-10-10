@@ -476,9 +476,6 @@ if 'goodix521d' in drivers
                                          '../libfprint/drivers/goodix521d/chicago')
     foreach test_name : ['input', 'up-request', 'paired-reference', 'session', 'print-envelope', 'registration', 'driver-lifecycle']
         test_link_args = []
-        if test_name == 'session'
-            test_link_args += '-Wl,--wrap=goodix_chicago_runtime_preprocess'
-        endif
         gx_test = executable('goodix521d-' + test_name,
             'goodix521d-' + test_name + '.c',
             include_directories: goodix521d_inc,

@@ -35,6 +35,12 @@ Start with the reader clear. Opening obtains a fresh paired background: three FD
 
 Each contact uses a new authenticated hardware context, the established ten-frame settled capture recipe and the final integrity-checked native 80×64 frame. A current FDT-down event supplies the translated base for a separately armed, checksummed FDT-up event. ACK alone cannot satisfy finger removal. Contact images never pass through the old min/max/resize/invert preview path.
 
+Before enrollment, fprintd performs a duplicate-identification capture even when
+no prints are stored. An empty gallery still uses the ordinary capture and
+quality checks and returns no match; then enrollment begins. Its initial
+`enroll-stage-passed` notification is the duplicate check, not an accepted
+OpenChicago enrollment sample. No old templates need deleting for this path.
+
 Enrollment uses OpenChicago's natural completion policy: 12 counted stages, its existing quality/coverage/tip policy and maximum-sample behavior. The driver cannot export a partial enrollment. Every accepted or retried contact must finish removal before a new contact is acquired. The session has a 64-contact and 15-minute bound; open and verification are separately bounded. Cancelling discards late algorithm results.
 
 Templates contain a strict versioned envelope with backend and preprocessing versions, profile 17, sensor identity digest and exact configuration digest. Incompatible or malformed templates fail import. Adaptive session memory is not serialized into fingerprints. Verification does not perform template study and does not try another backend after rejection.

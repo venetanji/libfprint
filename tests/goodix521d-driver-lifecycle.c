@@ -59,6 +59,9 @@ static struct {
   gboolean fail_input, fail_init, fail_cleanup, cancel_unwinds_error;
   guint completed[5], succeeded[5], close_completed;
   guint progress, reports, captures, starts, stops, cancels, exports;
+  guint matcher_calls, matcher_count, identify_matches;
+  gboolean matcher_fail, report_retry;
+  OcReject matcher_reject;
   guint sessions_created, sessions_freed, acquisitions_created, acquisitions_freed;
   GError *error;
   GoodixAcquired capture_callback;
@@ -137,12 +140,14 @@ void mock_enroll_progress (FpDevice *device, gint stages, FpPrint *print, GError
 void mock_verify_report (FpDevice *device, FpiMatchResult result, FpPrint *print, GError *error)
 {
   state.reports++;
+  state.report_retry = error && error->domain == FP_DEVICE_RETRY;
   g_clear_error (&error);
   if (state.cancel_report)
     cancel_operation (device);
 }
 void mock_identify_report (FpDevice *device, FpPrint *match, FpPrint *print, GError *error)
 {
+  if (match) state.identify_matches++;
   mock_verify_report (device, FPI_MATCH_SUCCESS, print, error);
 }
 void mock_get_identify_data (FpDevice *device, GPtrArray **prints) { *prints = state.prints; }
@@ -267,10 +272,16 @@ gboolean mock_identify (OcSession *session, GBytes *const *templates, guint coun
                        gint *match, GBytes **updated, GError **error)
 {
   worker_gate ();
-  result->match = TRUE;
-  result->score = 42;
-  result->reject = OC_REJECT_NONE;
-  *match = 0;
+  state.matcher_calls++;
+  state.matcher_count = count;
+  if (state.matcher_fail) {
+    g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED, "synthetic matcher failure");
+    return FALSE;
+  }
+  result->match = count > 0;
+  result->score = count ? 42 : 0;
+  result->reject = state.matcher_reject;
+  *match = count ? 0 : -1;
   return TRUE;
 }
 GVariant *mock_envelope_export (const GxPrintIdentity *identity, gboolean completed,
@@ -600,6 +611,77 @@ test_cancel_unwind_completes_once (void)
   finish_state (device);
 }
 
+/* fprintd performs duplicate identification before the first enrollment,
+ * including when the gallery is empty. This must retain the ordinary capture,
+ * quality, cancellation and deadline paths without inventing a match. */
+static void
+test_empty_identify (gconstpointer data)
+{
+  guint mode = GPOINTER_TO_UINT (data);
+  reset_state ();
+  FpDevice *device = prepare_action (ACTION_IDENTIFY);
+  clear_deadline (SELF (device));
+  SELF (device)->action = ACTION_NONE;
+  g_clear_pointer (&SELF (device)->templates, g_ptr_array_unref);
+  g_ptr_array_set_size (state.prints, 0);
+  dev_identify (device);
+  g_assert_cmpuint (state.captures, ==, 1);
+  g_assert_cmpuint (state.completed[ACTION_IDENTIFY], ==, 0);
+  if (mode == 1) state.matcher_reject = OC_REJECT_NO_FEATURES;
+  if (mode == 2) state.matcher_fail = TRUE;
+  start_processing (device);
+  if (mode == 3) cancel_operation (device);
+  if (mode == 4) {
+    SELF (device)->deadline_us = g_get_monotonic_time () - 1;
+    g_source_set_ready_time (SELF (device)->deadline, -1);
+  }
+  release_processing ();
+  wait_completed (ACTION_IDENTIFY, 1);
+  g_assert_cmpuint (state.matcher_calls, ==, 1);
+  g_assert_cmpuint (state.matcher_count, ==, 0);
+  g_assert_cmpuint (state.identify_matches, ==, 0);
+  g_assert_cmpuint (state.exports, ==, 0);
+  if (mode < 2) {
+    g_assert_no_error (state.error);
+    g_assert_cmpuint (state.succeeded[ACTION_IDENTIFY], ==, 1);
+    g_assert_cmpuint (state.reports, ==, 1);
+    g_assert_cmpint (state.report_retry, ==, mode == 1);
+    g_assert_nonnull (SELF (device)->session);
+  } else {
+    GIOErrorEnum code = mode == 2 ? G_IO_ERROR_FAILED :
+                        mode == 3 ? G_IO_ERROR_CANCELLED : G_IO_ERROR_TIMED_OUT;
+    assert_failure_once (device, ACTION_IDENTIFY, code);
+  }
+  finish_state (device);
+}
+
+static void
+test_invalid_identify_gallery (gconstpointer data)
+{
+  gboolean oversized = GPOINTER_TO_INT (data);
+  reset_state ();
+  FpDevice *device = prepare_action (ACTION_IDENTIFY);
+  clear_deadline (SELF (device));
+  SELF (device)->action = ACTION_NONE;
+  g_clear_pointer (&SELF (device)->templates, g_ptr_array_unref);
+  SELF (device)->identity = (GxPrintIdentity) { .backend = "openchicago", .backend_version = 1,
+    .profile = 17, .preprocess_version = 1 };
+  FpPrint *invalid = NULL;
+  if (oversized) g_ptr_array_set_size (state.prints, 101);
+  else {
+    invalid = fp_print_new (device);
+    state.prints->pdata[0] = invalid;
+  }
+  dev_identify (device);
+  wait_completed (ACTION_IDENTIFY, 1);
+  g_assert_nonnull (state.error);
+  g_assert_cmpuint (state.succeeded[ACTION_IDENTIFY], ==, 0);
+  g_assert_cmpuint (state.captures, ==, 0);
+  g_assert_cmpuint (state.reports, ==, 0);
+  g_clear_object (&invalid);
+  finish_state (device);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -627,5 +709,12 @@ main (int argc, char **argv)
   g_test_add_func ("/goodix521d/lifecycle/queued-capture-cancel", test_queued_capture_cancel);
   g_test_add_func ("/goodix521d/lifecycle/cleanup-failure-blocks-reopen", test_cleanup_failure_blocks_reopen);
   g_test_add_func ("/goodix521d/lifecycle/synchronous-cancel-unwind-completes-once", test_cancel_unwind_completes_once);
+  const char *empty_modes[] = { "no-match", "retry", "matcher-error", "cancel", "deadline" };
+  for (guint i = 0; i < G_N_ELEMENTS (empty_modes); i++) {
+    g_autofree char *path = g_strdup_printf ("/goodix521d/identify/empty-gallery-%s", empty_modes[i]);
+    g_test_add_data_func (path, GUINT_TO_POINTER (i), test_empty_identify);
+  }
+  g_test_add_data_func ("/goodix521d/identify/oversized-gallery", GINT_TO_POINTER (1), test_invalid_identify_gallery);
+  g_test_add_data_func ("/goodix521d/identify/invalid-template", GINT_TO_POINTER (0), test_invalid_identify_gallery);
   return g_test_run ();
 }

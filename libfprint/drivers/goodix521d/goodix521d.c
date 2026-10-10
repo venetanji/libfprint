@@ -486,7 +486,10 @@ start_match (FpDevice *device, Action action)
     if (!load_print(self,print,&error)) { operation_error(device,error);return; }
   } else {
     GPtrArray *prints=NULL;fpi_device_get_identify_data(device,&prints);
-    if (!prints->len || prints->len>100) { operation_error(device,fpi_device_error_new(FP_DEVICE_ERROR_DATA_INVALID));return; }
+    /* fprintd checks for duplicates even before the first enrollment. An
+     * empty gallery is valid: preserve capture/quality checks and let the
+     * matcher report no match. Nonempty templates still require validation. */
+    if (prints->len>100) { operation_error(device,fpi_device_error_new(FP_DEVICE_ERROR_DATA_INVALID));return; }
     for(guint i=0;i<prints->len;i++) if (!load_print(self,g_ptr_array_index(prints,i),&error)) { operation_error(device,error);return; }
   }
   start_contact(device);
