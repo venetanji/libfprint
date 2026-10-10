@@ -3482,6 +3482,51 @@ early_placement_delay_cb (gpointer user_data)
  * Master cycle state machine. This is the authoritative control flow for
  * capture, and is designed to stay as close to Windows behavior as possible.
  */
+
+static void
+hard_reset_thread (GTask *task, gpointer source_object, gpointer task_data, GCancellable *cancellable)
+{
+  FpDevice *dev = FP_DEVICE (source_object);
+  GUsbDevice *usb = fpi_device_get_usb_device (dev);
+  GError *err = NULL;
+
+  /* Release interface before reset */
+  g_usb_device_release_interface (usb, 0, 0, &err);
+  g_clear_error (&err);
+
+  /* USB device reset */
+  g_usb_device_reset (usb, &err);
+  if (err)
+    {
+      fp_warn ("USB reset: %s", err->message);
+      g_clear_error (&err);
+    }
+
+  /* Reclaim interface */
+  if (!g_usb_device_claim_interface (usb, 0,
+                                     G_USB_DEVICE_CLAIM_INTERFACE_NONE, &err))
+    {
+      g_task_return_error (task, err);
+      return;
+    }
+
+  g_task_return_boolean (task, TRUE);
+}
+
+static void
+hard_reset_cb (GObject *source_object, GAsyncResult *res, gpointer user_data)
+{
+  FpiSsm *ssm = user_data;
+  GError *err = NULL;
+
+  if (!g_task_propagate_boolean (G_TASK (res), &err))
+    {
+      fpi_ssm_mark_failed (ssm, err);
+      return;
+    }
+  fpi_ssm_next_state (ssm);
+}
+
 static void
 cycle_run_state (FpiSsm *ssm, FpDevice *dev)
 {
@@ -3507,9 +3552,6 @@ cycle_run_state (FpiSsm *ssm, FpDevice *dev)
 
     case CYCLE_HARD_RESET:
       {
-        GUsbDevice *usb = fpi_device_get_usb_device (dev);
-        GError *err = NULL;
-
         if (self->initial_activation_done && !self->force_recovery)
           {
             fp_dbg ("Cycle: HARD_RESET skipped (rearm mode)");
@@ -3517,29 +3559,10 @@ cycle_run_state (FpiSsm *ssm, FpDevice *dev)
             break;
           }
 
-        fp_dbg ("Cycle: HARD_RESET (USB reset + reclaim)");
-
-        /* Release interface before reset */
-        g_usb_device_release_interface (usb, 0, 0, &err);
-        g_clear_error (&err);
-
-        /* USB device reset */
-        g_usb_device_reset (usb, &err);
-        if (err)
-          {
-            fp_warn ("USB reset: %s", err->message);
-            g_clear_error (&err);
-          }
-
-        /* Reclaim interface */
-        if (!g_usb_device_claim_interface (usb, 0,
-                                           G_USB_DEVICE_CLAIM_INTERFACE_NONE, &err))
-          {
-            fpi_ssm_mark_failed (ssm, err);
-            return;
-          }
-
-        fpi_ssm_next_state (ssm);
+        fp_dbg ("Cycle: HARD_RESET (USB reset + reclaim in background)");
+        GTask *task = g_task_new (dev, NULL, hard_reset_cb, ssm);
+        g_task_run_in_thread (task, hard_reset_thread);
+        g_object_unref (task);
         break;
       }
 
@@ -4597,14 +4620,30 @@ dev_open (FpDevice *device)
  * Release USB interface and free resources.
  */
 static void
+dev_close_transfer_cb (FpiUsbTransfer *transfer,
+                       FpDevice       *device,
+                       gpointer        user_data,
+                       GError         *error)
+{
+  GUsbDevice *usb_dev = fpi_device_get_usb_device (device);
+  GError *release_error = NULL;
+
+  if (error)
+    {
+      fp_warn ("Deactivation during close failed: %s", error->message);
+      g_error_free (error);
+    }
+
+  g_usb_device_release_interface (usb_dev, 0, 0, &release_error);
+  fpi_device_close_complete (device, release_error);
+}
+
+static void
 dev_close (FpDevice *device)
 {
   FpiDeviceCanvasbio *self = FPI_DEVICE_CANVASBIO (device);
-  GUsbDevice *usb_dev = fpi_device_get_usb_device (device);
-  GError *error = NULL;
-  GError *deact_error = NULL;
-  gsize actual_len = 0;
   int i;
+  FpiUsbTransfer *transfer;
 
   fp_info ("Closing CanvasBio CB2000 device");
 
@@ -4615,20 +4654,16 @@ dev_close (FpDevice *device)
   for (i = 0; i < 5; i++)
     g_clear_pointer (&self->enroll_images[i], g_free);
 
-  /* Send vendor deactivation synchronously before releasing interface. */
-  g_usb_device_control_transfer (usb_dev,
+  /* Send vendor deactivation asynchronously before releasing interface. */
+  transfer = fpi_usb_transfer_new (device);
+  fpi_usb_transfer_fill_control (transfer,
                                  G_USB_DEVICE_DIRECTION_HOST_TO_DEVICE,
                                  G_USB_DEVICE_REQUEST_TYPE_VENDOR,
                                  G_USB_DEVICE_RECIPIENT_DEVICE,
-                                 REQ_INIT, 0x0001, 0,
-                                 NULL, 0, &actual_len,
-                                 500, NULL, &deact_error);
-  if (deact_error)
-    g_clear_error (&deact_error);
+                                 REQ_INIT, 0x0001, 0, 0);
 
-  g_usb_device_release_interface (usb_dev, 0, 0, &error);
-
-  fpi_device_close_complete (device, error);
+  transfer->short_is_error = FALSE;
+  fpi_usb_transfer_submit (transfer, 500, NULL, dev_close_transfer_cb, NULL);
 }
 
 /*
