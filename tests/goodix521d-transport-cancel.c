@@ -15,7 +15,7 @@ typedef struct {
  gboolean cancelling,inited,read_pending,ack,reply,configuration_missing;
  GoodixCmdCallback fdt_up_callback;gpointer fdt_up_user_data;GDestroyNotify fdt_up_destroy;
  GSource *fdt_up_timeout;guint64 fdt_up_generation,fdt_up_operation,fdt_up_read_loop;
- gboolean fdt_up_acknowledged,fdt_up_received,fdt_up_started;guint8 fdt_up_event[20];
+ gboolean fdt_up_acknowledged,fdt_up_received,fdt_up_started;guint fdt_up_phases_sent,fdt_up_acks;guint8 fdt_up_event[20];
  GCancellable *transfer_cancel_tkn;
  guint8 cmd,*data;guint32 length;GSource *timeout;
  GoodixCmdCallback callback;gpointer user_data;

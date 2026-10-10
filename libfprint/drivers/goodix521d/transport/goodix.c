@@ -50,6 +50,7 @@ typedef struct {
     GSource *fdt_up_timeout;
     guint64 fdt_up_generation, fdt_up_operation, fdt_up_read_loop;
     gboolean fdt_up_acknowledged, fdt_up_received, fdt_up_started;
+    guint fdt_up_phases_sent, fdt_up_acks;
     guint8 fdt_up_event[20];
 
     GSource* timeout;
@@ -163,6 +164,7 @@ static void goodix_fdt_up_done(FpDevice *dev, GError *error)
     priv->fdt_up_user_data = NULL;
     priv->fdt_up_destroy = NULL;
     priv->fdt_up_acknowledged = priv->fdt_up_received = priv->fdt_up_started = FALSE;
+    priv->fdt_up_phases_sent = priv->fdt_up_acks = 0;
     priv->fdt_up_generation++;
     /* Completion may start another action. Never feed that successor the tail
      * of the batch owned by this event, even if it uses the same opcode. */
@@ -178,8 +180,7 @@ static gboolean goodix_fdt_up_current(FpiDeviceGoodixTlsPrivate *priv)
 {
     return priv->fdt_up_callback && priv->fdt_up_started &&
            priv->fdt_up_read_loop == priv->read_loop_generation &&
-           priv->operation_generation == priv->fdt_up_operation +
-                                          (priv->fdt_up_acknowledged ? 1 : 0);
+           priv->operation_generation == priv->fdt_up_operation + priv->fdt_up_acks;
 }
 
 static void goodix_fdt_up_maybe_complete(FpDevice *dev)
@@ -196,8 +197,12 @@ static void goodix_fdt_up_maybe_complete(FpDevice *dev)
 
 static void goodix_fdt_up_timeout_cb(FpDevice *dev, gpointer user_data)
 {
-    goodix_fdt_up_done(dev, g_error_new_literal(G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
-                                               "Finger removal event timed out"));
+    FpiDeviceGoodixTlsPrivate *priv =
+        fpi_device_goodixtls_get_instance_private(FPI_DEVICE_GOODIXTLS(dev));
+    goodix_fdt_up_done(dev, g_error_new(G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
+        "Finger removal event timed out: phases-sent=%u ack-mask=0x%x event-seen=%u owner-current=%u",
+        priv->fdt_up_phases_sent, (1u << priv->fdt_up_acks) - 1,
+        (guint)priv->fdt_up_received, (guint)goodix_fdt_up_current(priv)));
 }
 
 void goodix_wait_fdt_up(FpDevice *dev, guint timeout_ms, GoodixDefaultCallback callback,
@@ -227,6 +232,7 @@ void goodix_wait_fdt_up(FpDevice *dev, guint timeout_ms, GoodixDefaultCallback c
     priv->fdt_up_operation = priv->operation_generation;
     priv->fdt_up_read_loop = priv->read_loop_generation;
     priv->fdt_up_acknowledged = priv->fdt_up_received = priv->fdt_up_started = FALSE;
+    priv->fdt_up_phases_sent = priv->fdt_up_acks = 0;
     memset(priv->fdt_up_event, 0, sizeof(priv->fdt_up_event));
     priv->fdt_up_timeout = fpi_device_add_timeout(dev, timeout_ms,
                                                  goodix_fdt_up_timeout_cb, NULL, NULL);
@@ -249,7 +255,10 @@ void goodix_receive_done(FpDevice *dev, guint8 *data, guint16 length,
                        priv->ack && !priv->reply;
   guint64 fdt_generation = priv->fdt_up_generation;
   GError *fdt_error = fdt_owner && error ? g_error_copy(error) : NULL;
-  if (fdt_owner && !error) priv->fdt_up_acknowledged = TRUE;
+  if (fdt_owner && !error) {
+    priv->fdt_up_acks++;
+    priv->fdt_up_acknowledged = priv->fdt_up_acks == 2;
+  }
   candidate_diagnostic(dev,error,"receive-done",NULL);
   goodix_reset_state(dev);
   if (!error) fp_dbg("Completed command: 0x%02x", priv->cmd);
@@ -992,9 +1001,11 @@ void goodix_send_protocol(
           g_error_new_literal(G_IO_ERROR, G_IO_ERROR_CANCELLED, "Goodix transport is cancelling"));
       return;
     }
-    if (priv->fdt_up_callback && (priv->fdt_up_started || cmd != 0x34 ||
-        !payload || length != 40 || payload[26] != 1 || reply ||
-        priv->fdt_up_operation != priv->operation_generation ||
+    if (priv->fdt_up_callback && (cmd != 0x34 ||
+        !payload || length != 40 || priv->fdt_up_phases_sent >= 2 ||
+        payload[26] != priv->fdt_up_phases_sent || reply ||
+        priv->fdt_up_acks != priv->fdt_up_phases_sent ||
+        priv->fdt_up_operation + priv->fdt_up_acks != priv->operation_generation ||
         priv->fdt_up_read_loop != priv->read_loop_generation)) {
       if (free_func) free_func(payload);
       if (callback) callback(dev, NULL, 0, user_data,
@@ -1022,7 +1033,10 @@ void goodix_send_protocol(
     if (timeout_ms)
         priv->timeout = goodix_add_timeout(dev, timeout_ms);
     priv->cmd = cmd;
-    if (priv->fdt_up_callback) priv->fdt_up_started = TRUE;
+    if (priv->fdt_up_callback) {
+      priv->fdt_up_started = TRUE;
+      priv->fdt_up_phases_sent++;
+    }
     if (cmd == 0x90) {priv->configuration_conflict=FALSE;priv->configuration_missing=TRUE;}
     priv->ack = TRUE;
     priv->reply = reply;

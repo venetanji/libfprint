@@ -83,7 +83,7 @@ Use `fprintd-enroll "$USER"` only when a new enrollment is actually needed; do n
 
 Follow PLACE, HOLD and REMOVE in terminal 1. HOLD lasts through the ten-frame
 capture; REMOVE is published only after the reader acknowledges its removal
-arm. A stage is not accepted until the separate removal event is validated.
+arm commands. The removal event owner starts before phase 0 because APP10034 can emit IRQ 0x0200 in that interval; success still requires both ordered phase ACKs and an exact checksummed current-owner 0x34 event. Pre-arm or wrong-generation events cannot complete the contact. A stage is not accepted until the separate removal event is validated.
 For enrollment, the initial contact is fprintd's duplicate check, before counted stages.
 The monitor exits after its bounded observation window or Ctrl+C; stopping it
 does not cancel the separate client command.
@@ -92,7 +92,7 @@ monitor never determines acceptance or changes capture state.
 
 If REMOVE is displayed, fully lift the finger. If removal still times out,
 stop rather than repeating the test and preserve the precise error plus the
-last displayed guidance. This distinguishes a missing prompt from an unproven
+last displayed guidance. Removal timeout errors include phases sent, ACK mask, event-seen and owner-current scalars; no FDT sample values are logged. This distinguishes a missing prompt from an unproven
 hardware removal path. A paired-reference stability failure now includes the
 failing snapshot pair, maximum shifted-word difference and factory threshold;
 it does not permit a finger-covered reference or relax that threshold.

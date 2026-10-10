@@ -16,6 +16,10 @@
 #include <string.h>
 static guint frames,done,up_arms;
 static gboolean event_first,fail_up,cancel_present,cancel_removal;
+static gboolean event_phase0, fail_up0, cancel_up0, hold_up1, up_event_pending;
+static guint up_ack_mask, removal_reports, none_reports;
+static GoodixCmdCallback pending_up1;
+static gpointer pending_up1_data;
 static FpFingerStatusFlags current_status;
 static guint restores;
 static guint restore_failure;
@@ -41,7 +45,14 @@ static void reference_image(FpDevice *, guint8 *, guint16, GoodixImageCallback, 
 
 GCancellable *mock_fpi_device_get_cancellable(FpDevice *dev) {(void)dev;return NULL;}
 gboolean mock_fpi_device_report_finger_status(FpDevice *dev,FpFingerStatusFlags status) {
- (void)dev; current_status=status;
+ (void)dev;
+ if (status==FP_FINGER_STATUS_PRESENT) {
+   g_assert_cmpuint(up_ack_mask,==,3);removal_reports++;
+ }
+ if (status==FP_FINGER_STATUS_NONE) {
+   g_assert_cmpuint(up_ack_mask,==,3);none_reports++;
+ }
+ current_status=status;
  if((cancel_present && status==(FP_FINGER_STATUS_PRESENT|FP_FINGER_STATUS_NEEDED)) || (cancel_removal && status==FP_FINGER_STATUS_PRESENT)) goodix_acquisition_cancel(capture);
  return TRUE;
 }
@@ -77,21 +88,53 @@ void mock_goodix_tls_read_image(FpDevice *dev,guint8 *data,guint16 length,Goodix
 }
 void mock_goodix_wait_fdt_up(FpDevice *dev,guint timeout,GoodixDefaultCallback cb,gpointer data,GDestroyNotify destroy) {
  g_assert_true(dev==test_device);g_assert_cmpuint(timeout,==,30000);g_assert_null(event_callback);
+ /* Firmware can emit the UP event during phase 0. Subscribe before its write. */
+ g_assert_cmpuint(up_arms,==,0);
  event_callback=cb;event_data=data;event_destroy=destroy;
 }
 static void release_event(GError *error) {
  GoodixDefaultCallback cb=event_callback;gpointer data=event_data;GDestroyNotify destroy=event_destroy;
  event_callback=NULL;event_data=NULL;event_destroy=NULL;
+ /* Successful delivery is transport-gated by both ACKs. A late callback
+  * after cancellation is still delivered to exercise the real stale owner. */
+ g_assert_true(error || done || up_ack_mask==3);
  guint8 reply[20]={0,2,255,0};cb(test_device,reply,20,data,error);destroy(data);
+}
+static void finish_up1(FpDevice *dev, GoodixCmdCallback cb, gpointer user) {
+ if (fail_up) {
+   cb(dev,NULL,0,user,g_error_new_literal(G_IO_ERROR,G_IO_ERROR_CANCELLED,"phase-1 failure"));
+   release_event(g_error_new_literal(G_IO_ERROR,G_IO_ERROR_CANCELLED,"phase-1 failure"));
+   return;
+ }
+ up_ack_mask|=2;
+ cb(dev,NULL,0,user,NULL);
+ if(up_event_pending) {up_event_pending=FALSE;release_event(NULL);}
 }
 void mock_goodix_send_protocol(FpDevice *dev,guint8 opcode,guint8 *data,guint16 length,GDestroyNotify destroy,gboolean checksum,guint timeout,gboolean reply,GoodixCmdCallback cb,gpointer user) {
  if (reference_mode) { reference_protocol(dev,opcode,data,length,destroy,checksum,timeout,reply,cb,user); return; }
  g_assert_true(restore_acknowledged);g_assert_cmpuint(restores,==,1);
  g_assert_cmpuint(opcode,==,0x34);g_assert_cmpuint(length,==,40);g_assert_null(destroy);g_assert_true(checksum);g_assert_cmpuint(timeout,==,1000);g_assert_false(reply);
  g_assert_cmpuint(data[0],==,0x8e);for(guint i=27;i<40;i++)g_assert_cmpuint(data[i],==,0);
+ g_assert_nonnull(event_callback);
+ g_assert_cmpuint(current_status,==,FP_FINGER_STATUS_NEEDED|FP_FINGER_STATUS_PRESENT);
+ g_assert_cmpuint(done,==,0);g_assert_cmpuint(none_reports,==,0);
  up_arms++;
- if(data[26] && event_first) release_event(fail_up?g_error_new_literal(G_IO_ERROR,G_IO_ERROR_CANCELLED,"cancel"):NULL);
- cb(dev,NULL,0,user,fail_up&&data[26]?g_error_new_literal(G_IO_ERROR,G_IO_ERROR_CANCELLED,"cancel"):NULL);
+ if(!data[26]) {
+   if(event_first && event_phase0) up_event_pending=TRUE;
+   g_assert_cmpuint(up_ack_mask,==,0);
+   if(fail_up0) {
+     cb(dev,NULL,0,user,g_error_new_literal(G_IO_ERROR,G_IO_ERROR_TIMED_OUT,"phase-0 failure"));
+     return;
+   }
+   if(cancel_up0) goodix_acquisition_cancel(capture);
+   up_ack_mask|=1;
+   cb(dev,NULL,0,user,NULL);
+ } else {
+   g_assert_cmpuint(up_ack_mask,==,1);
+   if(event_first && !event_phase0) up_event_pending=TRUE;
+   if(hold_up1) {pending_up1=cb;pending_up1_data=user;return;}
+   finish_up1(dev,cb,user);
+ }
 }
 static void acquired(FpDevice *dev,const GxImage *image,gpointer user,GError *error) {
  (void)dev;(void)user;done++;result_error=error;
@@ -100,6 +143,8 @@ static void acquired(FpDevice *dev,const GxImage *image,gpointer user,GError *er
 }
 static void run(gboolean early,gboolean error) {
  restores=0;restore_acknowledged=FALSE;restore_callback=NULL;restore_data=NULL;
+ up_ack_mask=removal_reports=none_reports=0;up_event_pending=FALSE;
+ pending_up1=NULL;pending_up1_data=NULL;
  current_status=FP_FINGER_STATUS_NONE;frames=done=up_arms=0;event_first=early;fail_up=error;g_clear_error(&result_error);
  test_device=g_object_new(FPI_TYPE_DEVICE_FAKE,NULL);
  guint8 otp[64]={0};otp[23]=0x6e;otp[26]=40;otp[33]=41;otp[40]=7;otp[41]=42;otp[42]=43;otp[43]=44;otp[44]=45;otp[45]=46;otp[46]=47;if(capture_mode)otp[23]|=0x80;
@@ -128,7 +173,26 @@ static void run(gboolean early,gboolean error) {
    g_assert_cmpuint(current_status,!=,FP_FINGER_STATUS_PRESENT);
    g_clear_error(&result_error);g_object_unref(test_device);return;
  }
+ if(fail_up0 || cancel_up0) {
+   g_assert_cmpuint(frames,==,10);g_assert_cmpuint(up_arms,==,1);
+   g_assert_cmpuint(done,==,1);g_assert_cmpuint(removal_reports,==,0);
+   g_assert_cmpuint(none_reports,==,0);g_assert_null(pending_up1);
+   g_assert_error(result_error,G_IO_ERROR,(cancel_up0?G_IO_ERROR_CANCELLED:G_IO_ERROR_TIMED_OUT));
+   /* A held early event must not revive a failed acquisition or complete twice. */
+   release_event(NULL);
+   g_assert_cmpuint(done,==,1);g_assert_cmpuint(removal_reports,==,0);
+   g_assert_cmpuint(none_reports,==,0);g_assert_null(capture);
+   g_clear_error(&result_error);g_object_unref(test_device);return;
+ }
  g_assert_cmpuint(frames,==,10);g_assert_cmpuint(up_arms,==,2);
+ if(hold_up1) {
+   g_assert_nonnull(pending_up1);g_assert_cmpuint(up_ack_mask,==,1);
+   g_assert_cmpuint(done,==,0);g_assert_cmpuint(removal_reports,==,0);
+   g_assert_cmpuint(none_reports,==,0);
+   g_assert_cmpuint(current_status,==,FP_FINGER_STATUS_NEEDED|FP_FINGER_STATUS_PRESENT);
+   finish_up1(test_device,pending_up1,pending_up1_data);
+   pending_up1=NULL;pending_up1_data=NULL;
+ }
  if(cancel_removal) {
    g_assert_cmpuint(done,==,1);g_assert_error(result_error,G_IO_ERROR,G_IO_ERROR_CANCELLED);
    release_event(NULL);g_clear_error(&result_error);g_object_unref(test_device);return;
@@ -145,6 +209,18 @@ static void contact_cases(void) {run(FALSE,FALSE);run(TRUE,FALSE);run(TRUE,TRUE)
  cancel_restore=TRUE;run(FALSE,FALSE);cancel_restore=FALSE;
  corrupt_last_image=TRUE;run(FALSE,FALSE);corrupt_last_image=FALSE;
  capture_mode=TRUE;run(FALSE,FALSE);capture_mode=FALSE;}
+
+static void contact_phase0_event_waits_for_both_acks(void) {
+ event_phase0=TRUE;hold_up1=TRUE;run(TRUE,FALSE);
+ g_assert_cmpuint(up_ack_mask,==,3);g_assert_cmpuint(removal_reports,==,1);
+ g_assert_cmpuint(none_reports,==,1);hold_up1=FALSE;event_phase0=FALSE;
+}
+static void contact_phase0_error_stops_phase1(void) {
+ event_phase0=TRUE;fail_up0=TRUE;run(TRUE,FALSE);fail_up0=FALSE;event_phase0=FALSE;
+}
+static void contact_phase0_cancel_stops_phase1(void) {
+ event_phase0=TRUE;cancel_up0=TRUE;run(TRUE,FALSE);cancel_up0=FALSE;event_phase0=FALSE;
+}
 
 static struct {
   guint attempts, commands, images, completions;
@@ -443,6 +519,9 @@ int main(int argc, char **argv)
 {
   g_test_init(&argc,&argv,NULL);
   g_test_add_func("/goodix521d/acquisition/contact",contact_cases);
+  g_test_add_func("/goodix521d/acquisition/contact-phase0-event-waits-both-acks",contact_phase0_event_waits_for_both_acks);
+  g_test_add_func("/goodix521d/acquisition/contact-phase0-error-stops-phase1",contact_phase0_error_stops_phase1);
+  g_test_add_func("/goodix521d/acquisition/contact-phase0-cancel-stops-phase1",contact_phase0_cancel_stops_phase1);
   g_test_add_func("/goodix521d/acquisition/reference-retry-success",reference_retry_success);
   g_test_add_func("/goodix521d/acquisition/reference-persistent-failure",reference_persistent_failure);
   g_test_add_func("/goodix521d/acquisition/reference-cancel-no-retry",reference_cancel_prevents_retry);

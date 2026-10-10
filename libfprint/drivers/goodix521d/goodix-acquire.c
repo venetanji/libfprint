@@ -121,6 +121,16 @@ static void contact_removed(FpDevice *device,guint8 *data,guint16 length,gpointe
     if (acquisition_continue(self,ssm)) fpi_ssm_mark_completed(ssm);
   }
 }
+static void contact_up_phase0_ack(FpDevice *device,guint8 *data,guint16 length,gpointer user_data,GError *error) {
+  UpOwner *owner=user_data;GoodixAcquisition *self=owner->self;
+  (void)device;(void)data;(void)length;
+  if (self->ssm && self->generation==owner->generation) {
+    FpiSsm *ssm=self->ssm;
+    if (error) fpi_ssm_mark_failed(ssm,error);
+    else if (acquisition_continue(self,ssm)) fpi_ssm_next_state(ssm);
+  } else g_clear_error(&error);
+  up_owner_free(owner);
+}
 static void contact_up_ack(FpDevice *device,guint8 *data,guint16 length,gpointer user_data,GError *error) {
   UpOwner *owner=user_data;GoodixAcquisition *self=owner->self;
   (void)device;(void)data;(void)length;
@@ -181,13 +191,16 @@ contact_run (FpiSsm *ssm, FpDevice *device)
         fpi_ssm_mark_failed(ssm,fpi_device_error_new(FP_DEVICE_ERROR_PROTO));return;
       }
       if (!phase) {
-        goodix_send_protocol(device,0x34,payload,40,NULL,TRUE,GOODIX_TIMEOUT,FALSE,contact_command,ssm);
-      } else {
+        /* APP10034 may report a new UP IRQ after phase0. Own that entire
+         * window, but the transport requires both ordered phase ACKs before
+         * publishing removal. No pre-arm packet is accepted. */
         UpOwner *event_owner=up_owner_new(self);
         guint64 generation=self->generation;
         goodix_wait_fdt_up(device,30000,contact_removed,event_owner,up_owner_free);
-        if (self->ssm && self->generation==generation)
-          goodix_send_protocol(device,0x34,payload,40,NULL,TRUE,GOODIX_TIMEOUT,FALSE,contact_up_ack,up_owner_new(self));
+        if (self->ssm && self->generation==generation && acquisition_continue(self,ssm))
+          goodix_send_protocol(device,0x34,payload,40,NULL,TRUE,GOODIX_TIMEOUT,FALSE,contact_up_phase0_ack,up_owner_new(self));
+      } else {
+        goodix_send_protocol(device,0x34,payload,40,NULL,TRUE,GOODIX_TIMEOUT,FALSE,contact_up_ack,up_owner_new(self));
       }
       break;
     }

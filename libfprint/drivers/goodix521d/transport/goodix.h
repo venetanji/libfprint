@@ -156,10 +156,11 @@ void goodix_send_mcu_switch_to_fdt_up(FpDevice *dev, guint8 *mode,
                                       GoodixDefaultCallback callback,
                                       gpointer user_data);
 
-/* Register immediately before the ACK-only phase1 (payload[26] == 1) 0x34
- * command. The ordinary command callback remains separate. Only an additive-
+/* Register immediately before the ACK-only phase0 (payload[26] == 0) 0x34
+ * command, then send phase1 only after phase0 ACK. Both ordinary command
+ * callbacks remain separate from this event callback. Only an additive-
  * checksummed, exactly20-byte 0x34 event with IRQ LE16 0x0200 can complete this
- * waiter, and only after that command ACK succeeds. timeout_ms is 1..30000.
+ * waiter, and only after both ordered phase ACKs succeed. timeout_ms is 1..30000.
  * callback owns error and borrows data. destroy(user_data) follows dispatch or
  * cancellation, including rejected registration. No wire transaction ID exists:
  * the caller must serialize arm phases and drain/reset between contacts. */
