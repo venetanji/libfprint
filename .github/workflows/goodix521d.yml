@@ -1,0 +1,37 @@
+name: Goodix 521d experimental driver
+on:
+  push:
+    branches: [feat/goodix-521d-openchicago]
+  pull_request:
+    paths:
+      - 'libfprint/**'
+      - 'tests/**'
+      - 'meson*'
+      - 'packaging/**'
+      - '.github/workflows/goodix521d.yml'
+permissions:
+  contents: read
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build pkg-config libglib2.0-dev libgusb-dev libgudev-1.0-dev libssl-dev libpixman-1-dev libcairo2-dev
+      - name: Build all drivers
+        run: |
+          meson setup build -Ddrivers=all -Dintrospection=false -Dgtk-examples=false -Ddoc=false -Dudev_rules_dir=/usr/lib/udev/rules.d -Dudev_hwdb_dir=/usr/lib/udev/hwdb.d
+          meson compile -C build
+      - name: Run offline tests
+        run: |
+          meson test -C build --print-errorlogs
+          python3 packaging/arch/test_recipe.py
+      - name: Preserve test log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: offline-test-log
+          path: build/meson-logs/testlog.txt

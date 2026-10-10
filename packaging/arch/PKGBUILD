@@ -1,0 +1,62 @@
+# Experimental local-checkout package; not an official Arch package.
+# Preserve the installed package name so its removal-protection hook remains intact.
+# Runtime/build dependencies and Meson options follow Arch's libfprint package:
+# https://gitlab.archlinux.org/archlinux/packaging/packages/libfprint/-/blob/main/PKGBUILD
+# Driver/source licenses remain in their original files (LGPL-2.1-or-later).
+
+pkgname=libfprint-goodix-521d
+_basever=1.94.100
+pkgrel=1
+pkgdesc='Fingerprint reader library with experimental Goodix 27c6:521d support'
+url='https://github.com/venetanji/libfprint'
+arch=(x86_64)
+license=(LGPL-2.1-or-later)
+depends=(gcc-libs glib2 glibc libgudev libgusb openssl pixman)
+makedepends=(git glib2-devel gobject-introspection gtk-doc meson python-cairo python-gobject systemd)
+checkdepends=(cairo umockdev)
+conflicts=(libfprint libfprint-git)
+
+# Resolve the user's checked-out commit once. Building does not follow branch
+# movement, fetch MR code, or include uncommitted working-tree changes.
+_checkout=$(git -C "$startdir" rev-parse --show-toplevel) || return 1
+_commit=$(git -C "$_checkout" rev-parse --verify HEAD) || return 1
+_count=$(git -C "$_checkout" rev-list --count "$_commit") || return 1
+pkgver="${_basever}.r${_count}.g${_commit:0:12}"
+provides=("libfprint=${_basever}" "libfprint-git=${pkgver}" libfprint-2.so)
+source=("libfprint::git+file://${_checkout}#commit=${_commit}")
+sha256sums=(SKIP) # Immutable Git object selected above; verified again in prepare.
+
+prepare() {
+  if ! git -C "$_checkout" diff --quiet HEAD --; then
+    printf '%s\n' 'Commit or stash tracked changes first; this package builds committed HEAD only.' >&2
+    return 1
+  fi
+  [[ $(git -C "$srcdir/libfprint" rev-parse HEAD) == "$_commit" ]] || return 1
+  printf 'Building experimental Goodix 521d commit %s\n' "$_commit"
+}
+
+build() {
+  arch-meson libfprint build -Ddrivers=all -Dinstalled-tests=false
+  meson compile -C build
+}
+
+_check_device_ids() {
+  local device_list="$1" id
+  # These two existing Omarchy IDs are already in the pinned upstream base.
+  # Its old A97A patch is redundant and no longer applies to that table.
+  for id in 2808:a97a 06cb:010b 27c6:521d; do
+    if ! grep -qi "$id" <<< "$device_list"; then
+      printf 'Expected device %s missing from built driver list\n' "$id" >&2
+      return 1
+    fi
+  done
+}
+
+check() {
+  meson test -C build --print-errorlogs
+  _check_device_ids "$(build/libfprint/fprint-list-supported-devices)"
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+}

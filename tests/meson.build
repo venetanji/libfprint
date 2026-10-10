@@ -469,3 +469,73 @@ if valgrind.found() and libfprint_sanitizers.length() == 0
             'LIBFPRINT_TEST_WRAPPER=' + ' '.join(libfprint_wrapper),
         ])
 endif
+
+# Goodix GF5298 pure/profile/persistence regressions. No reader or private data.
+if 'goodix521d' in drivers
+    goodix521d_inc = include_directories('../libfprint/drivers/goodix521d',
+                                         '../libfprint/drivers/goodix521d/chicago')
+    foreach test_name : ['input', 'up-request', 'paired-reference', 'session', 'print-envelope', 'registration', 'driver-lifecycle']
+        test_link_args = []
+        if test_name == 'session'
+            test_link_args += '-Wl,--wrap=goodix_chicago_runtime_preprocess'
+        endif
+        gx_test = executable('goodix521d-' + test_name,
+            'goodix521d-' + test_name + '.c',
+            include_directories: goodix521d_inc,
+            dependencies: libfprint_private_dep,
+            link_with: libfprint_drivers,
+            link_args: test_link_args,
+            c_args: ['-Wno-unused-parameter'])
+        test('goodix521d-' + test_name, gx_test, suite: ['goodix521d', 'unit-tests'])
+    endforeach
+endif
+if 'goodix521d' in drivers
+    gx_acquire_wrapped = ['fpi_device_get_cancellable', 'fpi_device_report_finger_status', 'goodix_send_mcu_switch_to_fdt_down',
+                         'goodix_send_mcu_switch_to_fdt_mode',
+                         'goodix_send_write_sensor_register', 'goodix_tls_read_image',
+                         'goodix_wait_fdt_up', 'goodix_send_protocol']
+    gx_acquire_wrap_args = []
+    foreach symbol : gx_acquire_wrapped
+        gx_acquire_wrap_args += '-Wl,--wrap=' + symbol
+    endforeach
+    gx_acquisition_test = executable('goodix521d-acquisition', 'goodix521d-acquisition.c',
+        include_directories: goodix521d_inc,
+        dependencies: libfprint_private_dep,
+        link_with: libfprint_drivers,
+        link_whole: test_utils,
+        link_args: gx_acquire_wrap_args)
+    test('goodix521d-acquisition', gx_acquisition_test, suite: ['goodix521d', 'unit-tests'])
+endif
+if 'goodix521d' in drivers and gusb_dep.version().version_compare('>=0.4.0')
+    gx_json_dep = dependency('json-glib-1.0', required: false)
+    if gx_json_dep.found()
+        gx_enumeration_test = executable('goodix521d-enumeration',
+            ['goodix521d-enumeration.c', '../libfprint/fp-context.c'],
+            dependencies: [libfprint_private_dep, gx_json_dep],
+            link_with: libfprint_drivers,
+            link_args: ['-Wl,--wrap=g_usb_context_new',
+                        '-Wl,--wrap=g_usb_context_set_debug',
+                        '-Wl,--wrap=g_usb_context_enumerate',
+                        '-Wl,--wrap=g_async_initable_new_async',
+                        '-Wl,--wrap=g_async_initable_new_finish'])
+        test('goodix521d-enumeration', gx_enumeration_test, suite: ['goodix521d', 'unit-tests'])
+    endif
+endif
+
+if 'goodix521d' in drivers
+    gx_profile_test_library = shared_library('goodix521d-profile-test',
+        ['goodix521d-chicago-test-adapter.c',
+         '../libfprint/drivers/goodix521d/chicago/goodix-chicago-calibration.c',
+         '../libfprint/drivers/goodix521d/chicago/goodix-gf5298.c'],
+        dependencies: [glib_dep, gio_dep, mathlib_dep],
+        install: false)
+    test('goodix521d-profile', python3,
+        args: files('goodix521d-chicago-profile.py'),
+        env: {'CHICAGO_TEST_LIBRARY': gx_profile_test_library.full_path()},
+        depends: gx_profile_test_library,
+        suite: ['goodix521d', 'unit-tests'])
+    test('goodix521d-transport', python3,
+        args: files('goodix521d-transport.py'),
+        timeout: 120,
+        suite: ['goodix521d', 'unit-tests'])
+endif

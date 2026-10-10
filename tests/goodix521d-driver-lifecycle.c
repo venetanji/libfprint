@@ -1,0 +1,632 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+/* Execute the production FpDevice lifecycle, GTask workers and callback paths.
+ * Only hardware, algorithm and public-result boundaries are substituted. No
+ * reader, private provisioning data, subprocess or system installation needed.
+ *
+ * These assertions fail if processing results survive cancellation, if a late
+ * timeout dispatch permits publication, if a reentrant progress cancellation
+ * starts another contact, or if an error completes an operation twice. */
+#define fpi_device_get_cancellable mock_get_cancellable
+#define fpi_device_add_timeout mock_add_timeout
+#define fpi_device_open_complete mock_open_complete
+#define fpi_device_close_complete mock_close_complete
+#define fpi_device_enroll_complete mock_enroll_complete
+#define fpi_device_verify_complete mock_verify_complete
+#define fpi_device_identify_complete mock_identify_complete
+#define fpi_device_enroll_progress mock_enroll_progress
+#define fpi_device_verify_report mock_verify_report
+#define fpi_device_identify_report mock_identify_report
+#define fpi_device_get_identify_data mock_get_identify_data
+#define fpi_device_report_finger_status mock_report_finger_status
+#define goodix_dev_init mock_dev_init
+#define goodix_dev_deinit mock_dev_deinit
+#define goodix_cancel mock_cancel
+#define goodix_start_read_loop mock_start_read_loop
+#define goodix_send_nop mock_send_nop
+#define goodix_send_enable_chip mock_send_enable_chip
+#define goodix_send_firmware_version mock_send_firmware_version
+#define goodix_send_preset_psk_read mock_send_preset_psk_read
+#define goodix_send_reset mock_send_reset
+#define goodix_send_mcu_switch_to_idle_mode mock_send_idle
+#define goodix_send_upload_config_mcu mock_send_config
+#define goodix_tls_set_psk mock_set_psk
+#define goodix_tls mock_tls
+#define goodix_tls_load_psk_file mock_load_psk
+#define goodix521d_read_private mock_read_private
+#define goodix521d_configure mock_configure
+#define goodix_acquisition_cancel mock_acquisition_cancel
+#define goodix_acquisition_new mock_acquisition_new
+#define goodix_acquisition_free mock_acquisition_free
+#define goodix_acquisition_start mock_acquisition_start
+#define oc_session_new_for_profile mock_session_new
+#define oc_session_free mock_session_free
+#define oc_enroll_begin mock_enroll_begin
+#define oc_enroll_add mock_enroll_add
+#define oc_enroll_finish_complete mock_enroll_finish
+#define oc_identify mock_identify
+#define gx_print_envelope_export mock_envelope_export
+#include <glib-object.h>
+GType fpi_device_goodix521d_get_type (void);
+#include "../libfprint/drivers/goodix521d/goodix521d.c"
+
+/* A mutex-protected gate holds a real worker inside an algorithm boundary.
+ * Cancellation/timeout remains on the main thread, never races test state. */
+static struct {
+  GCancellable *cancellable;
+  GMutex mutex;
+  GCond condition;
+  gboolean worker_entered, release_worker, block_worker;
+  gboolean enroll_complete, cancel_progress, cancel_report;
+  gboolean fail_input, fail_init, fail_cleanup, cancel_unwinds_error;
+  guint completed[5], succeeded[5], close_completed;
+  guint progress, reports, captures, starts, stops, cancels, exports;
+  guint sessions_created, sessions_freed, acquisitions_created, acquisitions_freed;
+  GError *error;
+  GoodixAcquired capture_callback;
+  gpointer capture_data;
+  GPtrArray *prints;
+} state;
+
+static OcSession *
+new_session (void)
+{
+  state.sessions_created++;
+  return (OcSession *) g_malloc0 (1);
+}
+
+static void
+worker_gate (void)
+{
+  g_mutex_lock (&state.mutex);
+  state.worker_entered = TRUE;
+  g_cond_signal (&state.condition);
+  while (state.block_worker && !state.release_worker)
+    g_cond_wait (&state.condition, &state.mutex);
+  g_mutex_unlock (&state.mutex);
+}
+
+GCancellable *
+mock_get_cancellable (FpDevice *device)
+{
+  return state.cancellable;
+}
+
+/* The source is attached and owned like a libfprint timeout, but dispatch is
+ * deliberately suppressed: tests prove that checking wall-clock state is not
+ * delegated solely to dispatching a pending GLib timeout. */
+GSource *
+mock_add_timeout (FpDevice *device, gint interval, FpTimeoutFunc callback,
+                  gpointer data, GDestroyNotify destroy)
+{
+  GSource *source = g_timeout_source_new (interval);
+  g_source_attach (source, NULL);
+  g_source_unref (source);
+  return source;
+}
+
+static void
+complete (Action action, GError *error)
+{
+  state.completed[action]++;
+  if (!error)
+    state.succeeded[action]++;
+  g_clear_error (&state.error);
+  state.error = error;
+}
+
+void mock_open_complete (FpDevice *device, GError *error) { complete (ACTION_OPEN, error); }
+void mock_verify_complete (FpDevice *device, GError *error) { complete (ACTION_VERIFY, error); }
+void mock_identify_complete (FpDevice *device, GError *error) { complete (ACTION_IDENTIFY, error); }
+void mock_enroll_complete (FpDevice *device, FpPrint *print, GError *error)
+{
+  g_clear_object (&print);
+  complete (ACTION_ENROLL, error);
+}
+void mock_close_complete (FpDevice *device, GError *error)
+{
+  state.close_completed++;
+  g_clear_error (&state.error);
+  state.error = error;
+}
+void mock_enroll_progress (FpDevice *device, gint stages, FpPrint *print, GError *error)
+{
+  state.progress++;
+  g_clear_error (&error);
+  if (state.cancel_progress)
+    cancel_operation (device);
+}
+void mock_verify_report (FpDevice *device, FpiMatchResult result, FpPrint *print, GError *error)
+{
+  state.reports++;
+  g_clear_error (&error);
+  if (state.cancel_report)
+    cancel_operation (device);
+}
+void mock_identify_report (FpDevice *device, FpPrint *match, FpPrint *print, GError *error)
+{
+  mock_verify_report (device, FPI_MATCH_SUCCESS, print, error);
+}
+void mock_get_identify_data (FpDevice *device, GPtrArray **prints) { *prints = state.prints; }
+gboolean mock_report_finger_status (FpDevice *device, FpFingerStatusFlags status) { return TRUE; }
+
+gboolean mock_dev_init (FpDevice *device, GError **error)
+{
+  state.starts++;
+  if (state.fail_init) {
+    g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED, "synthetic startup failure");
+    return FALSE;
+  }
+  return TRUE;
+}
+gboolean mock_dev_deinit (FpDevice *device, GError **error)
+{
+  state.stops++;
+  if (state.fail_cleanup) {
+    g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT, "synthetic cleanup failure");
+    return FALSE;
+  }
+  return TRUE;
+}
+void mock_cancel (FpDevice *device)
+{
+  state.cancels++;
+  if (state.cancel_unwinds_error) {
+    operation_error (device, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED,
+                                                 "synchronous command unwind"));
+    operation_error (device, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED,
+                                                 "synchronous TLS unwind"));
+    /* Neither teardown nor completion is safe on the transport's stack. */
+    g_assert_cmpuint (state.stops, ==, 0);
+    g_assert_cmpuint (state.completed[ACTION_VERIFY], ==, 0);
+  }
+}
+void mock_start_read_loop (FpDevice *device) { }
+void mock_send_nop (FpDevice *device, GoodixNoneCallback callback, gpointer data)
+{ callback (device, data, NULL); }
+void mock_send_enable_chip (FpDevice *device, gboolean enable, GoodixNoneCallback callback, gpointer data)
+{ callback (device, data, NULL); }
+void mock_send_firmware_version (FpDevice *device, GoodixFirmwareVersionCallback callback, gpointer data)
+{ gchar firmware[] = "GFUSB_GM168SEC_APP_10034"; callback (device, firmware, data, NULL); }
+void mock_send_preset_psk_read (FpDevice *device, guint32 flags, guint16 length,
+                               GoodixPresetPskReadCallback callback, gpointer data)
+{
+  guint8 key[32] = {0}, digest[32];
+  gsize size = sizeof digest;
+  g_autoptr(GChecksum) hash = g_checksum_new (G_CHECKSUM_SHA256);
+  g_checksum_update (hash, key, sizeof key);
+  g_checksum_get_digest (hash, digest, &size);
+  callback (device, TRUE, flags, digest, sizeof digest, data, NULL);
+}
+void mock_send_reset (FpDevice *device, gboolean reset, guint8 sleep,
+                     GoodixResetCallback callback, gpointer data)
+{ callback (device, TRUE, 2048, data, NULL); }
+void mock_send_idle (FpDevice *device, guint8 sleep, GoodixNoneCallback callback, gpointer data)
+{ callback (device, data, NULL); }
+void mock_send_config (FpDevice *device, guint8 *config, guint16 length,
+                      GDestroyNotify destroy, GoodixSuccessCallback callback, gpointer data)
+{ callback (device, TRUE, data, NULL); }
+void mock_set_psk (FpDevice *device, const guint8 key[32]) { }
+void mock_tls (FpDevice *device, GoodixNoneCallback callback, gpointer data)
+{ callback (device, data, NULL); }
+gboolean mock_load_psk (const char *path, guint8 key[32], GError **error)
+{ memset (key, 0, 32); return TRUE; }
+gboolean mock_read_private (const char *path, guint8 *data, gsize length, GError **error)
+{
+  if (state.fail_input) {
+    g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "synthetic missing input");
+    return FALSE;
+  }
+  memset (data, 0, length);
+  return TRUE;
+}
+gboolean mock_configure (const guint8 factory[64], guint8 config[256], GError **error)
+{ memset (config, 0, 256); return TRUE; }
+GoodixAcquisition *mock_acquisition_new (FpDevice *device, const guint8 factory[64])
+{
+  state.acquisitions_created++;
+  return (GoodixAcquisition *) g_malloc0 (1);
+}
+void mock_acquisition_cancel (GoodixAcquisition *acquisition) { }
+void mock_acquisition_free (GoodixAcquisition *acquisition)
+{
+  state.acquisitions_freed++;
+  g_free (acquisition);
+}
+void mock_acquisition_start (GoodixAcquisition *acquisition, gboolean reference,
+                            GoodixAcquired callback, gpointer data)
+{
+  state.captures++;
+  state.capture_callback = callback;
+  state.capture_data = data;
+}
+OcSession *mock_session_new (const guint16 frame[OC_FRAME_PIXELS],
+                            GoodixChicagoProfile profile, GError **error)
+{
+  worker_gate ();
+  return new_session ();
+}
+void mock_session_free (OcSession *session)
+{
+  state.sessions_freed++;
+  g_free (session);
+}
+gboolean mock_enroll_begin (OcSession *session, OcEnrollProtocol protocol,
+                            guint stages, GError **error) { return TRUE; }
+gboolean mock_enroll_add (OcSession *session, const guint16 frame[OC_FRAME_PIXELS],
+                         OcEnrollResult *result, GError **error)
+{
+  worker_gate ();
+  result->accepted = TRUE;
+  result->stage = 1;
+  result->complete = state.enroll_complete;
+  return TRUE;
+}
+GBytes *mock_enroll_finish (OcSession *session, GError **error)
+{ return g_bytes_new_static ("synthetic completed template", 28); }
+gboolean mock_identify (OcSession *session, GBytes *const *templates, guint count,
+                       const guint16 frame[OC_FRAME_PIXELS], OcVerifyResult *result,
+                       gint *match, GBytes **updated, GError **error)
+{
+  worker_gate ();
+  result->match = TRUE;
+  result->score = 42;
+  result->reject = OC_REJECT_NONE;
+  *match = 0;
+  return TRUE;
+}
+GVariant *mock_envelope_export (const GxPrintIdentity *identity, gboolean completed,
+                               GBytes *blob, GError **error)
+{
+  state.exports++;
+  g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                       "test must never publish a cancelled enrollment");
+  return NULL;
+}
+
+static void
+reset_state (void)
+{
+  memset (&state, 0, sizeof state);
+  g_mutex_init (&state.mutex);
+  g_cond_init (&state.condition);
+  state.cancellable = g_cancellable_new ();
+  state.prints = g_ptr_array_new ();
+  g_ptr_array_add (state.prints, NULL);
+}
+
+static void
+finish_state (FpDevice *device)
+{
+  g_object_unref (device);
+  while (g_main_context_iteration (NULL, FALSE));
+  g_assert_cmpuint (state.sessions_created, ==, state.sessions_freed);
+  g_assert_cmpuint (state.acquisitions_created, ==, state.acquisitions_freed);
+  g_clear_object (&state.cancellable);
+  g_clear_pointer (&state.prints, g_ptr_array_unref);
+  g_clear_error (&state.error);
+  g_mutex_clear (&state.mutex);
+  g_cond_clear (&state.condition);
+}
+
+static FpDevice *
+new_device (void)
+{
+  return g_object_new (fpi_device_goodix521d_get_type (), NULL);
+}
+
+static FpDevice *
+prepare_action (Action action)
+{
+  FpDevice *device = new_device ();
+  FpiDeviceGoodix521d *self = SELF (device);
+  self->seen_frames = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+  if (action != ACTION_OPEN)
+    self->session = new_session ();
+  if (action == ACTION_VERIFY || action == ACTION_IDENTIFY) {
+    self->templates = g_ptr_array_new_with_free_func ((GDestroyNotify) g_bytes_unref);
+    g_ptr_array_add (self->templates, g_bytes_new_static ("template", 8));
+  }
+  begin_action (device, action, 60000);
+  g_source_set_ready_time (self->deadline, -1);
+  return device;
+}
+
+static void
+start_processing (FpDevice *device)
+{
+  GxImage image = {0};
+  image.valid = TRUE;
+  state.block_worker = TRUE;
+  acquired_process (device, &image, NULL);
+  g_assert_true (SELF (device)->processing);
+  g_mutex_lock (&state.mutex);
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  while (!state.worker_entered)
+    g_assert_true (g_cond_wait_until (&state.condition, &state.mutex, deadline));
+  g_mutex_unlock (&state.mutex);
+}
+
+static void
+release_processing (void)
+{
+  g_mutex_lock (&state.mutex);
+  state.release_worker = TRUE;
+  g_cond_signal (&state.condition);
+  g_mutex_unlock (&state.mutex);
+}
+
+static void
+wait_completed (Action action, guint count)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  while (state.completed[action] < count) {
+    g_assert_cmpint (g_get_monotonic_time (), <, deadline);
+    while (g_main_context_iteration (NULL, FALSE));
+    g_usleep (1000);
+  }
+  while (g_main_context_iteration (NULL, FALSE));
+}
+
+static void
+assert_failure_once (FpDevice *device, Action action, GIOErrorEnum code)
+{
+  wait_completed (action, 1);
+  g_assert_cmpuint (state.completed[action], ==, 1);
+  g_assert_cmpuint (state.succeeded[action], ==, 0);
+  g_assert_error (state.error, G_IO_ERROR, code);
+  g_assert_cmpuint (state.exports, ==, 0);
+  g_assert_cmpuint (state.progress, ==, 0);
+  g_assert_cmpuint (state.reports, ==, 0);
+  g_assert_cmpint (SELF (device)->action, ==, ACTION_NONE);
+  g_assert_false (SELF (device)->processing);
+  g_assert_null (SELF (device)->session);
+  g_assert_null (SELF (device)->templates);
+  g_assert_null (SELF (device)->deadline);
+  /* Duplicate/stale failures cannot complete an idle action a second time. */
+  operation_error (device, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "late error"));
+  cancel_operation (device);
+  while (g_main_context_iteration (NULL, FALSE));
+  g_assert_cmpuint (state.completed[action], ==, 1);
+}
+
+static void
+run_cancel_worker (Action action, gboolean through_cancellable)
+{
+  reset_state ();
+  state.enroll_complete = TRUE;
+  FpDevice *device = prepare_action (action);
+  start_processing (device);
+  if (through_cancellable)
+    g_cancellable_cancel (state.cancellable);
+  else
+    cancel_operation (device);
+  /* Worker owns its session until it has returned, even after cancellation. */
+  g_assert_cmpuint (state.completed[action], ==, 0);
+  g_assert_cmpuint (state.sessions_freed, ==, 0);
+  release_processing ();
+  assert_failure_once (device, action, G_IO_ERROR_CANCELLED);
+  finish_state (device);
+}
+
+static void
+test_cancel_worker (gconstpointer data)
+{
+  run_cancel_worker (GPOINTER_TO_INT (data), FALSE);
+}
+
+static void
+test_cancellable_worker (gconstpointer data)
+{
+  run_cancel_worker (GPOINTER_TO_INT (data), TRUE);
+}
+
+static void
+test_expired_worker (gconstpointer data)
+{
+  Action action = GPOINTER_TO_INT (data);
+  reset_state ();
+  state.enroll_complete = TRUE;
+  FpDevice *device = prepare_action (action);
+  start_processing (device);
+  /* Do not call operation_timeout: the timeout source has not dispatched. */
+  SELF (device)->deadline_us = g_get_monotonic_time () - 1;
+  release_processing ();
+  assert_failure_once (device, action, G_IO_ERROR_TIMED_OUT);
+  finish_state (device);
+}
+
+static void
+test_progress_cancel (void)
+{
+  reset_state ();
+  state.cancel_progress = TRUE;
+  FpDevice *device = prepare_action (ACTION_ENROLL);
+  start_processing (device);
+  release_processing ();
+  wait_completed (ACTION_ENROLL, 1);
+  g_assert_cmpuint (state.progress, ==, 1);
+  g_assert_cmpuint (state.starts, ==, 0);
+  g_assert_cmpuint (state.captures, ==, 0);
+  g_assert_cmpuint (SELF (device)->contacts, ==, 0);
+  g_assert_cmpuint (state.completed[ACTION_ENROLL], ==, 1);
+  g_assert_error (state.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  finish_state (device);
+}
+
+static void
+test_report_cancel (gconstpointer data)
+{
+  Action action = GPOINTER_TO_INT (data);
+  reset_state ();
+  state.cancel_report = TRUE;
+  FpDevice *device = prepare_action (action);
+  start_processing (device);
+  release_processing ();
+  wait_completed (action, 1);
+  g_assert_cmpuint (state.reports, ==, 1);
+  g_assert_cmpuint (state.completed[action], ==, 1);
+  g_assert_cmpuint (state.succeeded[action], ==, 0);
+  g_assert_error (state.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  finish_state (device);
+}
+
+static void
+test_success_once (gconstpointer data)
+{
+  Action action = GPOINTER_TO_INT (data);
+  reset_state ();
+  FpDevice *device = prepare_action (action);
+  start_processing (device);
+  release_processing ();
+  wait_completed (action, 1);
+  g_assert_cmpuint (state.completed[action], ==, 1);
+  g_assert_cmpuint (state.succeeded[action], ==, 1);
+  g_assert_cmpuint (state.reports, ==, action == ACTION_OPEN ? 0 : 1);
+  g_assert_no_error (state.error);
+  operation_error (device, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "late error"));
+  cancel_operation (device);
+  while (g_main_context_iteration (NULL, FALSE));
+  g_assert_cmpuint (state.completed[action], ==, 1);
+  finish_state (device);
+}
+
+static void
+test_open_failure_reopen (void)
+{
+  reset_state ();
+  FpDevice *device = new_device ();
+  state.fail_init = TRUE;
+  dev_open (device);
+  wait_completed (ACTION_OPEN, 1);
+  g_assert_cmpuint (state.acquisitions_created, ==, 1);
+  g_assert_cmpuint (state.succeeded[ACTION_OPEN], ==, 0);
+  g_assert_error (state.error, G_IO_ERROR, G_IO_ERROR_FAILED);
+  g_assert_null (SELF (device)->deadline);
+  g_assert_false (SELF (device)->transport_open);
+  state.fail_init = FALSE;
+  dev_open (device);
+  g_assert_cmpuint (state.acquisitions_created, ==, 2);
+  g_assert_cmpuint (state.acquisitions_freed, ==, 1);
+  g_assert_cmpuint (state.starts, ==, 2);
+  g_assert_cmpuint (state.captures, ==, 1);
+  g_assert_nonnull (state.capture_callback);
+  GxImage image = {0};
+  image.valid = TRUE;
+  state.capture_callback (device, &image, state.capture_data, NULL);
+  wait_completed (ACTION_OPEN, 2);
+  g_assert_cmpuint (state.succeeded[ACTION_OPEN], ==, 1);
+  g_assert_no_error (state.error);
+  g_assert_nonnull (SELF (device)->session);
+  g_assert_false (SELF (device)->transport_open);
+  dev_close (device);
+  g_assert_cmpuint (state.close_completed, ==, 1);
+  g_assert_null (SELF (device)->session);
+  g_assert_null (SELF (device)->acquisition);
+  g_assert_null (SELF (device)->seen_frames);
+  g_assert_null (SELF (device)->input_dir);
+  g_assert_null (SELF (device)->key_path);
+  finish_state (device);
+}
+
+static void
+test_open_missing_input (void)
+{
+  reset_state ();
+  FpDevice *device = new_device ();
+  state.fail_input = TRUE;
+  dev_open (device);
+  wait_completed (ACTION_OPEN, 1);
+  g_assert_error (state.error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
+  g_assert_cmpuint (state.starts, ==, 0);
+  g_assert_cmpuint (state.acquisitions_created, ==, 0);
+  g_assert_null (SELF (device)->deadline);
+  finish_state (device);
+}
+
+static void
+test_queued_capture_cancel (void)
+{
+  reset_state ();
+  FpDevice *device = prepare_action (ACTION_ENROLL);
+  GxImage image = {0};
+  image.valid = TRUE;
+  acquired (device, &image, NULL, NULL);
+  cancel_operation (device);
+  assert_failure_once (device, ACTION_ENROLL, G_IO_ERROR_CANCELLED);
+  g_assert_false (state.worker_entered);
+  g_assert_cmpuint (state.starts, ==, 0);
+  finish_state (device);
+}
+
+static void
+test_cleanup_failure_blocks_reopen (void)
+{
+  reset_state ();
+  FpDevice *device = prepare_action (ACTION_VERIFY);
+  SELF (device)->transport_open = TRUE;
+  state.fail_cleanup = TRUE;
+  operation_error (device, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED,
+                                               "synthetic operation failure"));
+  wait_completed (ACTION_VERIFY, 1);
+  g_assert_true (SELF (device)->transport_open);
+  g_assert_cmpuint (state.stops, ==, 1);
+  dev_open (device);
+  g_assert_cmpuint (state.completed[ACTION_OPEN], ==, 1);
+  g_assert_error (state.error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_BUSY);
+  g_assert_cmpuint (state.starts, ==, 0);
+  g_assert_true (SELF (device)->transport_open);
+  state.fail_cleanup = FALSE;
+  dev_close (device);
+  g_assert_cmpuint (state.close_completed, ==, 1);
+  g_assert_cmpuint (state.stops, ==, 2);
+  g_assert_false (SELF (device)->transport_open);
+  g_assert_no_error (state.error);
+  finish_state (device);
+}
+
+static void
+test_cancel_unwind_completes_once (void)
+{
+  reset_state ();
+  FpDevice *device = prepare_action (ACTION_VERIFY);
+  SELF (device)->transport_open = TRUE;
+  state.cancel_unwinds_error = TRUE;
+  cancel_operation (device);
+  g_assert_cmpuint (state.stops, ==, 0);
+  g_assert_cmpuint (state.completed[ACTION_VERIFY], ==, 0);
+  state.cancel_unwinds_error = FALSE;
+  assert_failure_once (device, ACTION_VERIFY, G_IO_ERROR_CANCELLED);
+  g_assert_cmpuint (state.stops, ==, 1);
+  g_assert_false (SELF (device)->transport_open);
+  finish_state (device);
+}
+
+int
+main (int argc, char **argv)
+{
+  g_test_init (&argc, &argv, NULL);
+  const char *actions[] = { NULL, "preprocessing", "enroll", "verify", "identify" };
+  for (Action action = ACTION_OPEN; action <= ACTION_IDENTIFY; action++) {
+    g_autofree char *cancel_path = g_strdup_printf ("/goodix521d/lifecycle/cancel-during-%s", actions[action]);
+    g_autofree char *deadline_path = g_strdup_printf ("/goodix521d/lifecycle/expired-%s-before-timeout-dispatch", actions[action]);
+    g_autofree char *cancellable_path = g_strdup_printf ("/goodix521d/lifecycle/cancellable-during-%s", actions[action]);
+    g_test_add_data_func (cancel_path, GINT_TO_POINTER (action), test_cancel_worker);
+    g_test_add_data_func (cancellable_path, GINT_TO_POINTER (action), test_cancellable_worker);
+    g_test_add_data_func (deadline_path, GINT_TO_POINTER (action), test_expired_worker);
+    if (action == ACTION_ENROLL)
+      continue;
+    g_autofree char *success_path = g_strdup_printf ("/goodix521d/lifecycle/%s-completes-once", actions[action]);
+    g_test_add_data_func (success_path, GINT_TO_POINTER (action), test_success_once);
+    if (action == ACTION_OPEN)
+      continue;
+    g_autofree char *report_path = g_strdup_printf ("/goodix521d/lifecycle/cancel-in-%s-report", actions[action]);
+    g_test_add_data_func (report_path, GINT_TO_POINTER (action), test_report_cancel);
+  }
+  g_test_add_func ("/goodix521d/lifecycle/progress-cancel-no-successor-capture", test_progress_cancel);
+  g_test_add_func ("/goodix521d/lifecycle/open-failure-reopen-cleanup", test_open_failure_reopen);
+  g_test_add_func ("/goodix521d/lifecycle/missing-open-input", test_open_missing_input);
+  g_test_add_func ("/goodix521d/lifecycle/queued-capture-cancel", test_queued_capture_cancel);
+  g_test_add_func ("/goodix521d/lifecycle/cleanup-failure-blocks-reopen", test_cleanup_failure_blocks_reopen);
+  g_test_add_func ("/goodix521d/lifecycle/synchronous-cancel-unwind-completes-once", test_cancel_unwind_completes_once);
+  return g_test_run ();
+}
