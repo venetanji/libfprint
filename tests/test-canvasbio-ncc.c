@@ -536,6 +536,16 @@ test_ncc_classify_matches (void)
   tel.grad_for_best_intensity = 0.22;
   tel.support_count = 3;
   g_assert_cmpint (cb2000_ncc_classify (&tel), ==, CB2000_NCC_DECISION_MATCH);
+
+  /* 5. Live genuine login touch with single dominant support (top1=0.4337, top2=0.2101, grad1=0.2010) */
+  memset (&tel, 0, sizeof (tel));
+  tel.compared_images = 5;
+  tel.best_intensity = 0.4337;
+  tel.second_intensity = 0.2101;
+  tel.mean_top3_intensity = 0.2688;
+  tel.grad_for_best_intensity = 0.2010;
+  tel.support_count = 1;
+  g_assert_cmpint (cb2000_ncc_classify (&tel), ==, CB2000_NCC_DECISION_MATCH);
 }
 
 static void
