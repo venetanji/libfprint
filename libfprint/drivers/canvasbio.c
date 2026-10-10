@@ -149,11 +149,7 @@ typedef enum {
   CYCLE_EARLY_PLACEMENT_DELAY,   /* Extra delay if finger too early */
   CYCLE_CAPTURE_START,       /* Capture start commands via sub-SSM */
   CYCLE_READ_IMAGE,          /* Image read (20 chunks) via sub-SSM */
-  CYCLE_FINALIZE,            /* Capture finalize commands via sub-SSM */
-  CYCLE_VERIFY_RESULT_STATUS,   /* Verify-only status/result routing */
-  CYCLE_VERIFY_READY_QUERY_A,   /* Verify READY: complementary status query A */
-  CYCLE_VERIFY_READY_QUERY_B,   /* Verify READY: complementary status query B */
-  CYCLE_VERIFY_READY_DECIDE,    /* Verify READY: decide route from query */
+  CYCLE_FINALIZE,            /* Capture finalize commands via sub-SSM */    /* Verify READY: decide route from query */
   CYCLE_SUBMIT_IMAGE,        /* Submit image to libfprint */
   CYCLE_WAIT_REMOVAL,        /* Finger removal polling via sub-SSM */
   CYCLE_REARM,               /* Soft rearm between captures */
@@ -302,92 +298,7 @@ struct _FpiDeviceCanvasbio
   gboolean force_recovery;
   gboolean initial_activation_done;
 
-  /* Runtime diagnostics for retry behavior by cause. */
-  guint retry_total;
-  guint accepted_total;
-  guint retry_cause_count[CB2000_RETRY_CAUSE_COUNT];
-
-  /* Runtime telemetry by phase/action. */
-  guint submit_capture_total;
-  guint submit_enroll_total;
-  guint submit_verify_total;
-  guint submit_identify_total;
-
-  /* Verify template telemetry (host-side NBIS path). */
-  guint verify_template_samples;
-  guint verify_template_subprints_last;
-  guint verify_template_subprints_min;
-  guint verify_template_subprints_max;
-
-  /* Trilha B skeleton: runtime flag for device-assisted verify experiments. */
-  gboolean experimental_device_assisted_verify;
-
-  /* Trilha B etapa B2: telemetry for short status reads during verify. */
-  guint  verify_cmd_rx_total;
-  guint  verify_cmd_rx_with_data;
-  gsize  verify_cmd_rx_last_len;
-  guint8 verify_cmd_rx_last[8];
-
-  /* Last capture_finalize ACKs used as verify routing gate. */
-  gsize                   finalize_ack1_len;
-  gsize                   finalize_ack2_len;
-  guint8                  finalize_ack1[4];
-  guint8                  finalize_ack2[4];
-  guint8                  verify_ack_status_last;
-  Cb2000VerifyAckDecision verify_ack_decision_last;
-  guint                   verify_ack_ready_total;
-  guint                   verify_ack_retry_total;
-  guint                   verify_ack_nomatch_total;
-  guint                   verify_ack_unknown_total;
-  guint                   verify_ack_mismatch_total;
-  guint8                  verify_status_code_last;
-  guint8                  verify_result_code_last;
-  Cb2000VerifyRoute       verify_route_last;
-  Cb2000VerifyResultClass verify_result_class_last;
-  guint                   verify_result_class_count[CB2000_VERIFY_RESULT_CLASS_COUNT];
-  gboolean                verify_device_status_short_circuit;
-  gboolean                verify_ready_query_enabled;
-  gboolean                verify_ready_query_b_enabled;
-
-  /* READY-query telemetry:
-   * A = first complementary status query
-   * B = second complementary status query (V29 matrix decision)
-   */
-  guint                           verify_ready_query_total;
-  guint8                          verify_ready_query_status_last;
-  gsize                           verify_ready_query_len;
-  guint8                          verify_ready_query_data[4];
-  guint                           verify_ready_query_b_total;
-  guint8                          verify_ready_query_b_status_last;
-  gsize                           verify_ready_query_b_len;
-  guint8                          verify_ready_query_b_data[4];
-  guint                           verify_ready_query_ready_total;
-  guint                           verify_ready_query_retry_total;
-  guint                           verify_ready_query_nomatch_total;
-  guint                           verify_ready_query_unknown_total;
-  Cb2000VerifyReadyMatrixDecision verify_ready_matrix_last;
-  guint                           verify_ready_matrix_ready_total;
-  guint                           verify_ready_matrix_retry_total;
-  guint                           verify_ready_matrix_nomatch_total;
-  guint                           verify_ready_matrix_unknown_total;
-
-  /* Verify pre-capture status probe (Windows: ff:00:01:02 after a8:20). */
-  guint  verify_pre_capture_status_total;
-  gsize  verify_pre_capture_status_len;
-  guint8 verify_pre_capture_status[4];
-
-  /* Deferred verify retry report (consumed in cycle_complete). */
-  gboolean      verify_retry_pending;
-  FpDeviceRetry verify_retry_error;
-  guint8        verify_retry_status_code;
-  guint8        verify_retry_result_code;
-  gchar         verify_retry_message[128];
-
-  /* Deferred capture retry report (consumed in cycle_complete). */
-  gboolean      capture_retry_pending;
-  FpDeviceRetry capture_retry_error;
-  gchar         capture_retry_message[128];
-};
+  };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceCanvasbio, fpi_device_canvasbio, FPI, DEVICE_CANVASBIO, FpDevice)
 G_DEFINE_TYPE (FpiDeviceCanvasbio, fpi_device_canvasbio, FP_TYPE_DEVICE)
@@ -458,15 +369,7 @@ static const guint8 data_padding[256] = {0};
  * This mirrors the RE "status execute/query then commit class" split:
  * we ask one extra status sample after finalize before host matcher fallback.
  */
-static const Cb2000Command verify_ready_query_a_cmds[] = {
-  {CMD_CTRL_IN,  REQ_STATUS, 0x0000, 0, NULL, 4},
-  {CMD_END, 0, 0, 0, NULL, 0}
-};
 
-static const Cb2000Command verify_ready_query_b_cmds[] = {
-  {CMD_CTRL_IN,  REQ_STATUS, 0x0000, 0, NULL, 4},
-  {CMD_END, 0, 0, 0, NULL, 0}
-};
 
 /* ============================================================================
  * COMMAND TABLES
@@ -817,25 +720,10 @@ static const char *cb2000_cmd_type_to_str (Cb2000CmdType type);
 static gboolean cb2000_is_verify_phase_action (FpiDeviceAction action);
 static const char *cb2000_capture_start_seq_name_for_action (FpiDeviceAction action);
 static const char *cb2000_capture_finalize_seq_name_for_action (FpiDeviceAction action);
-static gboolean cb2000_seq_is_capture_finalize (const char *seq_name);
-static const char *cb2000_verify_ack_decision_label (Cb2000VerifyAckDecision decision);
-static const char *cb2000_verify_result_class_label (Cb2000VerifyResultClass klass);
-static Cb2000VerifyResultClass cb2000_classify_verify_result_codes (guint8 status_code,
-                                                                    guint8 result_code);
-static const char *cb2000_verify_ready_query_class_label (guint8 status0);
-static const char *cb2000_verify_ready_matrix_label (Cb2000VerifyReadyMatrixDecision decision);
-static Cb2000VerifyReadyMatrixDecision cb2000_decide_ready_query_matrix (guint8   status_a,
-                                                                         gboolean has_b,
-                                                                         guint8   status_b);
-static Cb2000VerifyAckDecision cb2000_classify_finalize_ack (FpiDeviceCanvasbio *self,
-                                                             guint8             *status_hint,
-                                                             gboolean           *mismatch_out);
 static void cb2000_log_cmd_rx_data (FpDevice               *dev,
                                     const Cb2000CmdContext *ctx,
                                     const Cb2000Command    *cmd,
                                     const FpiUsbTransfer   *transfer);
-static gboolean cb2000_verify_finalize_ack_gate (FpDevice           *dev,
-                                                 FpiDeviceCanvasbio *self);
 static void start_new_cycle (FpDevice *dev);
 
 /* Invert grayscale image in-place (sensor outputs inverted polarity). */
@@ -855,38 +743,13 @@ invert_image_u8 (guint8 *data, gsize len)
 static gboolean
 cb2000_get_env_bool (const gchar *name, gboolean default_value)
 {
-  const gchar *v = g_getenv (name);
-
-  if (!v || !*v)
-    return default_value;
-
-  if (g_ascii_strcasecmp (v, "1") == 0 ||
-      g_ascii_strcasecmp (v, "true") == 0 ||
-      g_ascii_strcasecmp (v, "yes") == 0 ||
-      g_ascii_strcasecmp (v, "on") == 0)
-    return TRUE;
-
-  if (g_ascii_strcasecmp (v, "0") == 0 ||
-      g_ascii_strcasecmp (v, "false") == 0 ||
-      g_ascii_strcasecmp (v, "no") == 0 ||
-      g_ascii_strcasecmp (v, "off") == 0)
-    return FALSE;
-
   return default_value;
 }
 
 static int
 cb2000_parse_upscale_value (const gchar *v, int default_value)
 {
-  if (!v || !*v)
-    return default_value;
-
-  int f = atoi (v);
-  if (f < 1)
-    f = 1;
-  if (f > 8)
-    f = 8;
-  return f;
+  return default_value;
 }
 
 static int
@@ -910,153 +773,23 @@ cb2000_get_env_int (const gchar *name,
   return out;
 }
 
-static const gchar *
-cb2000_retry_cause_label (Cb2000RetryCause cause)
-{
-  switch (cause)
-    {
-    case CB2000_RETRY_BACKGROUND_CAPTURE:
-      return "background_capture";
 
-    case CB2000_RETRY_AREA_GATE:
-      return "area_gate";
 
-    case CB2000_RETRY_QUALITY_GATE:
-      return "quality_gate";
-
-    case CB2000_RETRY_MINUTIAE_PRECHECK:
-      return "minutiae_precheck";
-
-    case CB2000_RETRY_DEVICE_STATUS:
-      return "device_status";
-
-    case CB2000_RETRY_ENROLL_CONSISTENCY:
-      return "enroll_consistency";
-
-    case CB2000_RETRY_CAUSE_COUNT:
-      return "count_sentinel";
-
-    default:
-      return "unknown";
-    }
-}
 
 /*
  * Retry-class status pairs observed in Windows captures.
  * We keep this conservative: unknown values never become hard decisions.
  */
-static gboolean
-cb2000_is_verify_retry_status_pair (guint8 status_code, guint8 result_code)
-{
-  if (status_code == 0x00 && result_code == 0x00)
-    return TRUE;
-  if (status_code == 0x0f && result_code == 0x00)
-    return TRUE;
-  if (status_code == 0xff && result_code == 0x0c)
-    return TRUE;
 
-  /* New retry-class ACKs seen in 2026-02-16 Windows verify error captures. */
-  if (status_code == 0xf0 && result_code == 0x0f)
-    return TRUE;
-  if (status_code == 0xf3 && result_code == 0x0f)
-    return TRUE;
-  if (status_code == 0x88 && result_code == 0x08)
-    return TRUE;
-  if (status_code == 0x11 && result_code == 0x01)
-    return TRUE;
-  if (status_code == 0x08 && result_code == 0x00)
-    return TRUE;
-  if (status_code == 0x20 && result_code == 0x0f)
-    return TRUE;
-  if (status_code == 0x00 && result_code == 0x08)
-    return TRUE;
-  if (status_code == 0x11 && result_code == 0x00)
-    return TRUE;
-  if (status_code == 0x30 && result_code == 0x0f)
-    return TRUE;
 
-  return FALSE;
-}
 
-static FpDeviceRetry
-cb2000_retry_error_from_verify_status_pair (guint8 status_code, guint8 result_code)
-{
-  /*
-   * Direction/placement-like hints from Windows Hello feedback:
-   * - 20:0f -> move up
-   * - 11:00 -> move right
-   * - 88:08 -> move left
-   */
-  if ((status_code == 0x20 && result_code == 0x0f) ||
-      (status_code == 0x11 && result_code == 0x00) ||
-      (status_code == 0x88 && result_code == 0x08))
-    return FP_DEVICE_RETRY_CENTER_FINGER;
 
-  /* Generic placement instability buckets observed in retry-only cycles. */
-  if ((status_code == 0x11 && result_code == 0x01) ||
-      (status_code == 0xf0 && result_code == 0x0f) ||
-      (status_code == 0xf3 && result_code == 0x0f))
-    return FP_DEVICE_RETRY_CENTER_FINGER;
 
-  /* Lift/replace style hint for unstable edge-contact / contamination states. */
-  if ((status_code == 0x08 && result_code == 0x00) ||
-      (status_code == 0x00 && result_code == 0x08))
-    return FP_DEVICE_RETRY_REMOVE_FINGER;
 
-  /* "Try a different finger" in Windows; keep as generic retry. */
-  if (status_code == 0x30 && result_code == 0x0f)
-    return FP_DEVICE_RETRY_GENERAL;
 
-  return FP_DEVICE_RETRY_GENERAL;
-}
 
-static const gchar *
-cb2000_retry_message_from_verify_status_pair (guint8 status_code, guint8 result_code)
-{
-  if (status_code == 0x20 && result_code == 0x0f)
-    return "Move finger slightly up and try again.";
-  if (status_code == 0x11 && result_code == 0x00)
-    return "Move finger slightly right and try again.";
-  if (status_code == 0x88 && result_code == 0x08)
-    return "Move finger slightly left and try again.";
-  if (status_code == 0x00 && result_code == 0x08)
-    return "Clean the sensor and try again.";
-  if (status_code == 0x30 && result_code == 0x0f)
-    return "Try a different finger.";
-  if (status_code == 0x08 && result_code == 0x00)
-    return "Lift and place finger again.";
-  if ((status_code == 0xf0 && result_code == 0x0f) ||
-      (status_code == 0xf3 && result_code == 0x0f) ||
-      (status_code == 0x11 && result_code == 0x01))
-    return "Adjust finger placement and try again.";
 
-  return NULL;
-}
 
-static const gchar *
-cb2000_retry_error_label (FpDeviceRetry retry_error)
-{
-  switch (retry_error)
-    {
-    case FP_DEVICE_RETRY_GENERAL:
-      return "GENERAL";
-
-    case FP_DEVICE_RETRY_TOO_SHORT:
-      return "TOO_SHORT";
-
-    case FP_DEVICE_RETRY_CENTER_FINGER:
-      return "CENTER_FINGER";
-
-    case FP_DEVICE_RETRY_REMOVE_FINGER:
-      return "REMOVE_FINGER";
-
-    case FP_DEVICE_RETRY_TOO_FAST:
-      return "TOO_FAST";
-
-    default:
-      return "UNKNOWN";
-    }
-}
 
 static int
 cb2000_get_upscale_factor (FpiDeviceAction action)
@@ -1196,44 +929,9 @@ cb2000_should_precheck_minutiae (FpiDeviceAction action)
 static const gchar *
 cb2000_action_label (FpiDeviceAction action)
 {
-  switch (action)
-    {
-    case FPI_DEVICE_ACTION_NONE:
-      return "none";
-
-    case FPI_DEVICE_ACTION_PROBE:
-      return "probe";
-
-    case FPI_DEVICE_ACTION_OPEN:
-      return "open";
-
-    case FPI_DEVICE_ACTION_CLOSE:
-      return "close";
-
-    case FPI_DEVICE_ACTION_CAPTURE:
-      return "capture";
-
-    case FPI_DEVICE_ACTION_LIST:
-      return "list";
-
-    case FPI_DEVICE_ACTION_DELETE:
-      return "delete";
-
-    case FPI_DEVICE_ACTION_CLEAR_STORAGE:
-      return "clear_storage";
-
-    case FPI_DEVICE_ACTION_ENROLL:
-      return "enroll";
-
-    case FPI_DEVICE_ACTION_VERIFY:
-      return "verify";
-
-    case FPI_DEVICE_ACTION_IDENTIFY:
-      return "identify";
-    }
-
-  return "capture";
+  return "";
 }
+
 
 static int
 cb2000_get_area_min_pct (FpiDeviceAction action)
@@ -1278,27 +976,7 @@ cb2000_get_area_min_pct (FpiDeviceAction action)
 }
 
 /* Internal helper: read internal NBIS subprint cardinality for telemetry only. */
-static guint
-cb2000_get_subprint_count (FpPrint *print)
-{
-  GPtrArray *prints = NULL;
 
-  if (!print)
-    return 0;
-
-  if (!g_object_class_find_property (G_OBJECT_GET_CLASS (print), "fpi-prints"))
-    return 0;
-
-  g_object_get (print, "fpi-prints", &prints, NULL);
-  if (!prints)
-    return 0;
-
-  /*
-   * `fpi-prints` is exposed as G_PARAM_POINTER in libfprint (private API).
-   * Ownership stays with FpPrint; unref'ing here can free internal storage.
-   */
-  return prints->len;
-}
 
 static void G_GNUC_UNUSED
 cb2000_log_preprocess_profile (FpiDeviceAction action)
@@ -1316,65 +994,8 @@ cb2000_update_submit_telemetry (FpiDeviceCanvasbio *self,
                                 FpDevice           *dev,
                                 FpiDeviceAction     action)
 {
-  switch (action)
-    {
-    case FPI_DEVICE_ACTION_NONE:
-    case FPI_DEVICE_ACTION_PROBE:
-    case FPI_DEVICE_ACTION_OPEN:
-    case FPI_DEVICE_ACTION_CLOSE:
-    case FPI_DEVICE_ACTION_LIST:
-    case FPI_DEVICE_ACTION_DELETE:
-    case FPI_DEVICE_ACTION_CLEAR_STORAGE:
-      break;
-
-    case FPI_DEVICE_ACTION_CAPTURE:
-      self->submit_capture_total++;
-      break;
-
-    case FPI_DEVICE_ACTION_ENROLL:
-      self->submit_enroll_total++;
-      break;
-
-    case FPI_DEVICE_ACTION_VERIFY: {
-        FpPrint *template = NULL;
-        guint subprints = 0;
-
-        self->submit_verify_total++;
-        fpi_device_get_verify_data (dev, &template);
-        subprints = cb2000_get_subprint_count (template);
-
-        self->verify_template_subprints_last = subprints;
-        if (self->verify_template_samples == 0)
-          {
-            self->verify_template_subprints_min = subprints;
-            self->verify_template_subprints_max = subprints;
-          }
-        else
-          {
-            self->verify_template_subprints_min =
-              MIN (self->verify_template_subprints_min, subprints);
-            self->verify_template_subprints_max =
-              MAX (self->verify_template_subprints_max, subprints);
-          }
-        self->verify_template_samples++;
-
-        fp_info ("[ VERIFY ] attempt=%u template_subprints=%u (min=%u max=%u samples=%u)",
-                 self->submit_verify_total,
-                 subprints,
-                 self->verify_template_subprints_min,
-                 self->verify_template_subprints_max,
-                 self->verify_template_samples);
-        break;
-      }
-
-    case FPI_DEVICE_ACTION_IDENTIFY:
-      self->submit_identify_total++;
-      break;
-
-    default:
-      break;
-    }
 }
+
 
 /*
  * Trilha B skeleton:
@@ -1386,37 +1007,9 @@ cb2000_try_device_assisted_verify (FpiDeviceCanvasbio *self,
                                    FpDevice           *dev,
                                    FpImage            *img)
 {
-  (void) img;
-
-  if (!self->experimental_device_assisted_verify)
-    return FALSE;
-
-  switch (self->verify_ack_decision_last)
-    {
-    case CB2000_VERIFY_ACK_DEVICE_NOMATCH:
-      fp_warn ("[ EXP ] device-assisted verify: finalize ACK indicates no-match (status=0x%02x)",
-               self->verify_ack_status_last);
-      self->verify_result = FPI_MATCH_FAIL;
-      return TRUE;
-
-    case CB2000_VERIFY_ACK_READY:
-      fp_info ("[ EXP ] device-assisted verify: ACK ready (status=0x%02x), host NBIS fallback remains active",
-               self->verify_ack_status_last);
-      return FALSE;
-
-    case CB2000_VERIFY_ACK_RETRY:
-      fp_info ("[ EXP ] device-assisted verify: ACK retry already handled by gate");
-      return FALSE;
-
-    case CB2000_VERIFY_ACK_UNKNOWN:
-    default:
-      fp_info ("[ EXP ] device-assisted verify: ACK unknown (status=0x%02x), using host NBIS fallback",
-               self->verify_ack_status_last);
-      return FALSE;
-    }
-
   return FALSE;
 }
+
 
 static void
 cb2000_retry_scan_with_cause (FpDevice        *dev,
@@ -1427,99 +1020,34 @@ cb2000_retry_scan_with_cause (FpDevice        *dev,
   FpiDeviceAction action = fpi_device_get_current_action (dev);
   FpDeviceRetry retry_error = FP_DEVICE_RETRY_GENERAL;
   const gchar *retry_msg = NULL;
-  guint cause_count = 0;
 
-  self->retry_total++;
-  if (cause >= 0 && cause < CB2000_RETRY_CAUSE_COUNT)
+  if (cause == CB2000_RETRY_AREA_GATE)
     {
-      self->retry_cause_count[cause]++;
-      cause_count = self->retry_cause_count[cause];
+      retry_error = FP_DEVICE_RETRY_TOO_SHORT;
+      retry_msg = "Please press your finger more firmly and cover the entire sensor.";
     }
-
-  if (cause == CB2000_RETRY_DEVICE_STATUS)
+  else if (cause == CB2000_RETRY_QUALITY_GATE)
     {
-      if (detail && g_strstr_len (detail, -1, "verify finalize ack gate"))
-        {
-          retry_error = cb2000_retry_error_from_verify_status_pair (
-            self->verify_status_code_last,
-            self->verify_result_code_last);
-          retry_msg = cb2000_retry_message_from_verify_status_pair (
-            self->verify_status_code_last,
-            self->verify_result_code_last);
-        }
-      else if (detail && g_strstr_len (detail, -1, "verify ready matrix retry"))
-        {
-          retry_error = FP_DEVICE_RETRY_CENTER_FINGER;
-          retry_msg = "Adjust finger placement and try again.";
-        }
-
-      fp_info ("[ RETRY ] action=%s cause=%s total=%u cause_count=%u retry_hint=%s status=0x%02x result=0x%02x msg=\"%s\" %s",
-               cb2000_action_label (action),
-               cb2000_retry_cause_label (cause),
-               self->retry_total,
-               cause_count,
-               cb2000_retry_error_label (retry_error),
-               self->verify_status_code_last,
-               self->verify_result_code_last,
-               retry_msg ? retry_msg : "",
-               detail ? detail : "");
+      retry_msg = "Image quality too low, adjust finger and try again.";
     }
-  else
+  else if (cause == CB2000_RETRY_MINUTIAE_PRECHECK)
     {
-      if (cause == CB2000_RETRY_AREA_GATE)
-        {
-          retry_msg = "Place finger fully on sensor and try again.";
-        }
-      else if (cause == CB2000_RETRY_QUALITY_GATE)
-        {
-          retry_msg = "Image quality too low, adjust finger and try again.";
-        }
-      else if (cause == CB2000_RETRY_MINUTIAE_PRECHECK)
-        {
-          retry_msg = "Adjust finger and try again.";
-        }
-      else if (cause == CB2000_RETRY_ENROLL_CONSISTENCY)
-        {
-          retry_error = FP_DEVICE_RETRY_CENTER_FINGER;
-          retry_msg = "Place the same finger centered, as in the previous touch.";
-        }
-
-      fp_info ("[ RETRY ] action=%s cause=%s total=%u cause_count=%u retry_hint=%s msg=\"%s\" %s",
-               cb2000_action_label (action),
-               cb2000_retry_cause_label (cause),
-               self->retry_total,
-               cause_count,
-               cb2000_retry_error_label (retry_error),
-               retry_msg ? retry_msg : "",
-               detail ? detail : "");
+      retry_msg = "Adjust finger and try again.";
+    }
+  else if (cause == CB2000_RETRY_ENROLL_CONSISTENCY)
+    {
+      retry_error = FP_DEVICE_RETRY_CENTER_FINGER;
+      retry_msg = "Place the same finger centered, as in the previous touch.";
     }
 
   if (cb2000_is_verify_phase_action (action))
     {
-      self->verify_retry_pending = TRUE;
-      self->verify_retry_error = retry_error;
-      self->verify_retry_status_code = self->verify_status_code_last;
-      self->verify_retry_result_code = self->verify_result_code_last;
-      if (retry_msg)
-        g_strlcpy (self->verify_retry_message, retry_msg,
-                   sizeof (self->verify_retry_message));
-      else
-        self->verify_retry_message[0] = '\0';
       self->verify_result = FPI_MATCH_ERROR;
       return;
     }
 
   if (action == FPI_DEVICE_ACTION_CAPTURE)
-    {
-      self->capture_retry_pending = TRUE;
-      self->capture_retry_error = retry_error;
-      if (retry_msg)
-        g_strlcpy (self->capture_retry_message, retry_msg,
-                   sizeof (self->capture_retry_message));
-      else
-        self->capture_retry_message[0] = '\0';
-      return;
-    }
+    return;
 
   if (action == FPI_DEVICE_ACTION_ENROLL)
     {
@@ -1529,6 +1057,7 @@ cb2000_retry_scan_with_cause (FpDevice        *dev,
       else
         err = fpi_device_retry_new (retry_error);
       fpi_device_enroll_progress (dev, self->enroll_stage, NULL, err);
+      return;
     }
 }
 
@@ -1544,7 +1073,6 @@ static void
 cb2000_minutiae_precheck_cb (GObject *source, GAsyncResult *res, gpointer user_data)
 {
   Cb2000MinutiaePrecheckCtx *ctx = user_data;
-  FpiDeviceCanvasbio *self = FPI_DEVICE_CANVASBIO (ctx->dev);
 
   g_autoptr(GError) error = NULL;
 
@@ -1560,10 +1088,7 @@ cb2000_minutiae_precheck_cb (GObject *source, GAsyncResult *res, gpointer user_d
       fpi_ssm_next_state (ctx->ssm);
       g_free (ctx);
       return;
-    }
-
-  self->accepted_total++;
-  if (ctx->action == FPI_DEVICE_ACTION_CAPTURE)
+    }  if (ctx->action == FPI_DEVICE_ACTION_CAPTURE)
     {
       /* Capture action must complete explicitly after async precheck. */
       fpi_device_capture_complete (ctx->dev, ctx->img, NULL);
@@ -1669,13 +1194,7 @@ cb2000_capture_finalize_cmds_for_action (FpiDeviceAction action)
   return capture_finalize_cmds;
 }
 
-static gboolean
-cb2000_seq_is_capture_finalize (const char *seq_name)
-{
-  return seq_name != NULL &&
-         (g_str_has_prefix (seq_name, "capture_finalize") ||
-          g_str_has_prefix (seq_name, "verify_finalize"));
-}
+
 
 /*
  * Log short response payloads from command-sequence reads.
@@ -1687,235 +1206,25 @@ cb2000_log_cmd_rx_data (FpDevice               *dev,
                         const Cb2000Command    *cmd,
                         const FpiUsbTransfer   *transfer)
 {
-  FpiDeviceCanvasbio *self = FPI_DEVICE_CANVASBIO (dev);
-  FpiDeviceAction action = fpi_device_get_current_action (dev);
-  gchar hex[3 * 8 + 1];
-  gsize max_bytes;
-  gsize i;
-  gsize p = 0;
-
-  if (cmd->type != CMD_BULK_IN && cmd->type != CMD_CTRL_IN)
-    return;
-  if (!cb2000_get_env_bool ("CB2000_DEBUG_CMD_RX", TRUE))
-    return;
-
-  self->verify_cmd_rx_total++;
-  if (transfer->actual_length == 0)
-    {
-      fp_dbg ("[%s] cmd %d/%d %s rx len=0",
-              ctx->seq_name,
-              ctx->cmd_index + 1,
-              ctx->cmd_total,
-              cb2000_cmd_type_to_str (cmd->type));
-      return;
-    }
-
-  self->verify_cmd_rx_with_data++;
-  self->verify_cmd_rx_last_len = MIN (transfer->actual_length, sizeof (self->verify_cmd_rx_last));
-  memcpy (self->verify_cmd_rx_last, transfer->buffer, self->verify_cmd_rx_last_len);
-
-  max_bytes = MIN (transfer->actual_length, (gsize) 8);
-  for (i = 0; i < max_bytes; i++)
-    {
-      if (i > 0 && p < sizeof (hex))
-        hex[p++] = ':';
-      if (p + 2 <= sizeof (hex))
-        p += g_snprintf (hex + p, sizeof (hex) - p, "%02x", transfer->buffer[i]);
-    }
-  hex[MIN (p, sizeof (hex) - 1)] = '\0';
-
-  fp_dbg ("[%s] cmd %d/%d %s rx len=%zu data=%s",
-          ctx->seq_name,
-          ctx->cmd_index + 1,
-          ctx->cmd_total,
-          cb2000_cmd_type_to_str (cmd->type),
-          transfer->actual_length,
-          hex);
-
-  if (cb2000_is_verify_phase_action (action) &&
-      cb2000_seq_is_capture_finalize (ctx->seq_name) &&
-      (ctx->cmd_index == 5 || ctx->cmd_index == 8))
-    {
-      guint8 *dst = (ctx->cmd_index == 5) ? self->finalize_ack1 : self->finalize_ack2;
-      gsize *dst_len = (ctx->cmd_index == 5) ? &self->finalize_ack1_len : &self->finalize_ack2_len;
-      gsize copy_len = MIN (transfer->actual_length, (gsize) 4);
-      memset (dst, 0, 4);
-      memcpy (dst, transfer->buffer, copy_len);
-      *dst_len = copy_len;
-
-      fp_info ("[ VERIFY_STATUS ] finalize_ack_%u len=%zu data=%s",
-               (ctx->cmd_index == 5) ? 1U : 2U,
-               transfer->actual_length,
-               hex);
-    }
-
-  if (cb2000_is_verify_phase_action (action) &&
-      g_str_has_prefix (ctx->seq_name, "verify_ready_query_a") &&
-      ctx->cmd_index == 0)
-    {
-      gsize copy_len = MIN (transfer->actual_length, (gsize) 4);
-      memset (self->verify_ready_query_data, 0, sizeof (self->verify_ready_query_data));
-      memcpy (self->verify_ready_query_data, transfer->buffer, copy_len);
-      self->verify_ready_query_len = copy_len;
-      self->verify_ready_query_status_last = (copy_len > 0) ? transfer->buffer[0] : 0x00;
-      self->verify_ready_query_total++;
-
-      fp_info ("[ VERIFY_READY_QUERY_A ] len=%zu data=%s class=%s",
-               transfer->actual_length,
-               hex,
-               cb2000_verify_ready_query_class_label (self->verify_ready_query_status_last));
-    }
-
-  if (cb2000_is_verify_phase_action (action) &&
-      g_str_has_prefix (ctx->seq_name, "verify_ready_query_b") &&
-      ctx->cmd_index == 0)
-    {
-      gsize copy_len = MIN (transfer->actual_length, (gsize) 4);
-      memset (self->verify_ready_query_b_data, 0, sizeof (self->verify_ready_query_b_data));
-      memcpy (self->verify_ready_query_b_data, transfer->buffer, copy_len);
-      self->verify_ready_query_b_len = copy_len;
-      self->verify_ready_query_b_status_last = (copy_len > 0) ? transfer->buffer[0] : 0x00;
-      self->verify_ready_query_b_total++;
-
-      fp_info ("[ VERIFY_READY_QUERY_B ] len=%zu data=%s class=%s",
-               transfer->actual_length,
-               hex,
-               cb2000_verify_ready_query_class_label (self->verify_ready_query_b_status_last));
-    }
-
-  if (cb2000_is_verify_phase_action (action) &&
-      g_str_has_prefix (ctx->seq_name, "verify_start") &&
-      cmd->type == CMD_BULK_IN &&
-      transfer->actual_length == 4 &&
-      self->verify_pre_capture_status_len == 0)
-    {
-      self->verify_pre_capture_status_len = 4;
-      memcpy (self->verify_pre_capture_status, transfer->buffer, 4);
-      self->verify_pre_capture_status_total++;
-      fp_info ("[ VERIFY_PRE_CAPTURE ] len=%zu data=%s",
-               transfer->actual_length, hex);
-    }
 }
 
-static const char *
-cb2000_verify_ack_decision_label (Cb2000VerifyAckDecision decision)
-{
-  switch (decision)
-    {
-    case CB2000_VERIFY_ACK_READY:
-      return "READY";
 
-    case CB2000_VERIFY_ACK_RETRY:
-      return "RETRY";
 
-    case CB2000_VERIFY_ACK_DEVICE_NOMATCH:
-      return "DEVICE_NOMATCH";
 
-    case CB2000_VERIFY_ACK_UNKNOWN:
-    default:
-      return "UNKNOWN";
-    }
-}
 
-static const char *
-cb2000_verify_route_label (Cb2000VerifyRoute route)
-{
-  switch (route)
-    {
-    case CB2000_VERIFY_ROUTE_HOST_NBIS:
-      return "HOST_NCC";
 
-    case CB2000_VERIFY_ROUTE_DEVICE_STATUS:
-      return "DEVICE_STATUS";
 
-    case CB2000_VERIFY_ROUTE_DEVICE_NOMATCH:
-      return "DEVICE_NOMATCH";
-
-    case CB2000_VERIFY_ROUTE_RETRY_GATE:
-      return "RETRY_GATE";
-
-    case CB2000_VERIFY_ROUTE_UNKNOWN:
-    default:
-      return "UNKNOWN";
-    }
-}
-
-static const char *
-cb2000_verify_result_class_label (Cb2000VerifyResultClass klass)
-{
-  switch (klass)
-    {
-    case CB2000_VERIFY_RESULT_CLASS_READY:
-      return "READY";
-
-    case CB2000_VERIFY_RESULT_CLASS_RETRY:
-      return "RETRY";
-
-    case CB2000_VERIFY_RESULT_CLASS_DEVICE_NOMATCH:
-      return "DEVICE_NOMATCH";
-
-    case CB2000_VERIFY_RESULT_CLASS_COUNT:
-    case CB2000_VERIFY_RESULT_CLASS_UNKNOWN:
-    default:
-      return "UNKNOWN";
-    }
-}
 
 /*
  * Normalize verify status/result byte pairs into a stable class.
  * This class is used for routing telemetry and for optional short-circuit
  * handling when device status is explicit enough to skip host NBIS.
  */
-static Cb2000VerifyResultClass
-cb2000_classify_verify_result_codes (guint8 status_code, guint8 result_code)
-{
-  if (status_code == 0xff && result_code == 0x0f)
-    return CB2000_VERIFY_RESULT_CLASS_READY;
-  if (cb2000_is_verify_retry_status_pair (status_code, result_code))
-    return CB2000_VERIFY_RESULT_CLASS_RETRY;
-  if (status_code == 0xff && result_code == 0x0b)
-    return CB2000_VERIFY_RESULT_CLASS_DEVICE_NOMATCH;
-  return CB2000_VERIFY_RESULT_CLASS_UNKNOWN;
-}
 
-static const char *
-cb2000_verify_ready_query_class_label (guint8 status0)
-{
-  switch (status0)
-    {
-    case 0x00:
-      return "READY";
 
-    case 0x02:
-      return "RETRY_02";
 
-    case 0x0b:
-      return "NOMATCH_0B";
 
-    default:
-      return "UNKNOWN";
-    }
-}
 
-static const char *
-cb2000_verify_ready_matrix_label (Cb2000VerifyReadyMatrixDecision decision)
-{
-  switch (decision)
-    {
-    case CB2000_VERIFY_READY_MATRIX_READY:
-      return "READY_FALLBACK_HOST";
-
-    case CB2000_VERIFY_READY_MATRIX_RETRY:
-      return "RETRY";
-
-    case CB2000_VERIFY_READY_MATRIX_DEVICE_NOMATCH:
-      return "DEVICE_NOMATCH";
-
-    case CB2000_VERIFY_READY_MATRIX_UNKNOWN:
-    default:
-      return "UNKNOWN_FALLBACK_HOST";
-    }
-}
 
 /*
  * V29 READY matrix decision.
@@ -1925,17 +1234,7 @@ cb2000_verify_ready_matrix_label (Cb2000VerifyReadyMatrixDecision decision)
  *   3) A=0x00 and (B missing or B=0x00) -> READY fallback to host NBIS
  *   4) otherwise -> UNKNOWN fallback to host NBIS
  */
-static Cb2000VerifyReadyMatrixDecision
-cb2000_decide_ready_query_matrix (guint8 status_a, gboolean has_b, guint8 status_b)
-{
-  if (status_a == 0x02 || (has_b && status_b == 0x02))
-    return CB2000_VERIFY_READY_MATRIX_RETRY;
-  if (status_a == 0x0b || (has_b && status_b == 0x0b))
-    return CB2000_VERIFY_READY_MATRIX_DEVICE_NOMATCH;
-  if (status_a == 0x00 && (!has_b || status_b == 0x00))
-    return CB2000_VERIFY_READY_MATRIX_READY;
-  return CB2000_VERIFY_READY_MATRIX_UNKNOWN;
-}
+
 
 /*
  * Map finalize ACKs to a verify routing decision.
@@ -1950,57 +1249,8 @@ cb2000_decide_ready_query_matrix (guint8 status_a, gboolean has_b, guint8 status
  * Hypothesis from Windows RE:
  *   ff:00:ff:0b -> explicit device no-match status
  */
-static Cb2000VerifyAckDecision
-cb2000_classify_finalize_ack (FpiDeviceCanvasbio *self,
-                              guint8             *status_hint,
-                              gboolean           *mismatch_out)
-{
-  gboolean mismatch = FALSE;
-  guint8 status = 0x00;
-  guint8 result = 0x00;
-  Cb2000VerifyResultClass klass;
 
-  if (self->finalize_ack1_len < 4 || self->finalize_ack2_len < 4)
-    return CB2000_VERIFY_ACK_UNKNOWN;
 
-  mismatch = memcmp (self->finalize_ack1, self->finalize_ack2, 4) != 0;
-  if (mismatch)
-    {
-      if (mismatch_out)
-        *mismatch_out = TRUE;
-      return CB2000_VERIFY_ACK_RETRY;
-    }
-
-  status = self->finalize_ack1[2];
-  result = self->finalize_ack1[3];
-  if (status_hint)
-    *status_hint = status;
-  if (mismatch_out)
-    *mismatch_out = FALSE;
-
-  if (self->finalize_ack1[0] != 0xff || self->finalize_ack1[1] != 0x00)
-    return CB2000_VERIFY_ACK_UNKNOWN;
-
-  klass = cb2000_classify_verify_result_codes (status, result);
-  switch (klass)
-    {
-    case CB2000_VERIFY_RESULT_CLASS_READY:
-      return CB2000_VERIFY_ACK_READY;
-
-    case CB2000_VERIFY_RESULT_CLASS_RETRY:
-      return CB2000_VERIFY_ACK_RETRY;
-
-    case CB2000_VERIFY_RESULT_CLASS_DEVICE_NOMATCH:
-      return CB2000_VERIFY_ACK_DEVICE_NOMATCH;
-
-    case CB2000_VERIFY_RESULT_CLASS_COUNT:
-    case CB2000_VERIFY_RESULT_CLASS_UNKNOWN:
-    default:
-      break;
-    }
-
-  return CB2000_VERIFY_ACK_UNKNOWN;
-}
 
 /*
  * Gate verify/identify routing using capture_finalize ACK bytes.
@@ -2008,85 +1258,8 @@ cb2000_classify_finalize_ack (FpiDeviceCanvasbio *self,
  * experimental device-assisted flow are handled later by
  * cb2000_try_device_assisted_verify().
  */
-static gboolean
-cb2000_verify_finalize_ack_gate (FpDevice           *dev,
-                                 FpiDeviceCanvasbio *self)
-{
-  Cb2000VerifyAckDecision decision;
-  Cb2000VerifyResultClass result_class = CB2000_VERIFY_RESULT_CLASS_UNKNOWN;
-  guint8 status_hint = 0x00;
-  gboolean ack_mismatch = FALSE;
 
-  if (self->finalize_ack1_len < 4 || self->finalize_ack2_len < 4)
-    {
-      fp_info ("[ VERIFY_GATE ] ack incomplete (ack1_len=%zu ack2_len=%zu) -> allow matcher",
-               self->finalize_ack1_len, self->finalize_ack2_len);
-      self->verify_ack_decision_last = CB2000_VERIFY_ACK_UNKNOWN;
-      self->verify_ack_status_last = 0x00;
-      self->verify_status_code_last = 0x00;
-      self->verify_result_code_last = 0x00;
-      self->verify_route_last = CB2000_VERIFY_ROUTE_UNKNOWN;
-      self->verify_result_class_last = CB2000_VERIFY_RESULT_CLASS_UNKNOWN;
-      self->verify_result_class_count[CB2000_VERIFY_RESULT_CLASS_UNKNOWN]++;
-      self->verify_ack_unknown_total++;
-      return FALSE;
-    }
 
-  self->verify_status_code_last = self->finalize_ack1[2];
-  self->verify_result_code_last = self->finalize_ack1[3];
-  result_class = cb2000_classify_verify_result_codes (self->verify_status_code_last,
-                                                      self->verify_result_code_last);
-  self->verify_result_class_last = result_class;
-  self->verify_result_class_count[result_class]++;
-
-  decision = cb2000_classify_finalize_ack (self, &status_hint, &ack_mismatch);
-  self->verify_ack_decision_last = decision;
-  self->verify_ack_status_last = status_hint;
-
-  switch (decision)
-    {
-    case CB2000_VERIFY_ACK_READY:
-      self->verify_ack_ready_total++;
-      break;
-
-    case CB2000_VERIFY_ACK_RETRY:
-      self->verify_ack_retry_total++;
-      break;
-
-    case CB2000_VERIFY_ACK_DEVICE_NOMATCH:
-      self->verify_ack_nomatch_total++;
-      break;
-
-    case CB2000_VERIFY_ACK_UNKNOWN:
-    default:
-      self->verify_ack_unknown_total++;
-      break;
-    }
-
-  if (ack_mismatch)
-    self->verify_ack_mismatch_total++;
-
-  fp_info ("[ VERIFY_GATE ] ack1=%02x:%02x:%02x:%02x ack2=%02x:%02x:%02x:%02x decision=%s result_class=%s status=0x%02x result=0x%02x mismatch=%d",
-           self->finalize_ack1[0], self->finalize_ack1[1],
-           self->finalize_ack1[2], self->finalize_ack1[3],
-           self->finalize_ack2[0], self->finalize_ack2[1],
-           self->finalize_ack2[2], self->finalize_ack2[3],
-           cb2000_verify_ack_decision_label (decision),
-           cb2000_verify_result_class_label (self->verify_result_class_last),
-           status_hint,
-           self->verify_result_code_last,
-           ack_mismatch);
-
-  if (decision == CB2000_VERIFY_ACK_RETRY)
-    {
-      cb2000_retry_scan_with_cause (dev, CB2000_RETRY_DEVICE_STATUS,
-                                    "(verify finalize ack gate)");
-      return TRUE;
-    }
-
-  fp_info ("[ VERIFY_GATE ] non-retry decision -> allow matcher/device-assisted flow");
-  return FALSE;
-}
 
 /*
  * Execute the next command in the sequence by mapping each entry to a
@@ -3623,25 +2796,6 @@ cycle_run_state (FpiSsm *ssm, FpDevice *dev)
                                  "verify_like" :
                                  "capture_enroll";
 
-        self->finalize_ack1_len = 0;
-        self->finalize_ack2_len = 0;
-        memset (self->finalize_ack1, 0, sizeof (self->finalize_ack1));
-        memset (self->finalize_ack2, 0, sizeof (self->finalize_ack2));
-        self->verify_ack_status_last = 0x00;
-        self->verify_ack_decision_last = CB2000_VERIFY_ACK_UNKNOWN;
-        self->verify_status_code_last = 0x00;
-        self->verify_result_code_last = 0x00;
-        self->verify_route_last = CB2000_VERIFY_ROUTE_UNKNOWN;
-        self->verify_result_class_last = CB2000_VERIFY_RESULT_CLASS_UNKNOWN;
-        self->verify_ready_query_len = 0;
-        memset (self->verify_ready_query_data, 0, sizeof (self->verify_ready_query_data));
-        self->verify_ready_query_status_last = 0x00;
-        self->verify_ready_query_b_len = 0;
-        memset (self->verify_ready_query_b_data, 0, sizeof (self->verify_ready_query_b_data));
-        self->verify_ready_query_b_status_last = 0x00;
-        self->verify_ready_matrix_last = CB2000_VERIFY_READY_MATRIX_UNKNOWN;
-        self->verify_pre_capture_status_len = 0;
-        memset (self->verify_pre_capture_status, 0, sizeof (self->verify_pre_capture_status));
 
         fp_info ("[ SSM_ROUTE ] action=%s phase=%s state=CAPTURE_START seq=%s",
                  cb2000_action_label (action), phase_name, seq_name);
@@ -3673,241 +2827,6 @@ cycle_run_state (FpiSsm *ssm, FpDevice *dev)
         fp_info ("[ SSM_ROUTE ] action=%s phase=%s state=FINALIZE seq=%s",
                  cb2000_action_label (action), phase_name, seq_name);
         run_command_sequence (ssm, dev, seq_name, seq_cmds);
-        break;
-      }
-
-    case CYCLE_VERIFY_RESULT_STATUS:
-      {
-        FpiDeviceAction action = fpi_device_get_current_action (dev);
-        guint attempt = self->submit_verify_total + 1;
-        gboolean gate_retry = FALSE;
-
-        if (!cb2000_is_verify_phase_action (action))
-          {
-            fpi_ssm_jump_to_state (ssm, CYCLE_SUBMIT_IMAGE);
-            break;
-          }
-
-        gate_retry = cb2000_verify_finalize_ack_gate (dev, self);
-
-        if (gate_retry)
-          {
-            self->verify_route_last = CB2000_VERIFY_ROUTE_RETRY_GATE;
-            fp_info ("[ VERIFY_RESULT ] attempt=%u decision=%s result_class=%s status=0x%02x result=0x%02x route=%s experimental=%d status_short=%d",
-                     attempt,
-                     cb2000_verify_ack_decision_label (self->verify_ack_decision_last),
-                     cb2000_verify_result_class_label (self->verify_result_class_last),
-                     self->verify_status_code_last,
-                     self->verify_result_code_last,
-                     cb2000_verify_route_label (self->verify_route_last),
-                     self->experimental_device_assisted_verify,
-                     self->verify_device_status_short_circuit);
-            fpi_ssm_jump_to_state (ssm, CYCLE_WAIT_REMOVAL);
-            break;
-          }
-
-        switch (self->verify_ack_decision_last)
-          {
-          case CB2000_VERIFY_ACK_RETRY:
-          /* Retry already handled by finalize_ack_gate; fall through to NBIS. */
-
-          case CB2000_VERIFY_ACK_DEVICE_NOMATCH:
-            if (self->verify_device_status_short_circuit ||
-                self->experimental_device_assisted_verify)
-              {
-                self->verify_route_last = CB2000_VERIFY_ROUTE_DEVICE_NOMATCH;
-                fp_info ("[ VERIFY_RESULT ] attempt=%u decision=%s result_class=%s status=0x%02x result=0x%02x route=%s experimental=%d status_short=%d",
-                         attempt,
-                         cb2000_verify_ack_decision_label (self->verify_ack_decision_last),
-                         cb2000_verify_result_class_label (self->verify_result_class_last),
-                         self->verify_status_code_last,
-                         self->verify_result_code_last,
-                         cb2000_verify_route_label (self->verify_route_last),
-                         self->experimental_device_assisted_verify,
-                         self->verify_device_status_short_circuit);
-                self->verify_result = FPI_MATCH_FAIL;
-                fpi_ssm_jump_to_state (ssm, CYCLE_WAIT_REMOVAL);
-                break;
-              }
-            self->verify_route_last = CB2000_VERIFY_ROUTE_HOST_NBIS;
-            fp_info ("[ VERIFY_RESULT ] attempt=%u decision=%s result_class=%s status=0x%02x result=0x%02x route=%s experimental=%d status_short=%d",
-                     attempt,
-                     cb2000_verify_ack_decision_label (self->verify_ack_decision_last),
-                     cb2000_verify_result_class_label (self->verify_result_class_last),
-                     self->verify_status_code_last,
-                     self->verify_result_code_last,
-                     cb2000_verify_route_label (self->verify_route_last),
-                     self->experimental_device_assisted_verify,
-                     self->verify_device_status_short_circuit);
-            fpi_ssm_next_state (ssm);
-            break;
-
-          case CB2000_VERIFY_ACK_READY:
-            if (self->experimental_device_assisted_verify)
-              self->verify_route_last = CB2000_VERIFY_ROUTE_DEVICE_STATUS;
-            else
-              self->verify_route_last = CB2000_VERIFY_ROUTE_HOST_NBIS;
-            fp_info ("[ VERIFY_RESULT ] attempt=%u decision=%s result_class=%s status=0x%02x result=0x%02x route=%s experimental=%d status_short=%d",
-                     attempt,
-                     cb2000_verify_ack_decision_label (self->verify_ack_decision_last),
-                     cb2000_verify_result_class_label (self->verify_result_class_last),
-                     self->verify_status_code_last,
-                     self->verify_result_code_last,
-                     cb2000_verify_route_label (self->verify_route_last),
-                     self->experimental_device_assisted_verify,
-                     self->verify_device_status_short_circuit);
-            if (self->verify_ready_query_enabled)
-              {
-                fp_info ("[ VERIFY_RESULT ] READY -> entering complementary status query");
-                fpi_ssm_jump_to_state (ssm, CYCLE_VERIFY_READY_QUERY_A);
-              }
-            else
-              {
-                fpi_ssm_jump_to_state (ssm, CYCLE_SUBMIT_IMAGE);
-              }
-            break;
-
-          case CB2000_VERIFY_ACK_UNKNOWN:
-          default:
-            self->verify_route_last = CB2000_VERIFY_ROUTE_UNKNOWN;
-            fp_info ("[ VERIFY_RESULT ] attempt=%u decision=%s result_class=%s status=0x%02x result=0x%02x route=%s experimental=%d status_short=%d",
-                     attempt,
-                     cb2000_verify_ack_decision_label (self->verify_ack_decision_last),
-                     cb2000_verify_result_class_label (self->verify_result_class_last),
-                     self->verify_status_code_last,
-                     self->verify_result_code_last,
-                     cb2000_verify_route_label (self->verify_route_last),
-                     self->experimental_device_assisted_verify,
-                     self->verify_device_status_short_circuit);
-            fpi_ssm_next_state (ssm);
-            break;
-          }
-        break;
-      }
-
-    case CYCLE_VERIFY_READY_QUERY_A:
-      {
-        FpiDeviceAction action = fpi_device_get_current_action (dev);
-
-        if (!cb2000_is_verify_phase_action (action) || !self->verify_ready_query_enabled)
-          {
-            fpi_ssm_jump_to_state (ssm, CYCLE_SUBMIT_IMAGE);
-            break;
-          }
-
-        self->verify_ready_query_len = 0;
-        memset (self->verify_ready_query_data, 0, sizeof (self->verify_ready_query_data));
-        self->verify_ready_query_status_last = 0x00;
-
-        fp_info ("[ SSM_ROUTE ] action=%s phase=verify_like state=VERIFY_READY_QUERY_A",
-                 cb2000_action_label (action));
-        run_command_sequence (ssm, dev, "verify_ready_query_a", verify_ready_query_a_cmds);
-        break;
-      }
-
-    case CYCLE_VERIFY_READY_QUERY_B:
-      {
-        FpiDeviceAction action = fpi_device_get_current_action (dev);
-
-        if (!cb2000_is_verify_phase_action (action) || !self->verify_ready_query_enabled)
-          {
-            fpi_ssm_jump_to_state (ssm, CYCLE_SUBMIT_IMAGE);
-            break;
-          }
-
-        if (!self->verify_ready_query_b_enabled)
-          {
-            fp_dbg ("[ VERIFY_READY_QUERY_B ] disabled -> skipping");
-            fpi_ssm_next_state (ssm);
-            break;
-          }
-
-        self->verify_ready_query_b_len = 0;
-        memset (self->verify_ready_query_b_data, 0, sizeof (self->verify_ready_query_b_data));
-        self->verify_ready_query_b_status_last = 0x00;
-
-        fp_info ("[ SSM_ROUTE ] action=%s phase=verify_like state=VERIFY_READY_QUERY_B",
-                 cb2000_action_label (action));
-        run_command_sequence (ssm, dev, "verify_ready_query_b", verify_ready_query_b_cmds);
-        break;
-      }
-
-    case CYCLE_VERIFY_READY_DECIDE:
-      {
-        FpiDeviceAction action = fpi_device_get_current_action (dev);
-        guint8 status_a = self->verify_ready_query_status_last;
-        guint8 status_b = self->verify_ready_query_b_status_last;
-        gboolean has_b = self->verify_ready_query_b_enabled &&
-                         (self->verify_ready_query_b_len > 0);
-        Cb2000VerifyReadyMatrixDecision matrix;
-
-        if (!cb2000_is_verify_phase_action (action) || !self->verify_ready_query_enabled)
-          {
-            fpi_ssm_jump_to_state (ssm, CYCLE_SUBMIT_IMAGE);
-            break;
-          }
-
-        matrix = cb2000_decide_ready_query_matrix (status_a, has_b, status_b);
-        self->verify_ready_matrix_last = matrix;
-
-        if (has_b)
-          {
-            fp_info ("[ VERIFY_READY_MATRIX ] A=0x%02x(%s) B=0x%02x(%s) => %s",
-                     status_a,
-                     cb2000_verify_ready_query_class_label (status_a),
-                     status_b,
-                     cb2000_verify_ready_query_class_label (status_b),
-                     cb2000_verify_ready_matrix_label (matrix));
-          }
-        else
-          {
-            fp_info ("[ VERIFY_READY_MATRIX ] A=0x%02x(%s) B=N/A => %s",
-                     status_a,
-                     cb2000_verify_ready_query_class_label (status_a),
-                     cb2000_verify_ready_matrix_label (matrix));
-          }
-
-        switch (matrix)
-          {
-          case CB2000_VERIFY_READY_MATRIX_READY:
-            self->verify_ready_query_ready_total++;
-            self->verify_ready_matrix_ready_total++;
-            /* Keep conservative fallback to NBIS until MoC decision table is closed. */
-            if (self->verify_route_last == CB2000_VERIFY_ROUTE_DEVICE_STATUS)
-              self->verify_route_last = CB2000_VERIFY_ROUTE_HOST_NBIS;
-            fpi_ssm_next_state (ssm);
-            break;
-
-          case CB2000_VERIFY_READY_MATRIX_RETRY:
-            self->verify_ready_query_retry_total++;
-            self->verify_ready_matrix_retry_total++;
-            cb2000_retry_scan_with_cause (dev, CB2000_RETRY_DEVICE_STATUS,
-                                          "(verify ready matrix retry)");
-            fpi_ssm_jump_to_state (ssm, CYCLE_WAIT_REMOVAL);
-            break;
-
-          case CB2000_VERIFY_READY_MATRIX_DEVICE_NOMATCH:
-            self->verify_ready_query_nomatch_total++;
-            self->verify_ready_matrix_nomatch_total++;
-            if (self->verify_device_status_short_circuit)
-              {
-                self->verify_route_last = CB2000_VERIFY_ROUTE_DEVICE_NOMATCH;
-                self->verify_result = FPI_MATCH_FAIL;
-                fpi_ssm_jump_to_state (ssm, CYCLE_WAIT_REMOVAL);
-              }
-            else
-              {
-                fpi_ssm_next_state (ssm);
-              }
-            break;
-
-          case CB2000_VERIFY_READY_MATRIX_UNKNOWN:
-          default:
-            self->verify_ready_query_unknown_total++;
-            self->verify_ready_matrix_unknown_total++;
-            fpi_ssm_next_state (ssm);
-            break;
-          }
         break;
       }
 
@@ -3947,9 +2866,7 @@ cycle_run_state (FpiSsm *ssm, FpDevice *dev)
 
         if (cb2000_is_verify_phase_action (action))
           {
-            fp_info ("[ SSM_ROUTE ] action=%s phase=verify_like state=SUBMIT_IMAGE route=%s",
-                     cb2000_action_label (action),
-                     cb2000_verify_route_label (self->verify_route_last));
+            /* stripped log */
           }
         else
           {
@@ -4102,8 +3019,6 @@ cycle_run_state (FpiSsm *ssm, FpDevice *dev)
           }
 
         cb2000_update_submit_telemetry (self, dev, action);
-        self->accepted_total++;
-
         /* Action-specific handling (V33 FpDevice + NCC) */
         {
           if (action == FPI_DEVICE_ACTION_CAPTURE)
@@ -4321,73 +3236,7 @@ cycle_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
       return;
     }
 
-  fp_dbg ("[ STATS ] accepted=%u retry_total=%u bg=%u area=%u quality=%u precheck=%u dev_status=%u "
-          "submit_cap=%u submit_enroll=%u submit_verify=%u submit_identify=%u "
-          "verify_subprints_last=%u min=%u max=%u verify_rx=%u rx_nonzero=%u "
-          "ack1=%02x:%02x:%02x:%02x ack2=%02x:%02x:%02x:%02x "
-          "ack_ready=%u ack_retry=%u ack_nomatch=%u ack_unknown=%u ack_mismatch=%u "
-          "verify_status=0x%02x verify_result=0x%02x verify_route=%s "
-          "result_class=%s rc_ready=%u rc_retry=%u rc_nomatch=%u rc_unknown=%u status_short=%d "
-          "ready_query_en=%d ready_query_total=%u ready_query_status=0x%02x "
-          "ready_query_b_en=%d ready_query_b_total=%u ready_query_b_status=0x%02x "
-          "rq_ready=%u rq_retry=%u rq_nomatch=%u rq_unknown=%u "
-          "rq_matrix=%s m_ready=%u m_retry=%u m_nomatch=%u m_unknown=%u "
-          "pre_cap_total=%u pre_cap_len=%zu pre_cap=%02x:%02x:%02x:%02x",
-          self->accepted_total,
-          self->retry_total,
-          self->retry_cause_count[CB2000_RETRY_BACKGROUND_CAPTURE],
-          self->retry_cause_count[CB2000_RETRY_AREA_GATE],
-          self->retry_cause_count[CB2000_RETRY_QUALITY_GATE],
-          self->retry_cause_count[CB2000_RETRY_MINUTIAE_PRECHECK],
-          self->retry_cause_count[CB2000_RETRY_DEVICE_STATUS],
-          self->submit_capture_total,
-          self->submit_enroll_total,
-          self->submit_verify_total,
-          self->submit_identify_total,
-          self->verify_template_subprints_last,
-          self->verify_template_subprints_min,
-          self->verify_template_subprints_max,
-          self->verify_cmd_rx_total,
-          self->verify_cmd_rx_with_data,
-          self->finalize_ack1[0], self->finalize_ack1[1],
-          self->finalize_ack1[2], self->finalize_ack1[3],
-          self->finalize_ack2[0], self->finalize_ack2[1],
-          self->finalize_ack2[2], self->finalize_ack2[3],
-          self->verify_ack_ready_total,
-          self->verify_ack_retry_total,
-          self->verify_ack_nomatch_total,
-          self->verify_ack_unknown_total,
-          self->verify_ack_mismatch_total,
-          self->verify_status_code_last,
-          self->verify_result_code_last,
-          cb2000_verify_route_label (self->verify_route_last),
-          cb2000_verify_result_class_label (self->verify_result_class_last),
-          self->verify_result_class_count[CB2000_VERIFY_RESULT_CLASS_READY],
-          self->verify_result_class_count[CB2000_VERIFY_RESULT_CLASS_RETRY],
-          self->verify_result_class_count[CB2000_VERIFY_RESULT_CLASS_DEVICE_NOMATCH],
-          self->verify_result_class_count[CB2000_VERIFY_RESULT_CLASS_UNKNOWN],
-          self->verify_device_status_short_circuit,
-          self->verify_ready_query_enabled,
-          self->verify_ready_query_total,
-          self->verify_ready_query_status_last,
-          self->verify_ready_query_b_enabled,
-          self->verify_ready_query_b_total,
-          self->verify_ready_query_b_status_last,
-          self->verify_ready_query_ready_total,
-          self->verify_ready_query_retry_total,
-          self->verify_ready_query_nomatch_total,
-          self->verify_ready_query_unknown_total,
-          cb2000_verify_ready_matrix_label (self->verify_ready_matrix_last),
-          self->verify_ready_matrix_ready_total,
-          self->verify_ready_matrix_retry_total,
-          self->verify_ready_matrix_nomatch_total,
-          self->verify_ready_matrix_unknown_total,
-          self->verify_pre_capture_status_total,
-          self->verify_pre_capture_status_len,
-          self->verify_pre_capture_status[0],
-          self->verify_pre_capture_status[1],
-          self->verify_pre_capture_status[2],
-          self->verify_pre_capture_status[3]);
+  /* stripped log */
   fp_dbg ("Cycle complete, checking action-specific completion");
 
   {
@@ -4409,25 +3258,7 @@ cycle_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
     else if (action == FPI_DEVICE_ACTION_VERIFY ||
              action == FPI_DEVICE_ACTION_IDENTIFY)
       {
-        if (self->verify_retry_pending)
-          {
-            GError *err = NULL;
-            if (self->verify_retry_message[0] != '\0')
-              {
-                err = fpi_device_retry_new_msg (self->verify_retry_error,
-                                                "%s",
-                                                self->verify_retry_message);
-              }
-            else
-              {
-                err = fpi_device_retry_new (self->verify_retry_error);
-              }
-            fpi_device_verify_report (dev, FPI_MATCH_ERROR, NULL, err);
-            self->verify_retry_pending = FALSE;
-            self->verify_retry_message[0] = '\0';
-            fpi_device_verify_complete (dev, NULL);
-            return;
-          }
+        
 
         if (self->verify_result == FPI_MATCH_ERROR)
           {
@@ -4443,24 +3274,7 @@ cycle_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
       }
     else if (action == FPI_DEVICE_ACTION_CAPTURE)
       {
-        if (self->capture_retry_pending)
-          {
-            GError *err = NULL;
-            if (self->capture_retry_message[0] != '\0')
-              {
-                err = fpi_device_retry_new_msg (self->capture_retry_error,
-                                                "%s",
-                                                self->capture_retry_message);
-              }
-            else
-              {
-                err = fpi_device_retry_new (self->capture_retry_error);
-              }
-            fpi_device_capture_complete (dev, NULL, err);
-            self->capture_retry_pending = FALSE;
-            self->capture_retry_message[0] = '\0';
-            return;
-          }
+        
         /* capture_complete already called in SUBMIT_IMAGE success path. */
         return;
       }
@@ -4557,70 +3371,6 @@ dev_open (FpDevice *device)
 
 
   self->force_recovery = FALSE;
-  self->retry_total = 0;
-  self->accepted_total = 0;
-  memset (self->retry_cause_count, 0, sizeof (self->retry_cause_count));
-  self->submit_capture_total = 0;
-  self->submit_enroll_total = 0;
-  self->submit_verify_total = 0;
-  self->submit_identify_total = 0;
-  self->verify_template_samples = 0;
-  self->verify_template_subprints_last = 0;
-  self->verify_template_subprints_min = 0;
-  self->verify_template_subprints_max = 0;
-  self->experimental_device_assisted_verify = FALSE;
-  self->verify_cmd_rx_total = 0;
-  self->verify_cmd_rx_with_data = 0;
-  self->verify_cmd_rx_last_len = 0;
-  memset (self->verify_cmd_rx_last, 0, sizeof (self->verify_cmd_rx_last));
-  self->finalize_ack1_len = 0;
-  self->finalize_ack2_len = 0;
-  memset (self->finalize_ack1, 0, sizeof (self->finalize_ack1));
-  memset (self->finalize_ack2, 0, sizeof (self->finalize_ack2));
-  self->verify_ack_status_last = 0x00;
-  self->verify_ack_decision_last = CB2000_VERIFY_ACK_UNKNOWN;
-  self->verify_ack_ready_total = 0;
-  self->verify_ack_retry_total = 0;
-  self->verify_ack_nomatch_total = 0;
-  self->verify_ack_unknown_total = 0;
-  self->verify_ack_mismatch_total = 0;
-  self->verify_status_code_last = 0x00;
-  self->verify_result_code_last = 0x00;
-  self->verify_route_last = CB2000_VERIFY_ROUTE_UNKNOWN;
-  self->verify_result_class_last = CB2000_VERIFY_RESULT_CLASS_UNKNOWN;
-  memset (self->verify_result_class_count, 0, sizeof (self->verify_result_class_count));
-  self->verify_device_status_short_circuit = TRUE;
-  self->verify_ready_query_enabled = TRUE;
-  self->verify_ready_query_b_enabled = TRUE;
-  self->verify_ready_query_total = 0;
-  self->verify_ready_query_status_last = 0x00;
-  self->verify_ready_query_len = 0;
-  memset (self->verify_ready_query_data, 0, sizeof (self->verify_ready_query_data));
-  self->verify_ready_query_b_total = 0;
-  self->verify_ready_query_b_status_last = 0x00;
-  self->verify_ready_query_b_len = 0;
-  memset (self->verify_ready_query_b_data, 0, sizeof (self->verify_ready_query_b_data));
-  self->verify_ready_query_ready_total = 0;
-  self->verify_ready_query_retry_total = 0;
-  self->verify_ready_query_nomatch_total = 0;
-  self->verify_ready_query_unknown_total = 0;
-  self->verify_ready_matrix_last = CB2000_VERIFY_READY_MATRIX_UNKNOWN;
-  self->verify_ready_matrix_ready_total = 0;
-  self->verify_ready_matrix_retry_total = 0;
-  self->verify_ready_matrix_nomatch_total = 0;
-  self->verify_ready_matrix_unknown_total = 0;
-  self->verify_pre_capture_status_total = 0;
-  self->verify_pre_capture_status_len = 0;
-  memset (self->verify_pre_capture_status, 0, sizeof (self->verify_pre_capture_status));
-  self->verify_retry_pending = FALSE;
-  self->verify_retry_error = FP_DEVICE_RETRY_GENERAL;
-  self->verify_retry_status_code = 0x00;
-  self->verify_retry_result_code = 0x00;
-  self->verify_retry_message[0] = '\0';
-  self->capture_retry_pending = FALSE;
-  self->capture_retry_error = FP_DEVICE_RETRY_GENERAL;
-  self->capture_retry_message[0] = '\0';
-
   fp_dbg ("Device opened successfully");
   fpi_device_open_complete (device, NULL);
 }
@@ -4685,76 +3435,7 @@ dev_action_common_init (FpiDeviceCanvasbio *self)
   self->deactivation_in_progress = FALSE;
   self->initial_activation_done = FALSE;
   self->force_recovery = FALSE;
-  self->previous_norm_valid = FALSE;
-  self->retry_total = 0;
-  self->accepted_total = 0;
-  memset (self->retry_cause_count, 0, sizeof (self->retry_cause_count));
-  self->submit_capture_total = 0;
-  self->submit_enroll_total = 0;
-  self->submit_verify_total = 0;
-  self->submit_identify_total = 0;
-  self->verify_template_samples = 0;
-  self->verify_template_subprints_last = 0;
-  self->verify_template_subprints_min = 0;
-  self->verify_template_subprints_max = 0;
-  self->verify_cmd_rx_total = 0;
-  self->verify_cmd_rx_with_data = 0;
-  self->verify_cmd_rx_last_len = 0;
-  memset (self->verify_cmd_rx_last, 0, sizeof (self->verify_cmd_rx_last));
-  self->finalize_ack1_len = 0;
-  self->finalize_ack2_len = 0;
-  memset (self->finalize_ack1, 0, sizeof (self->finalize_ack1));
-  memset (self->finalize_ack2, 0, sizeof (self->finalize_ack2));
-  self->verify_ack_status_last = 0x00;
-  self->verify_ack_decision_last = CB2000_VERIFY_ACK_UNKNOWN;
-  self->verify_ack_ready_total = 0;
-  self->verify_ack_retry_total = 0;
-  self->verify_ack_nomatch_total = 0;
-  self->verify_ack_unknown_total = 0;
-  self->verify_ack_mismatch_total = 0;
-  self->verify_status_code_last = 0x00;
-  self->verify_result_code_last = 0x00;
-  self->verify_route_last = CB2000_VERIFY_ROUTE_UNKNOWN;
-  self->verify_result_class_last = CB2000_VERIFY_RESULT_CLASS_UNKNOWN;
-  memset (self->verify_result_class_count, 0, sizeof (self->verify_result_class_count));
-  self->verify_device_status_short_circuit = TRUE;
-  self->experimental_device_assisted_verify =
-    cb2000_get_env_bool ("CB2000_EXPERIMENTAL_DEVICE_ASSISTED_VERIFY", FALSE);
-  self->verify_device_status_short_circuit =
-    cb2000_get_env_bool ("CB2000_VERIFY_DEVICE_STATUS_SHORT_CIRCUIT", TRUE);
-  self->verify_ready_query_enabled =
-    cb2000_get_env_bool ("CB2000_VERIFY_READY_QUERY", TRUE);
-  self->verify_ready_query_b_enabled =
-    cb2000_get_env_bool ("CB2000_VERIFY_READY_QUERY_B", TRUE);
-  self->verify_ready_query_total = 0;
-  self->verify_ready_query_status_last = 0x00;
-  self->verify_ready_query_len = 0;
-  memset (self->verify_ready_query_data, 0, sizeof (self->verify_ready_query_data));
-  self->verify_ready_query_b_total = 0;
-  self->verify_ready_query_b_status_last = 0x00;
-  self->verify_ready_query_b_len = 0;
-  memset (self->verify_ready_query_b_data, 0, sizeof (self->verify_ready_query_b_data));
-  self->verify_ready_query_ready_total = 0;
-  self->verify_ready_query_retry_total = 0;
-  self->verify_ready_query_nomatch_total = 0;
-  self->verify_ready_query_unknown_total = 0;
-  self->verify_ready_matrix_last = CB2000_VERIFY_READY_MATRIX_UNKNOWN;
-  self->verify_ready_matrix_ready_total = 0;
-  self->verify_ready_matrix_retry_total = 0;
-  self->verify_ready_matrix_nomatch_total = 0;
-  self->verify_ready_matrix_unknown_total = 0;
-  self->verify_pre_capture_status_total = 0;
-  self->verify_pre_capture_status_len = 0;
-  memset (self->verify_pre_capture_status, 0, sizeof (self->verify_pre_capture_status));
-  self->verify_retry_pending = FALSE;
-  self->verify_retry_error = FP_DEVICE_RETRY_GENERAL;
-  self->verify_retry_status_code = 0x00;
-  self->verify_retry_result_code = 0x00;
-  self->verify_retry_message[0] = '\0';
-  self->capture_retry_pending = FALSE;
-  self->capture_retry_error = FP_DEVICE_RETRY_GENERAL;
-  self->capture_retry_message[0] = '\0';
-}
+  self->previous_norm_valid = FALSE;}
 
 static void
 dev_enroll (FpDevice *device)
