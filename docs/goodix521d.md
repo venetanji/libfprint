@@ -60,10 +60,10 @@ a newly installed build after a failed open in an older process, restart fprintd
 through the normal local administrator workflow before this test.
 
 Use two ordinary user terminals after that separate administrator step.
-Run exactly one enrollment client, without `sudo`; do not start another sudo
+Run exactly one verification client, without `sudo`; do not start another sudo
 or authentication operation during the test. The monitor observes this device's
-properties for **all clients**, not just your enrollment process. If guidance
-appears before your intended enrollment starts, or the CLI reports AlreadyInUse,
+properties for **all clients**, not just your verification process. If guidance
+appears before your intended verification starts, or the CLI reports AlreadyInUse,
 stop and identify the other client before attributing a timeout to this test.
 Record the intended CLI's start time and keep its output with the corresponding
 journal interval; monitor guidance alone does not establish who owns capture.
@@ -73,23 +73,25 @@ Terminal 1, from this checkout:
 python3 examples/goodix521d-finger-monitor.py --device /net/reactivated/Fprint/Device/0
 ```
 
-Wait for the monitor's ready message, then in terminal 2:
+Wait for `Monitor connected. KEEP READER EMPTY.` Keep your finger completely off the reader before starting terminal 2 and until the monitor says PLACE. Connection does not mean hardware initialization has finished: background initialization happens when the client claims/opens the device, which can be later than the service restart. With an existing enrollment, run:
 
 ```sh
-fprintd-enroll "$USER"
+fprintd-verify "$USER"
 ```
+
+Use `fprintd-enroll "$USER"` only when a new enrollment is actually needed; do not overwrite a working enrollment to test this change.
 
 Follow PLACE, HOLD and REMOVE in terminal 1. HOLD lasts through the ten-frame
 capture; REMOVE is published only after the reader acknowledges its removal
 arm. A stage is not accepted until the separate removal event is validated.
-The initial contact is fprintd's duplicate check, before counted enrollment.
+For enrollment, the initial contact is fprintd's duplicate check, before counted stages.
 The monitor exits after its bounded observation window or Ctrl+C; stopping it
-does not cancel the separate enrollment command.
+does not cancel the separate client command.
 Prompts are best-effort: very brief property transitions can be missed. The
 monitor never determines acceptance or changes capture state.
 
 If REMOVE is displayed, fully lift the finger. If removal still times out,
-stop rather than repeating enrollment and preserve the precise error plus the
+stop rather than repeating the test and preserve the precise error plus the
 last displayed guidance. This distinguishes a missing prompt from an unproven
 hardware removal path. A paired-reference stability failure now includes the
 failing snapshot pair, maximum shifted-word difference and factory threshold;

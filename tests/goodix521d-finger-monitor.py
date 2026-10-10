@@ -12,11 +12,11 @@ class MonitorTests(unittest.TestCase):
  def test_implementation(self): self.assertTrue(hasattr(m,'PromptState'))
  def state(self): self.assertTrue(hasattr(m,'PromptState')); return m.PromptState()
  def test_complete_contact(self):
-  s=self.state();self.assertEqual(s.update(False,False),None)
+  s=self.state();self.assertEqual(s.update(False,False),'KEEP READER EMPTY until PLACE appears.')
   self.assertEqual(s.update(True,False),'PLACE your finger on the reader.')
   self.assertEqual(s.update(True,True),'HOLD your finger still.')
   self.assertEqual(s.update(False,True),'REMOVE your finger from the reader.')
-  self.assertIsNone(s.update(False,True));self.assertIsNone(s.update(False,False))
+  self.assertIsNone(s.update(False,True));self.assertEqual(s.update(False,False),'KEEP READER EMPTY until PLACE appears.')
  def test_initial_present_does_not_prompt_removal(self):
   s=self.state();self.assertIsNone(s.update(False,True));self.assertIsNone(s.update(False,True))
  def test_initial_hold_cannot_authorize_removal(self):
@@ -77,7 +77,9 @@ class MonitorTests(unittest.TestCase):
   output=io.StringIO()
   with patch.dict(sys.modules,{'gi':gi,'gi.repository':repo}),contextlib.redirect_stdout(output):
    result=m.main(['--timeout','1'])
-  self.assertIn('READY',output.getvalue());self.assertNotIn('REMOVE your',output.getvalue())
+  self.assertIn('Monitor connected. KEEP READER EMPTY.',output.getvalue())
+  self.assertIn('fprintd-verify',output.getvalue());self.assertIn('wait for PLACE',output.getvalue())
+  self.assertNotIn('reader verified',output.getvalue());self.assertNotIn('REMOVE your',output.getvalue())
   self.assertEqual(result,1 if owner_loss else 0)
   self.assertEqual(removed,[9] if owner_loss else [])
   self.assertEqual(len(unsub),2)

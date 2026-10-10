@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-2.1-or-later
-"""Read-only fprintd prompt monitor. Run before fprintd-enroll in another terminal.
+"""Read-only fprintd prompt monitor. Run before fprintd-verify or fprintd-enroll in another terminal.
 
 Property names follow https://fprint.freedesktop.org/fprintd-dev/Device.html .
 No Claim, capture, enrollment, authentication or service-control calls are made.
@@ -47,6 +47,8 @@ class PromptState:
             self.held = False
             return 'REMOVE your finger from the reader.'
         self.held = False
+        if not present:
+            return 'KEEP READER EMPTY until PLACE appears.'
         return None
 
 def timeout_value(text):
@@ -152,7 +154,7 @@ def main(argv=None):
         if owner != current_owner or status[0]:
             raise ValueError('fprintd changed during monitor setup')
         ready[0] = True
-        print('READY: reader verified. Run fprintd-enroll in another terminal; follow PLACE, HOLD and REMOVE here.', flush=True)
+        print('Monitor connected. KEEP READER EMPTY. Start ONE normal-user fprintd-verify (or enroll only if needed) in another terminal; wait for PLACE, then follow HOLD and REMOVE here.', flush=True)
         def timed_out():
             nonlocal timer
             timer = None
