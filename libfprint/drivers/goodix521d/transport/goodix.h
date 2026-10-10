@@ -111,6 +111,15 @@ void goodix_receive_timeout_cb(FpDevice *dev, gpointer user_data);
 void goodix_receive_data(FpDevice *dev);
 
 void goodix_start_read_loop(FpDevice* dev);
+
+/* Call after stopping/cancelling reads, before closing the USB device. Completes
+ * asynchronously on the device action's main context, retaining dev until then.
+ * Success requires every owned RX completion, including stale generations.
+ * Timeout owns no transfer cancellation: the callback owns its error and MUST
+ * NOT close USB on failure; pending reads continue retaining their device/token.
+ * A zero timeout performs one deferred check. Calls complete exactly once. */
+void goodix_wait_read_idle(FpDevice *dev, guint timeout_ms,
+                          GoodixNoneCallback callback, gpointer user_data);
 // ---- GOODIX RECEIVE SECTION END ----
 
 // -----------------------------------------------------------------------------

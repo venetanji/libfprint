@@ -15,7 +15,8 @@
 #include "test-device-fake.h"
 #include <string.h>
 static guint frames,done,up_arms;
-static gboolean event_first,fail_up,cancel_present;
+static gboolean event_first,fail_up,cancel_present,cancel_removal;
+static FpFingerStatusFlags current_status;
 static GError *result_error;
 static GoodixDefaultCallback event_callback;
 static gpointer event_data;
@@ -25,8 +26,8 @@ static GoodixAcquisition *capture;
 
 GCancellable *mock_fpi_device_get_cancellable(FpDevice *dev) {(void)dev;return NULL;}
 gboolean mock_fpi_device_report_finger_status(FpDevice *dev,FpFingerStatusFlags status) {
- (void)dev;
- if(cancel_present && status==FP_FINGER_STATUS_PRESENT) goodix_acquisition_cancel(capture);
+ (void)dev; current_status=status;
+ if((cancel_present && status==(FP_FINGER_STATUS_PRESENT|FP_FINGER_STATUS_NEEDED)) || (cancel_removal && status==FP_FINGER_STATUS_PRESENT)) goodix_acquisition_cancel(capture);
  return TRUE;
 }
 void mock_goodix_send_mcu_switch_to_fdt_down(FpDevice *dev,guint8 *data,guint16 length,gboolean reply,GDestroyNotify destroy,GoodixDefaultCallback cb,gpointer user) {
@@ -40,6 +41,7 @@ void mock_goodix_send_write_sensor_register(FpDevice *dev,guint16 address,guint1
  g_assert_cmpuint(address,==,0x022c);g_assert_cmpuint(value,==,0x030a);cb(dev,user,NULL);
 }
 void mock_goodix_tls_read_image(FpDevice *dev,guint8 *data,guint16 length,GoodixImageCallback cb,gpointer user) {
+ g_assert_cmpuint(current_status,==,FP_FINGER_STATUS_NEEDED|FP_FINGER_STATUS_PRESENT);
  guint8 *request=data;g_assert_cmpuint(length,==,10);g_assert_cmpuint(request[0],==,0x45);
  guint8 raw[7684]={0};memcpy(raw+7680,"\xb1\x49\xc0\xf0",4);frames++;cb(dev,raw,sizeof raw,user,NULL);
 }
@@ -65,7 +67,7 @@ static void acquired(FpDevice *dev,const GxImage *image,gpointer user,GError *er
  goodix_acquisition_free(capture);capture=NULL;
 }
 static void run(gboolean early,gboolean error) {
- frames=done=up_arms=0;event_first=early;fail_up=error;g_clear_error(&result_error);
+ current_status=FP_FINGER_STATUS_NONE;frames=done=up_arms=0;event_first=early;fail_up=error;g_clear_error(&result_error);
  test_device=g_object_new(FPI_TYPE_DEVICE_FAKE,NULL);
  guint8 otp[64]={0};otp[23]=0x6e;otp[26]=40;otp[33]=41;otp[40]=7;otp[41]=42;otp[42]=43;otp[43]=44;otp[44]=45;otp[45]=46;otp[46]=47;
  capture=goodix_acquisition_new(test_device,otp);goodix_acquisition_start(capture,FALSE,acquired,NULL);
@@ -74,9 +76,14 @@ static void run(gboolean early,gboolean error) {
    g_assert_error(result_error,G_IO_ERROR,G_IO_ERROR_CANCELLED);g_clear_error(&result_error);g_object_unref(test_device);return;
  }
  g_assert_cmpuint(frames,==,10);g_assert_cmpuint(up_arms,==,2);
- if(!early) {g_assert_cmpuint(done,==,0);release_event(NULL);}
+ if(cancel_removal) {
+   g_assert_cmpuint(done,==,1);g_assert_error(result_error,G_IO_ERROR,G_IO_ERROR_CANCELLED);
+   release_event(NULL);g_clear_error(&result_error);g_object_unref(test_device);return;
+ }
+ if(!early) {g_assert_cmpuint(done,==,0);g_assert_cmpuint(current_status,==,FP_FINGER_STATUS_PRESENT);release_event(NULL);}
+ if(!error)g_assert_cmpuint(current_status,==,FP_FINGER_STATUS_NONE);
  g_assert_cmpuint(done,==,1);g_assert_null(capture);g_assert_null(event_callback);
  if(error)g_assert_error(result_error,G_IO_ERROR,G_IO_ERROR_CANCELLED);else g_assert_no_error(result_error);
  g_clear_error(&result_error);g_object_unref(test_device);
 }
-int main(int argc,char **argv) {g_test_init(&argc,&argv,NULL);run(FALSE,FALSE);run(TRUE,FALSE);run(TRUE,TRUE);cancel_present=TRUE;run(FALSE,FALSE);return 0;}
+int main(int argc,char **argv) {g_test_init(&argc,&argv,NULL);run(FALSE,FALSE);run(TRUE,FALSE);run(TRUE,TRUE);cancel_present=TRUE;run(FALSE,FALSE);cancel_present=FALSE;cancel_removal=TRUE;run(FALSE,FALSE);return 0;}

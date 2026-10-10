@@ -67,7 +67,7 @@ contact_command (FpDevice *device, guint8 *data, guint16 length, gpointer user_d
       error=fpi_device_error_new_msg(FP_DEVICE_ERROR_PROTO,"Invalid current Goodix DOWN event");
     else {
       memcpy(self->last_down,data,20);
-      fpi_device_report_finger_status(device,FP_FINGER_STATUS_PRESENT);
+      fpi_device_report_finger_status(device,FP_FINGER_STATUS_NEEDED | FP_FINGER_STATUS_PRESENT);
       if (!acquisition_continue(self,ssm)) return;
     }
   }
@@ -122,8 +122,17 @@ static void contact_removed(FpDevice *device,guint8 *data,guint16 length,gpointe
 static void contact_up_ack(FpDevice *device,guint8 *data,guint16 length,gpointer user_data,GError *error) {
   UpOwner *owner=user_data;GoodixAcquisition *self=owner->self;
   (void)device;(void)data;(void)length;
-  if (self->ssm && self->generation==owner->generation && error) fpi_ssm_mark_failed(self->ssm,error);
-  else g_clear_error(&error);
+  if (self->ssm && self->generation==owner->generation) {
+    if (error) fpi_ssm_mark_failed(self->ssm,error);
+    else {
+      /* The reader has now acknowledged the armed removal detector. Keep
+       * NEEDED set throughout image acquisition so clients do not cue an early
+       * lift; PRESENT alone now means the contact can be removed. */
+      FpiSsm *ssm=self->ssm;
+      fpi_device_report_finger_status(device,FP_FINGER_STATUS_PRESENT);
+      (void)acquisition_continue(self,ssm);
+    }
+  } else g_clear_error(&error);
   up_owner_free(owner);
 }
 

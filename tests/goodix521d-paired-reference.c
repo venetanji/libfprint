@@ -177,6 +177,7 @@ static void unstable_f2_stops_before_image2(void)
     ISOLATE(); setup(); unstable_fdt=6; run();
     g_assert_cmpuint(submissions, ==, 7); g_assert_cmpuint(completed, ==, 0);
     g_assert_error(session_error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+    g_assert_nonnull(strstr(session_error->message, "pair=1/2 max-delta=15 threshold=0"));
     teardown();
 }
 static void unstable_f3_rejects_completion(void)
@@ -184,6 +185,7 @@ static void unstable_f3_rejects_completion(void)
     ISOLATE(); setup(); unstable_fdt=11; run();
     g_assert_cmpuint(submissions, ==, 12); g_assert_cmpuint(completed, ==, 0);
     g_assert_error(session_error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+    g_assert_nonnull(strstr(session_error->message, "pair=2/3 max-delta=15 threshold=0"));
     teardown();
 }
 static void all_command_errors_stop(void)

@@ -69,18 +69,10 @@ stop_transport (FpiDeviceGoodix521d *self, GError **error)
 }
 
 static void
-operation_error_now (FpDevice *device, GError *error)
+operation_error_complete (FpDevice *device, GError *error)
 {
   FpiDeviceGoodix521d *self = SELF (device);
-  g_autoptr(GError) cleanup = NULL;
   Action action = self->action;
-  if (action == ACTION_NONE) { g_clear_error (&error); return; }
-  gboolean was_cancelled=cancelled(self);
-  if (self->abort_error) { g_clear_error (&error); error = g_steal_pointer (&self->abort_error); }
-  else if (was_cancelled) { g_clear_error (&error); error = g_error_new_literal (G_IO_ERROR,G_IO_ERROR_CANCELLED,"Goodix operation cancelled"); }
-  stop_transport (self, &cleanup);
-  if (!error) error = g_steal_pointer (&cleanup);
-  if (!error) error = fpi_device_error_new (FP_DEVICE_ERROR_GENERAL);
   clear_deadline (self);
   self->action = ACTION_NONE;self->finishing=FALSE;
   g_clear_pointer (&self->session,oc_session_free);
@@ -93,6 +85,49 @@ operation_error_now (FpDevice *device, GError *error)
   case ACTION_IDENTIFY: fpi_device_identify_complete (device,error); break;
   case ACTION_NONE: g_clear_error (&error); break;
   }
+}
+
+static void
+failed_open_reads_idle (FpDevice *device, gpointer unused, GError *cleanup)
+{
+  FpiDeviceGoodix521d *self = SELF (device);
+  GError *error = g_steal_pointer (&self->deferred_error);
+  (void) unused;
+  if (!error) error = fpi_device_error_new (FP_DEVICE_ERROR_GENERAL);
+  /* fp_device_open() owns the generic GUsb open, but its error completion does
+   * not close it. The interface/TLS teardown and every owned RX completion must
+   * precede this close; cancelling a libusb transfer alone is insufficient. */
+  if (!cleanup)
+    g_usb_device_close (fpi_device_get_usb_device (device), &cleanup);
+  if (cleanup) {
+    g_prefix_error (&error, "Goodix USB cleanup incomplete (%s): ", cleanup->message);
+    g_clear_error (&cleanup);
+  }
+  operation_error_complete (device,error);
+}
+
+static void
+operation_error_now (FpDevice *device, GError *error)
+{
+  FpiDeviceGoodix521d *self = SELF (device);
+  g_autoptr(GError) cleanup = NULL;
+  Action action = self->action;
+  if (action == ACTION_NONE) { g_clear_error (&error); return; }
+  gboolean was_cancelled=cancelled(self);
+  if (self->abort_error) { g_clear_error (&error); error = g_steal_pointer (&self->abort_error); }
+  else if (was_cancelled) { g_clear_error (&error); error = g_error_new_literal (G_IO_ERROR,G_IO_ERROR_CANCELLED,"Goodix operation cancelled"); }
+  stop_transport (self, &cleanup);
+  if (!error) error = g_steal_pointer (&cleanup);
+  else if (cleanup) g_prefix_error (&error,"Goodix transport cleanup incomplete (%s): ",cleanup->message);
+  if (!error) error = fpi_device_error_new (FP_DEVICE_ERROR_GENERAL);
+  if (action == ACTION_OPEN && !self->transport_open) {
+    self->deferred_error=error;
+    /* On drain timeout retain the USB handle: an eventual stale completion
+     * still owns it, and this failed open must not permit unsafe reuse. */
+    goodix_wait_read_idle(device,2000,failed_open_reads_idle,NULL);
+    return;
+  }
+  operation_error_complete (device,error);
 }
 
 static gboolean
@@ -127,7 +162,7 @@ cancel_operation (FpDevice *device)
   self->in_cancel=TRUE;
   goodix_cancel (device);
   self->in_cancel=FALSE;
-  if (self->action != ACTION_NONE && !self->processing && !self->boot)
+  if (self->action != ACTION_NONE && !self->processing && !self->boot && !self->finishing)
     operation_error (device,g_steal_pointer(&self->deferred_error));
 }
 

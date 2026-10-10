@@ -28,15 +28,20 @@ static void paired_reference_fail(FpiSsm *ssm, GError *error, guint length)
     fpi_ssm_mark_failed(ssm, error);
 }
 
-static gboolean paired_reference_fdt_stable(const guint8 a[16], const guint8 b[16], guint threshold)
+static guint paired_reference_fdt_max_delta(const guint8 a[16], const guint8 b[16])
 {
+    guint maximum = 0;
     for (guint i = 0; i < 8; i++) {
         gint av = (a[2*i] | ((guint16)a[2*i+1] << 8)) >> 1;
         gint bv = (b[2*i] | ((guint16)b[2*i+1] << 8)) >> 1;
-        if ((guint)ABS(av - bv) > threshold)
-            return FALSE;
+        maximum = MAX(maximum, (guint)ABS(av - bv));
     }
-    return TRUE;
+    return maximum;
+}
+
+static gboolean paired_reference_fdt_stable(const guint8 a[16], const guint8 b[16], guint threshold)
+{
+    return paired_reference_fdt_max_delta(a, b) <= threshold;
 }
 
 static void paired_reference_command_done(FpDevice *dev, guint8 *data, guint16 length,
@@ -105,12 +110,20 @@ static void paired_reference_fdt_done(FpDevice *dev, guint8 *data, guint16 lengt
     }
     memcpy(self->paired_fdt[index - 1], data + 4, 16);
     GxFields fields;
-    if (gx_fields(self->otp, 64, &fields) != GX_OK ||
-        (index > 1 && !paired_reference_fdt_stable(self->paired_fdt[index - 2],
-                                                  self->paired_fdt[index - 1], fields.timing))) {
+    if (gx_fields(self->otp, 64, &fields) != GX_OK) {
         paired_reference_fail(ssm,
             g_error_new_literal(FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
-                                "Paired-reference FDT stability check failed"), length);
+                                "Invalid paired-reference factory fields"), length);
+        return;
+    }
+    if (index > 1 && !paired_reference_fdt_stable(self->paired_fdt[index - 2],
+                                                self->paired_fdt[index - 1], fields.timing)) {
+        guint delta = paired_reference_fdt_max_delta(self->paired_fdt[index - 2],
+                                                      self->paired_fdt[index - 1]);
+        paired_reference_fail(ssm,
+            g_error_new(FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
+                        "Paired-reference FDT stability check failed: pair=%u/%u max-delta=%u threshold=%u; keep reader clear during open",
+                        index - 1, index, delta, fields.timing), length);
         return;
     }
     fpi_ssm_next_state(ssm);

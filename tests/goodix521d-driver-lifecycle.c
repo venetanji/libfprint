@@ -18,6 +18,7 @@
 #define fpi_device_identify_report mock_identify_report
 #define fpi_device_get_identify_data mock_get_identify_data
 #define fpi_device_report_finger_status mock_report_finger_status
+#define goodix_wait_read_idle mock_wait_read_idle
 #define goodix_dev_init mock_dev_init
 #define goodix_dev_deinit mock_dev_deinit
 #define goodix_cancel mock_cancel
@@ -48,6 +49,14 @@
 #include <glib-object.h>
 #include "../libfprint/drivers/goodix521d/goodix521d.c"
 
+/* Public-API regressions use real completion and generic device bookkeeping. */
+#undef fpi_device_open_complete
+#undef fpi_device_close_complete
+#undef fpi_device_enroll_complete
+void fpi_device_open_complete (FpDevice *device, GError *error);
+void fpi_device_close_complete (FpDevice *device, GError *error);
+void fpi_device_enroll_complete (FpDevice *device, FpPrint *print, GError *error);
+
 /* A mutex-protected gate holds a real worker inside an algorithm boundary.
  * Cancellation/timeout remains on the main thread, never races test state. */
 static struct {
@@ -64,6 +73,15 @@ static struct {
   OcReject matcher_reject;
   guint sessions_created, sessions_freed, acquisitions_created, acquisitions_freed;
   GError *error;
+  gboolean public_api, usb_open, public_success;
+  guint usb_opens, usb_closes, public_callbacks;
+  FpDevice *usb_owner;
+  GError *public_error;
+  gboolean hold_drain, fail_drain;
+  guint drain_waits;
+  FpDevice *drain_device;
+  GoodixNoneCallback drain_callback;
+  gpointer drain_data;
   GoodixAcquired capture_callback;
   gpointer capture_data;
   GPtrArray *prints;
@@ -116,19 +134,37 @@ complete (Action action, GError *error)
   state.error = error;
 }
 
-void mock_open_complete (FpDevice *device, GError *error) { complete (ACTION_OPEN, error); }
+void mock_open_complete (FpDevice *device, GError *error)
+{
+  if (state.public_api) {
+    complete (ACTION_OPEN, error ? g_error_copy (error) : NULL);
+    fpi_device_open_complete (device, error);
+  } else {
+    complete (ACTION_OPEN, error);
+  }
+}
 void mock_verify_complete (FpDevice *device, GError *error) { complete (ACTION_VERIFY, error); }
 void mock_identify_complete (FpDevice *device, GError *error) { complete (ACTION_IDENTIFY, error); }
 void mock_enroll_complete (FpDevice *device, FpPrint *print, GError *error)
 {
-  g_clear_object (&print);
-  complete (ACTION_ENROLL, error);
+  if (state.public_api) {
+    complete (ACTION_ENROLL, error ? g_error_copy (error) : NULL);
+    fpi_device_enroll_complete (device, print, error);
+  } else {
+    g_clear_object (&print);
+    complete (ACTION_ENROLL, error);
+  }
 }
 void mock_close_complete (FpDevice *device, GError *error)
 {
   state.close_completed++;
   g_clear_error (&state.error);
-  state.error = error;
+  if (state.public_api) {
+    state.error = error ? g_error_copy (error) : NULL;
+    fpi_device_close_complete (device, error);
+  } else {
+    state.error = error;
+  }
 }
 void mock_enroll_progress (FpDevice *device, gint stages, FpPrint *print, GError *error)
 {
@@ -152,6 +188,39 @@ void mock_identify_report (FpDevice *device, FpPrint *match, FpPrint *print, GEr
 }
 void mock_get_identify_data (FpDevice *device, GPtrArray **prints) { *prints = state.prints; }
 gboolean mock_report_finger_status (FpDevice *device, FpFingerStatusFlags status) { return TRUE; }
+
+static void
+release_read_drain (GError *error)
+{
+  g_autoptr(FpDevice) device = g_steal_pointer (&state.drain_device);
+  GoodixNoneCallback callback = state.drain_callback;
+  gpointer data = state.drain_data;
+  state.drain_callback = NULL;
+  state.drain_data = NULL;
+  callback (device, data, error);
+}
+
+static gboolean
+read_drain_idle (gpointer unused)
+{
+  release_read_drain (state.fail_drain ?
+    g_error_new_literal (G_IO_ERROR, G_IO_ERROR_TIMED_OUT, "synthetic RX drain timeout") : NULL);
+  return G_SOURCE_REMOVE;
+}
+
+void
+mock_wait_read_idle (FpDevice *device, guint timeout_ms,
+                    GoodixNoneCallback callback, gpointer data)
+{
+  g_assert_cmpuint (timeout_ms, ==, 2000);
+  g_assert_null (state.drain_callback);
+  state.drain_waits++;
+  state.drain_device = g_object_ref (device);
+  state.drain_callback = callback;
+  state.drain_data = data;
+  if (!state.hold_drain)
+    g_idle_add (read_drain_idle, NULL);
+}
 
 gboolean mock_dev_init (FpDevice *device, GError **error)
 {
@@ -293,6 +362,43 @@ GVariant *mock_envelope_export (const GxPrintIdentity *identity, gboolean comple
   return NULL;
 }
 
+/* GUsb's JSON emulation permits repeated open, so model the real handle's
+ * strict open/close contract at the hardware boundary. Both the shared generic
+ * FpDevice implementation and source-included driver call these functions. */
+gboolean
+g_usb_device_open (GUsbDevice *usb, GError **error)
+{
+  g_assert_true (G_USB_IS_DEVICE (usb));
+  state.usb_opens++;
+  if (state.usb_open) {
+    g_set_error_literal (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_ALREADY_OPEN,
+                         "Device 27c6:521d is already open");
+    return FALSE;
+  }
+  state.usb_open = TRUE;
+  return TRUE;
+}
+
+gboolean
+g_usb_device_close (GUsbDevice *usb, GError **error)
+{
+  /* Older white-box tests invoke driver vfuncs without the generic USB open. */
+  if (!state.public_api)
+    return TRUE;
+  g_assert_true (G_USB_IS_DEVICE (usb));
+  g_assert_nonnull (state.usb_owner);
+  g_assert_false (SELF (state.usb_owner)->transport_open);
+  g_assert_null (state.drain_callback);
+  state.usb_closes++;
+  if (!state.usb_open) {
+    g_set_error_literal (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_NOT_OPEN,
+                         "Device 27c6:521d is not open");
+    return FALSE;
+  }
+  state.usb_open = FALSE;
+  return TRUE;
+}
+
 static void
 reset_state (void)
 {
@@ -314,6 +420,8 @@ finish_state (FpDevice *device)
   g_clear_object (&state.cancellable);
   g_clear_pointer (&state.prints, g_ptr_array_unref);
   g_clear_error (&state.error);
+  g_clear_error (&state.public_error);
+  g_assert_null (state.drain_device);
   g_mutex_clear (&state.mutex);
   g_cond_clear (&state.condition);
 }
@@ -682,6 +790,257 @@ test_invalid_identify_gallery (gconstpointer data)
   finish_state (device);
 }
 
+static FpDevice *
+new_public_device (void)
+{
+  g_autoptr(GUsbDevice) usb = g_object_new (G_USB_TYPE_DEVICE, NULL);
+  state.public_api = TRUE;
+  state.usb_owner = g_object_new (fpi_device_goodix521d_get_type (),
+                                "fpi-usb-device", usb, NULL);
+  return state.usb_owner;
+}
+
+static void
+public_open_done (GObject *object, GAsyncResult *result, gpointer data)
+{
+  g_clear_error (&state.public_error);
+  state.public_success = fp_device_open_finish (FP_DEVICE (object), result,
+                                                &state.public_error);
+  state.public_callbacks++;
+}
+
+static void
+wait_public_callbacks (guint count)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  while (state.public_callbacks < count) {
+    g_assert_cmpint (g_get_monotonic_time (), <, deadline);
+    while (g_main_context_iteration (NULL, FALSE));
+    g_usleep (1000);
+  }
+  g_assert_cmpuint (state.public_callbacks, ==, count);
+}
+
+static void
+test_public_failed_open_retries (void)
+{
+  reset_state ();
+  FpDevice *device = new_public_device ();
+  fp_device_open (device, NULL, public_open_done, NULL);
+  g_assert_true (state.usb_open);
+  g_assert_true (SELF (device)->transport_open);
+  g_assert_nonnull (state.capture_callback);
+  state.capture_callback (device, NULL, state.capture_data,
+                          g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED,
+                                               "synthetic FDT stability failure"));
+  wait_public_callbacks (1);
+  g_assert_false (state.public_success);
+  g_assert_error (state.public_error, G_IO_ERROR, G_IO_ERROR_FAILED);
+  g_assert_false (fp_device_is_open (device));
+  g_assert_cmpuint (state.stops, ==, 1);
+
+  /* The second real fp_device_open must reach this same driver's open vfunc;
+   * without failed-open USB cleanup it ends at GUsb's ALREADY_OPEN check. */
+  state.capture_callback = NULL;
+  fp_device_open (device, NULL, public_open_done, NULL);
+  g_assert_nonnull (state.capture_callback);
+  g_assert_cmpuint (state.usb_opens, ==, 2);
+  g_assert_cmpuint (state.usb_closes, ==, 1);
+  GxImage image = {0};
+  image.valid = TRUE;
+  state.capture_callback (device, &image, state.capture_data, NULL);
+  wait_public_callbacks (2);
+  g_assert_true (state.public_success);
+  g_assert_no_error (state.public_error);
+  g_assert_true (fp_device_is_open (device));
+  g_assert_true (state.usb_open);
+  g_assert_cmpuint (state.usb_closes, ==, 1);
+  g_assert_true (fp_device_close_sync (device, NULL, &state.public_error));
+  g_assert_no_error (state.public_error);
+  g_assert_cmpuint (state.usb_closes, ==, 2);
+  g_assert_false (state.usb_open);
+  finish_state (device);
+}
+
+static void
+test_public_failed_open_retains_usb_on_cleanup_failure (void)
+{
+  reset_state ();
+  FpDevice *device = new_public_device ();
+  fp_device_open (device, NULL, public_open_done, NULL);
+  state.fail_cleanup = TRUE;
+  state.capture_callback (device, NULL, state.capture_data,
+                          g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED,
+                                               "synthetic acquisition failure"));
+  wait_public_callbacks (1);
+  g_assert_false (state.public_success);
+  g_assert_true (SELF (device)->transport_open);
+  g_assert_true (state.usb_open);
+  g_assert_cmpuint (state.usb_closes, ==, 0);
+  /* The failed-open API state cannot expose close; release the test fixture's
+   * retained resources explicitly, without pretending recovery succeeded. */
+  state.fail_cleanup = FALSE;
+  g_autoptr(GError) cleanup_error = NULL;
+  g_assert_true (stop_transport (SELF (device), &cleanup_error));
+  g_assert_true (g_usb_device_close (fpi_device_get_usb_device (device), &cleanup_error));
+  g_assert_no_error (cleanup_error);
+  finish_state (device);
+}
+
+static void
+public_enroll_done (GObject *object, GAsyncResult *result, gpointer data)
+{
+  g_clear_error (&state.public_error);
+  g_autoptr(FpPrint) print = fp_device_enroll_finish (FP_DEVICE (object), result,
+                                                    &state.public_error);
+  g_assert_null (print);
+  state.public_callbacks++;
+}
+
+static void
+test_public_enroll_error_keeps_usb_open (void)
+{
+  reset_state ();
+  FpDevice *device = new_public_device ();
+  fp_device_open (device, NULL, public_open_done, NULL);
+  GxImage image = {0};
+  image.valid = TRUE;
+  state.capture_callback (device, &image, state.capture_data, NULL);
+  wait_public_callbacks (1);
+  g_assert_true (state.public_success);
+  g_assert_true (fp_device_is_open (device));
+  g_autoptr(FpPrint) print = g_object_ref_sink (fp_print_new (device));
+  fp_device_enroll (device, print, NULL, NULL, NULL, NULL, public_enroll_done, NULL);
+  state.capture_callback (device, NULL, state.capture_data,
+                          g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED,
+                                               "synthetic enrollment failure"));
+  wait_public_callbacks (2);
+  g_assert_error (state.public_error, G_IO_ERROR, G_IO_ERROR_FAILED);
+  g_assert_true (fp_device_is_open (device));
+  g_assert_true (state.usb_open);
+  g_assert_cmpuint (state.usb_closes, ==, 0);
+  g_clear_error (&state.public_error);
+  g_assert_true (fp_device_close_sync (device, NULL, &state.public_error));
+  g_assert_no_error (state.public_error);
+  g_assert_cmpuint (state.usb_closes, ==, 1);
+  g_clear_object (&print);
+  finish_state (device);
+}
+
+static void
+test_public_failed_open_waits_for_rx (void)
+{
+  reset_state ();
+  FpDevice *device = new_public_device ();
+  state.hold_drain = TRUE;
+  fp_device_open (device, NULL, public_open_done, NULL);
+  state.capture_callback (device, NULL, state.capture_data,
+                          g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED,
+                                               "synthetic FDT stability failure"));
+  while (g_main_context_iteration (NULL, FALSE));
+  g_assert_cmpuint (state.drain_waits, ==, 1);
+  g_assert_cmpuint (state.public_callbacks, ==, 0);
+  g_assert_cmpuint (state.completed[ACTION_OPEN], ==, 0);
+  g_assert_cmpuint (state.usb_closes, ==, 0);
+  g_assert_true (state.usb_open);
+  release_read_drain (NULL);
+  wait_public_callbacks (1);
+  g_assert_false (state.public_success);
+  g_assert_error (state.public_error, G_IO_ERROR, G_IO_ERROR_FAILED);
+  g_assert_cmpuint (state.usb_closes, ==, 1);
+  g_assert_false (state.usb_open);
+  state.hold_drain = FALSE;
+  fp_device_open (device, NULL, public_open_done, NULL);
+  GxImage image = {0};
+  image.valid = TRUE;
+  state.capture_callback (device, &image, state.capture_data, NULL);
+  wait_public_callbacks (2);
+  g_assert_true (state.public_success);
+  g_assert_true (fp_device_is_open (device));
+  g_assert_true (fp_device_close_sync (device, NULL, &state.public_error));
+  g_assert_no_error (state.public_error);
+  g_assert_cmpuint (state.usb_closes, ==, 2);
+  finish_state (device);
+}
+
+static void
+test_public_failed_open_drain_timeout (void)
+{
+  reset_state ();
+  FpDevice *device = new_public_device ();
+  state.fail_drain = TRUE;
+  fp_device_open (device, NULL, public_open_done, NULL);
+  state.capture_callback (device, NULL, state.capture_data,
+                          g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED,
+                                               "synthetic FDT stability failure"));
+  wait_public_callbacks (1);
+  g_assert_false (state.public_success);
+  g_assert_error (state.public_error, G_IO_ERROR, G_IO_ERROR_FAILED);
+  g_assert_nonnull (strstr (state.public_error->message, "RX drain timeout"));
+  g_assert_nonnull (strstr (state.public_error->message, "FDT stability failure"));
+  g_assert_true (state.usb_open);
+  g_assert_cmpuint (state.usb_closes, ==, 0);
+  fp_device_open (device, NULL, public_open_done, NULL);
+  wait_public_callbacks (2);
+  g_assert_error (state.public_error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_ALREADY_OPEN);
+  g_assert_cmpuint (state.completed[ACTION_OPEN], ==, 1);
+  /* No driver retry/reuse happened. Simulate the eventual transport owner
+   * release, then release only the fixture's retained USB handle. */
+  g_assert_cmpuint (state.starts, ==, 1);
+  g_autoptr(GError) cleanup_error = NULL;
+  g_assert_true (g_usb_device_close (fpi_device_get_usb_device (device), &cleanup_error));
+  g_assert_no_error (cleanup_error);
+  finish_state (device);
+}
+
+static void
+test_public_early_open_failure (gconstpointer data)
+{
+  reset_state ();
+  FpDevice *device = new_public_device ();
+  state.fail_input = GPOINTER_TO_INT (data) == 0;
+  state.fail_init = !state.fail_input;
+  fp_device_open (device, NULL, public_open_done, NULL);
+  wait_public_callbacks (1);
+  g_assert_false (state.public_success);
+  g_assert_error (state.public_error, G_IO_ERROR,
+                  state.fail_input ? G_IO_ERROR_NOT_FOUND : G_IO_ERROR_FAILED);
+  g_assert_cmpuint (state.usb_opens, ==, 1);
+  g_assert_cmpuint (state.usb_closes, ==, 1);
+  g_assert_cmpuint (state.drain_waits, ==, 1);
+  g_assert_cmpuint (state.captures, ==, 0);
+  g_assert_cmpuint (state.stops, ==, 0);
+  g_assert_false (state.usb_open);
+  finish_state (device);
+}
+
+static void
+test_public_cancel_during_failed_open_drain (void)
+{
+  reset_state ();
+  FpDevice *device = new_public_device ();
+  state.hold_drain = TRUE;
+  fp_device_open (device, NULL, public_open_done, NULL);
+  state.capture_callback (device, NULL, state.capture_data,
+                          g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED,
+                                               "synthetic FDT stability failure"));
+  while (g_main_context_iteration (NULL, FALSE));
+  g_assert_nonnull (state.drain_callback);
+  cancel_operation (device);
+  cancel_operation (device);
+  g_assert_cmpuint (state.completed[ACTION_OPEN], ==, 0);
+  g_assert_cmpuint (state.usb_closes, ==, 0);
+  release_read_drain (NULL);
+  wait_public_callbacks (1);
+  g_assert_false (state.public_success);
+  g_assert_error (state.public_error, G_IO_ERROR, G_IO_ERROR_FAILED);
+  g_assert_nonnull (strstr (state.public_error->message, "FDT stability failure"));
+  g_assert_cmpuint (state.completed[ACTION_OPEN], ==, 1);
+  g_assert_cmpuint (state.usb_closes, ==, 1);
+  g_assert_false (fp_device_is_open (device));
+  finish_state (device);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -716,5 +1075,16 @@ main (int argc, char **argv)
   }
   g_test_add_data_func ("/goodix521d/identify/oversized-gallery", GINT_TO_POINTER (1), test_invalid_identify_gallery);
   g_test_add_data_func ("/goodix521d/identify/invalid-template", GINT_TO_POINTER (0), test_invalid_identify_gallery);
+  g_test_add_func ("/goodix521d/lifecycle/public-failed-open-retries", test_public_failed_open_retries);
+  g_test_add_func ("/goodix521d/lifecycle/public-cleanup-failure-retains-usb", test_public_failed_open_retains_usb_on_cleanup_failure);
+  g_test_add_func ("/goodix521d/lifecycle/public-enroll-error-keeps-usb-open", test_public_enroll_error_keeps_usb_open);
+  g_test_add_func ("/goodix521d/lifecycle/public-failed-open-waits-for-rx", test_public_failed_open_waits_for_rx);
+  g_test_add_func ("/goodix521d/lifecycle/public-failed-open-drain-timeout", test_public_failed_open_drain_timeout);
+  g_test_add_data_func ("/goodix521d/lifecycle/public-missing-input-closes-usb",
+                        GINT_TO_POINTER (0), test_public_early_open_failure);
+  g_test_add_data_func ("/goodix521d/lifecycle/public-claim-failure-closes-usb",
+                        GINT_TO_POINTER (1), test_public_early_open_failure);
+  g_test_add_func ("/goodix521d/lifecycle/public-cancel-during-failed-open-drain",
+                   test_public_cancel_during_failed_open_drain);
   return g_test_run ();
 }

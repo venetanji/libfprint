@@ -45,6 +45,53 @@ Enrollment uses OpenChicago's natural completion policy: 12 counted stages, its 
 
 Templates contain a strict versioned envelope with backend and preprocessing versions, profile 17, sensor identity digest and exact configuration digest. Incompatible or malformed templates fail import. Adaptive session memory is not serialized into fingerprints. Verification does not perform template study and does not try another backend after rejection.
 
+## Visible touch, hold and removal guidance
+
+The stock `fprintd-enroll` CLI prints enrollment results but does not display
+fprintd's finger-status properties. Use the read-only monitor from this checkout
+in a separate terminal for the next local test. It needs Python and PyGObject
+(`python-gobject` on Arch); it does not claim the reader or start enrollment.
+
+Complete any separate administrator authentication and approved service restart
+first, then keep the reader completely clear while the device opens. If testing
+a newly installed build after a failed open in an older process, restart fprintd
+through the normal local administrator workflow before this test.
+
+Use two ordinary user terminals after that separate administrator step.
+Terminal 1, from this checkout:
+
+```sh
+python3 examples/goodix521d-finger-monitor.py --device /net/reactivated/Fprint/Device/0
+```
+
+Wait for the monitor's ready message, then in terminal 2:
+
+```sh
+fprintd-enroll "$USER"
+```
+
+Follow PLACE, HOLD and REMOVE in terminal 1. HOLD lasts through the ten-frame
+capture; REMOVE is published only after the reader acknowledges its removal
+arm. A stage is not accepted until the separate removal event is validated.
+The initial contact is fprintd's duplicate check, before counted enrollment.
+The monitor exits after its bounded observation window or Ctrl+C; stopping it
+does not cancel the separate enrollment command.
+Prompts are best-effort: very brief property transitions can be missed. The
+monitor never determines acceptance or changes capture state.
+
+If REMOVE is displayed, fully lift the finger. If removal still times out,
+stop rather than repeating enrollment and preserve the precise error plus the
+last displayed guidance. This distinguishes a missing prompt from an unproven
+hardware removal path. A paired-reference stability failure now includes the
+failing snapshot pair, maximum shifted-word difference and factory threshold;
+it does not permit a finger-covered reference or relax that threshold.
+
+Failed-open cleanup waits up to two seconds for cancelled USB reads before
+closing the handle. If drainage or transport teardown fails, the handle is
+retained and the original failure includes cleanup context. Ordinary close's
+teardown-failure behavior remains an unqualified edge of this experimental
+branch; this repair does not establish all close/unplug failure paths as safe.
+
 ## Required local qualification
 
 Before authentication use, test with libfprint examples and then the existing fprintd tools:

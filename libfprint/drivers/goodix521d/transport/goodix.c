@@ -76,6 +76,7 @@ typedef struct {
     GCancellable* transfer_cancel_tkn;
     guint64 read_loop_generation;
     gboolean read_pending;
+    guint read_outstanding;
     gboolean inited;
 } FpiDeviceGoodixTlsPrivate;
 
@@ -763,6 +764,10 @@ void goodix_receive_data_cb(FpiUsbTransfer *transfer, FpDevice *dev,
     FpiDeviceGoodixTlsPrivate* priv =
         fpi_device_goodixtls_get_instance_private(self);
 
+    /* Cancellation invalidates the current generation before libusb has
+     * delivered its callback. Account for every owned transfer, even stale. */
+    g_assert(priv->read_outstanding > 0);
+    priv->read_outstanding--;
     if (!goodix_read_owner_current(priv, owner)) {
         g_clear_error(&error);
         return;
@@ -837,8 +842,65 @@ void goodix_receive_data(FpDevice * dev)
     fpi_usb_transfer_fill_bulk(transfer, class->ep_in,
                                 GOODIX_EP_IN_MAX_BUF_SIZE);
 
+    priv->read_outstanding++;
     fpi_usb_transfer_submit(transfer, 0, owner->cancel,
                             goodix_receive_data_cb, owner);
+}
+
+typedef struct {
+    FpDevice *dev;
+    GoodixNoneCallback callback;
+    gpointer user_data;
+    gint64 deadline;
+} GoodixReadIdleWait;
+
+static void goodix_read_idle_wait_free(gpointer data)
+{
+    GoodixReadIdleWait *wait = data;
+    g_object_unref(wait->dev);
+    g_free(wait);
+}
+
+static gboolean goodix_read_idle_poll(gpointer data)
+{
+    GoodixReadIdleWait *wait = data;
+    FpiDeviceGoodixTlsPrivate *priv =
+        fpi_device_goodixtls_get_instance_private(FPI_DEVICE_GOODIXTLS(wait->dev));
+    GError *error = NULL;
+
+    if (priv->read_outstanding) {
+        if (g_get_monotonic_time() < wait->deadline) return G_SOURCE_CONTINUE;
+        error = g_error_new_literal(G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
+                                   "Goodix USB reads did not drain; USB must remain open");
+    }
+    wait->callback(wait->dev, wait->user_data, error);
+    return G_SOURCE_REMOVE;
+}
+
+static void goodix_read_idle_begin(FpDevice *dev, gpointer data)
+{
+    GSource *source = g_timeout_source_new(10);
+    /* fpi_device_add_timeout selects the current action's context but retains a
+     * raw device through source finalization. Its bootstrap must finish before
+     * a user callback can drop the last device reference. A plain GLib source
+     * safely owns the device until its callback and source destruction finish. */
+    g_source_set_callback(source, goodix_read_idle_poll, data, goodix_read_idle_wait_free);
+    g_source_set_ready_time(source, 0);
+    g_source_attach(source, g_source_get_context(g_main_current_source()));
+    g_source_unref(source);
+}
+
+void goodix_wait_read_idle(FpDevice *dev, guint timeout_ms,
+                          GoodixNoneCallback callback, gpointer user_data)
+{
+    GoodixReadIdleWait *wait;
+    g_return_if_fail(callback != NULL);
+    wait = g_new0(GoodixReadIdleWait, 1);
+    wait->dev = g_object_ref(dev);
+    wait->callback = callback;
+    wait->user_data = user_data;
+    wait->deadline = g_get_monotonic_time() + (gint64) timeout_ms * 1000;
+    fpi_device_add_timeout(dev, 0, goodix_read_idle_begin, wait, NULL);
 }
 
 // ---- GOODIX RECEIVE SECTION END ----

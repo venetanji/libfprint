@@ -522,6 +522,9 @@ if 'goodix521d' in drivers
         env: {'CHICAGO_TEST_LIBRARY': gx_profile_test_library.full_path()},
         depends: gx_profile_test_library,
         suite: ['goodix521d', 'unit-tests'])
+    test('goodix521d-finger-monitor', python3,
+        args: files('goodix521d-finger-monitor.py'),
+        suite: ['goodix521d', 'unit-tests'])
     test('goodix521d-transport', python3,
         args: files('goodix521d-transport.py'),
         timeout: 120,
