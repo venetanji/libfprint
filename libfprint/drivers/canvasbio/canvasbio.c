@@ -1,7 +1,7 @@
 /*
  * CanvasBio CB2000 Fingerprint Reader Driver for libfprint
  *
- * Copyright (C) 2025 CanvasMancer Project
+ * Copyright (C) 2026 Roberto Focosi <rfocosi@gmail.com>
  * Based on protocol analysis from libfprint issue #509
  * https://gitlab.freedesktop.org/libfprint/libfprint/-/issues/509
  *
@@ -72,9 +72,6 @@
 #define CB2000_EP_IN 0x82
 
 /* Image dimensions */
-#define CB2000_IMG_WIDTH 80
-#define CB2000_IMG_HEIGHT 64
-#define CB2000_IMG_SIZE (CB2000_IMG_WIDTH * CB2000_IMG_HEIGHT)
 #define CB2000_IMG_CHUNKS 20
 #define CB2000_CHUNK_SIZE 320
 #define CB2000_CHUNK_PAYLOAD_SIZE 256

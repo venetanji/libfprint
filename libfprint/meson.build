@@ -140,8 +140,8 @@ driver_sources = {
     'mafpmoc' : files('drivers/mafpmoc/mafpmoc.c'),
     'secugen' : files('drivers/secugen.c'),
     'canvasbio' : files(
-        'drivers/canvasbio.c',
-        'drivers/canvasbio-ncc.c',
+        'drivers/canvasbio/canvasbio.c',
+        'drivers/canvasbio/canvasbio-ncc.c',
     ),
 }
 
