@@ -9,7 +9,9 @@
 struct _GoodixAcquisition {
   FpDevice *device;
   guint8 otp[64];
-  guint8 paired_fdt[3][16];
+  guint8 paired_fdt[3][16], paired_seed[16];
+  guint paired_retry_count;
+  gboolean paired_f1_valid;
   GxImage paired_images[2];
   GxImage contact;
   FpiSsm *ssm;
@@ -233,6 +235,8 @@ goodix_acquisition_start (GoodixAcquisition *self, gboolean reference, GoodixAcq
   self->reference=reference; self->frames=0;self->generation++;self->cancelled=FALSE;
   memset(self->last_down,0,sizeof self->last_down);
   self->callback=callback; self->user_data=user_data;
+  self->paired_retry_count=0;self->paired_f1_valid=FALSE;
+  memset (self->paired_seed,0,sizeof self->paired_seed);
   memset (self->paired_fdt,0,sizeof self->paired_fdt);
   memset (self->paired_images,0,sizeof self->paired_images);
   self->ssm=fpi_ssm_new (self->device,reference?paired_reference_run:contact_run,

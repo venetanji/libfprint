@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
-/* One fresh GF5298 paired-reference acquisition. Included after the device
+/* Bounded GF5298 paired-reference acquisition. Included after the device
  * definition. This path never decodes a press image or calls the NBIS path. */
 #pragma once
 #include "goodix-profile.h"
@@ -21,13 +21,43 @@ enum {
     PAIRED_REFERENCE_NUM_STATES,
 };
 
-static void paired_reference_fail(FpiSsm *ssm, GError *error, guint length)
+static void paired_reference_log_failure(FpiSsm *ssm, GError *error, guint length)
 {
     const gchar *domain = error->domain == FP_DEVICE_ERROR ? "fp-device-error-quark" :
                           error->domain == G_IO_ERROR ? "g-io-error-quark" : "other-domain-redacted";
     fp_warn("paired-reference-error stage=%u domain=%s domain_id=%u code=%d reply-length=%u",
             fpi_ssm_get_cur_state(ssm), domain, (guint)error->domain, error->code, length);
-    fpi_ssm_mark_failed(ssm, error);
+}
+
+static void paired_reference_fail(FpiSsm *ssm, GError *error, guint length)
+{
+    paired_reference_log_failure(ssm,error,length);
+    fpi_ssm_mark_failed(ssm,error);
+}
+
+static void paired_reference_reject(FpiSsm *ssm, GError *error, guint length)
+{
+    GoodixAcquisition *self=fpi_ssm_get_data(ssm);
+    paired_reference_log_failure(ssm,error,length);
+    /* Linux recovery policy: at most one re-acquisition in this same initialized
+     * context and existing action deadline. Windows updates this seed after
+     * validated stability rejection, but supplies no immediate retry count. */
+    if (!acquisition_continue(self,ssm)) { g_error_free(error);return; }
+    if (!self->paired_f1_valid || self->paired_retry_count) {
+        fpi_ssm_mark_failed(ssm,error);return;
+    }
+    self->paired_retry_count++;
+    for (guint i=0;i<8;i++) {
+        guint16 sample=self->paired_fdt[0][2*i]|((guint16)self->paired_fdt[0][2*i+1]<<8);
+        guint16 seed=(guint16)((sample>>1)*257u);
+        self->paired_seed[2*i]=seed;self->paired_seed[2*i+1]=seed>>8;
+    }
+    self->paired_f1_valid=FALSE;
+    memset(self->paired_fdt,0,sizeof self->paired_fdt);
+    memset(self->paired_images,0,sizeof self->paired_images);
+    g_error_free(error);
+    fp_warn("paired-reference-retry attempt=2 max-attempts=2 seed=first-fdt scope=same-open");
+    fpi_ssm_jump_to_state(ssm,PAIRED_REFERENCE_F1_PHASE0);
 }
 
 static guint paired_reference_fdt_max_delta(const guint8 a[16], const guint8 b[16])
@@ -71,11 +101,16 @@ static void paired_reference_register_done(FpDevice *dev, gpointer user_data, GE
         if (gx_fields(self->otp, 64, &fields) != GX_OK ||
             gx_background_gates(self->paired_fdt[0], self->paired_fdt[1], self->paired_fdt[1],
                                 &self->paired_images[0], &self->paired_images[1],
-                                fields.timing, generation, diagnostics) != GX_OK ||
-            (diagnostics[4] & 3) != 3) {
+                                fields.timing, generation, diagnostics) != GX_OK) {
             paired_reference_fail(ssm,
                 g_error_new_literal(FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
-                                    "Paired-reference image stability check failed"), 0);
+                                    "Invalid paired-reference image gate inputs"), 0);
+            return;
+        }
+        if ((diagnostics[4] & 3) != 3) {
+            paired_reference_reject(ssm,
+                g_error_new_literal(FP_DEVICE_ERROR,FP_DEVICE_ERROR_PROTO,
+                                    "Paired-reference image stability check failed"),0);
             return;
         }
     }
@@ -118,13 +153,14 @@ static void paired_reference_fdt_done(FpDevice *dev, guint8 *data, guint16 lengt
                                 "Invalid paired-reference factory fields"), length);
         return;
     }
+    if (index == 1) self->paired_f1_valid=TRUE;
     if (index > 1 && !paired_reference_fdt_stable(self->paired_fdt[index - 2],
                                                 self->paired_fdt[index - 1], fields.timing)) {
         guint delta = paired_reference_fdt_max_delta(self->paired_fdt[index - 2],
                                                       self->paired_fdt[index - 1]);
         fp_warn("paired-reference-fdt pair=%u/%u max-delta=%u threshold=%u",
                 index - 1, index, delta, fields.timing);
-        paired_reference_fail(ssm,
+        paired_reference_reject(ssm,
             g_error_new(FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
                         "Paired-reference FDT stability check failed: pair=%u/%u max-delta=%u threshold=%u; keep reader clear during open",
                         index - 1, index, delta, fields.timing), length);
@@ -170,11 +206,10 @@ static void paired_reference_run(FpiSsm *ssm, FpDevice *dev)
     GxFields fields;
     GxSubmission submission;
     guint state = fpi_ssm_get_cur_state(ssm);
-    /* Fresh Windows construction starts with zero FdtBase. All three reads
-     * reuse this unchanged base. Persistent refresh/retry is not reproduced. */
-    const guint8 fresh_base[16] = {0};
+    /* Fresh construction starts with zero FdtBase. All three reads reuse one
+     * seed; only the bounded same-open recovery replaces it between attempts. */
     if (gx_fields(self->otp, 64, &fields) != GX_OK ||
-        gx_submission(state, fields.fdt, fresh_base, sizeof fresh_base, &submission) != GX_OK) {
+        gx_submission(state, fields.fdt, self->paired_seed, sizeof self->paired_seed, &submission) != GX_OK) {
         paired_reference_fail(ssm,
             g_error_new_literal(FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
                                 "Invalid paired-reference command state"), 0);

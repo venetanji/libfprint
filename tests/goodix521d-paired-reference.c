@@ -14,7 +14,9 @@
 typedef struct {
     guint8 *otp;
     guint8 candidate_config[256], candidate_image_request[10];
-    guint8 paired_fdt[3][16];
+    guint8 paired_fdt[3][16], paired_seed[16];
+    guint paired_retry_count;
+    gboolean paired_f1_valid;
     GxImage paired_images[2];
 } GoodixAcquisition;
 typedef GoodixAcquisition FpDevice;
@@ -43,7 +45,8 @@ static void test_warn(const gchar *format, ...)
 #define fp_warn(...) test_warn(__VA_ARGS__)
 
 static GError *session_error;
-static guint submissions, completed;
+static guint submissions, completed, attempt_submissions, retry_jumps;
+static gboolean seed_sensitive;
 static gint fail_state;
 static guint8 fdt_reply[32];
 static guint16 fdt_reply_length;
@@ -57,6 +60,7 @@ static const guint16 expected_words[4] = {303,295,305,297};
 static gboolean acquisition_continue(GoodixAcquisition *self,FpiSsm *ssm) { (void)self;return !ssm->done; }
 static guint fpi_ssm_get_cur_state(FpiSsm *ssm) { return ssm->state; }
 static void fpi_ssm_next_state(FpiSsm *ssm);
+static void fpi_ssm_jump_to_state(FpiSsm *ssm, guint state);
 static void fpi_ssm_mark_failed(FpiSsm *ssm, GError *error);
 static gpointer fpi_ssm_get_data(FpiSsm *ssm) { return ssm->dev; }
 static void paired_reference_complete(FpiSsm *ssm, FpDevice *dev, GError *error) { (void)ssm; (void)dev; g_assert_null(session_error); session_error=error; }
@@ -67,6 +71,12 @@ static void goodix_tls_read_image(FpDevice *, gpointer, guint16, Reply, gpointer
 
 #include "goodix-paired-reference.h"
 
+static void fpi_ssm_jump_to_state(FpiSsm *ssm, guint state)
+{
+    g_assert_cmpuint(++retry_jumps, ==, 1);
+    g_assert_cmpuint(state, ==, 0);
+    attempt_submissions=0;ssm->state=state;paired_reference_run(ssm,ssm->dev);
+}
 static void fpi_ssm_next_state(FpiSsm *ssm)
 {
     g_assert_false(ssm->done);
@@ -91,7 +101,7 @@ static void note(FpiSsm *ssm, guint8 opcode)
     g_assert_false(ssm->done);
     g_assert_cmpuint(ssm->state, <, 12);
     g_assert_cmpuint(opcode, ==, opcodes[ssm->state]);
-    g_assert_cmpuint(submissions++, ==, ssm->state);
+    submissions++;g_assert_cmpuint(attempt_submissions++, ==, ssm->state);
 }
 static void words_match(const guint8 *payload)
 {
@@ -108,11 +118,16 @@ static void goodix_send_protocol(FpDevice *dev, guint8 opcode, guint8 *payload, 
     g_assert_cmpuint(opcode, ==, 0x36); g_assert_cmpuint(length, ==, 27);
     g_assert_cmpuint(payload[0], ==, ssm->state == 5 || ssm->state == 6 ? 0x8d : 0x0d);
     g_assert_cmpuint(payload[1], ==, 1); words_match(payload);
-    const guint8 zero[16] = {0}; g_assert_cmpmem(payload+10, 16, zero, 16);
+    guint8 expected_seed[16] = {0};
+    if (seed_sensitive && retry_jumps) for (guint i=0;i<8;i++) {
+        guint16 v=(guint16)(((fdt_reply[4+2*i]|((guint16)fdt_reply[5+2*i]<<8))>>1)*257u);
+        expected_seed[2*i]=v;expected_seed[2*i+1]=v>>8;
+    }
+    g_assert_cmpmem(payload+10, 16, expected_seed, 16);
     gboolean phase1 = ssm->state == 1 || ssm->state == 6 || ssm->state == 11;
     g_assert_cmpuint(payload[26], ==, phase1); g_assert_cmpint(reply, ==, phase1);
     guint8 response[32]; memcpy(response, fdt_reply, sizeof response);
-    if ((gint)ssm->state == unstable_fdt) { response[4] = 30; response[5] = 0; }
+    if ((gint)ssm->state == unstable_fdt && !(seed_sensitive && retry_jumps)) { response[4] ^= 30; }
     callback(dev, phase1 ? response : NULL, phase1 ? fdt_reply_length : 0, data, injected(ssm));
 }
 static void goodix_send_write_sensor_register(FpDevice *dev, guint16 address, guint16 value,
@@ -141,7 +156,7 @@ static void setup(void)
     g_clear_pointer(&last_warning,g_free);
     if (all_warnings)g_string_free(all_warnings,TRUE);
     all_warnings=g_string_new(NULL);
-    submissions = completed = 0; fail_state = unstable_fdt = -1;
+    submissions = completed = attempt_submissions = retry_jumps = 0;seed_sensitive=FALSE; fail_state = unstable_fdt = -1;
     image_length = 7684;
     memset(raw, 0, sizeof raw);
     memcpy(raw[0]+7680, "\xb1\x49\xc0\xf0", 4);
@@ -193,7 +208,8 @@ static void complete_pair(void)
 static void unstable_f2_stops_before_image2(void)
 {
     ISOLATE(); setup(); unstable_fdt=6; run();
-    g_assert_cmpuint(submissions, ==, 7); g_assert_cmpuint(completed, ==, 0);
+    g_assert_cmpuint(submissions, ==, 14); g_assert_cmpuint(completed, ==, 0);
+    g_assert_cmpuint(retry_jumps, ==, 1);
     g_assert_error(session_error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
     g_assert_nonnull(strstr(session_error->message, "pair=1/2 max-delta=15 threshold=0"));
     g_assert_nonnull(strstr(all_warnings->str, "pair=1/2 max-delta=15 threshold=0"));
@@ -203,7 +219,8 @@ static void unstable_f2_stops_before_image2(void)
 static void unstable_f3_rejects_completion(void)
 {
     ISOLATE(); setup(); unstable_fdt=11; run();
-    g_assert_cmpuint(submissions, ==, 12); g_assert_cmpuint(completed, ==, 0);
+    g_assert_cmpuint(submissions, ==, 24); g_assert_cmpuint(completed, ==, 0);
+    g_assert_cmpuint(retry_jumps, ==, 1);
     g_assert_error(session_error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
     g_assert_nonnull(strstr(session_error->message, "pair=2/3 max-delta=15 threshold=0"));
     g_assert_nonnull(strstr(all_warnings->str, "pair=2/3 max-delta=15 threshold=0"));
@@ -264,7 +281,7 @@ static void pair_mad_boundary(void)
         for (guint i=0; i<5120; i++) { a[i]=1000; b[i]=1000+difference; }
         frame_with_native_pixels(a, raw[0]); frame_with_native_pixels(b, raw[1]); run();
         g_assert_cmpuint(completed, ==, difference==199 ? 1 : 0);
-        g_assert_cmpuint(submissions, ==, difference==199 ? 12 : 10);
+        g_assert_cmpuint(submissions, ==, difference==199 ? 12 : 20);
         teardown();
     }
 }
@@ -303,9 +320,20 @@ static void unexpected_fdt_state_stops(void)
     teardown();
 }
 
+static void seeded_same_context_recovery(void)
+{
+    ISOLATE();setup();seed_sensitive=TRUE;unstable_fdt=6;
+    const guint16 values[8]={0,1,2,255,256,511,65534,65535};
+    for(guint i=0;i<8;i++){fdt_reply[4+2*i]=values[i];fdt_reply[5+2*i]=values[i]>>8;}
+    run();g_assert_no_error(session_error);g_assert_cmpuint(completed,==,1);
+    g_assert_cmpuint(retry_jumps,==,1);g_assert_cmpuint(submissions,==,19);
+    teardown();
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
+    g_test_add_func("/paired-reference/seeded-same-context-recovery", seeded_same_context_recovery);
     g_test_add_func("/paired-reference/ack-then-data-phase", ack_then_data_phase);
     g_test_add_func("/paired-reference/complete-pair", complete_pair);
     g_test_add_func("/paired-reference/unstable-f2", unstable_f2_stops_before_image2);
