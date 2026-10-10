@@ -1,7 +1,17 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
-/* Real acquisition and FpiSsm, synthetic transport. No USB is opened. */
-#include "goodix-acquire.h"
-#include "transport/goodix.h"
+/* Real acquisition and FpiSsm, synthetic transport. No USB is opened.
+ * Substitute only the external boundaries while compiling the exact production
+ * source. Linker --wrap is too late for LTO: GCC can bind/integrate definitions
+ * from libfprint-private before the linker gets an undefined symbol to wrap. */
+#define fpi_device_get_cancellable mock_fpi_device_get_cancellable
+#define fpi_device_report_finger_status mock_fpi_device_report_finger_status
+#define goodix_send_mcu_switch_to_fdt_down mock_goodix_send_mcu_switch_to_fdt_down
+#define goodix_send_mcu_switch_to_fdt_mode mock_goodix_send_mcu_switch_to_fdt_mode
+#define goodix_send_write_sensor_register mock_goodix_send_write_sensor_register
+#define goodix_tls_read_image mock_goodix_tls_read_image
+#define goodix_wait_fdt_up mock_goodix_wait_fdt_up
+#define goodix_send_protocol mock_goodix_send_protocol
+#include "../libfprint/drivers/goodix521d/goodix-acquire.c"
 #include "test-device-fake.h"
 #include <string.h>
 static guint frames,done,up_arms;
@@ -13,27 +23,27 @@ static GDestroyNotify event_destroy;
 static FpDevice *test_device;
 static GoodixAcquisition *capture;
 
-GCancellable *__wrap_fpi_device_get_cancellable(FpDevice *dev) {(void)dev;return NULL;}
-gboolean __wrap_fpi_device_report_finger_status(FpDevice *dev,FpFingerStatusFlags status) {
+GCancellable *mock_fpi_device_get_cancellable(FpDevice *dev) {(void)dev;return NULL;}
+gboolean mock_fpi_device_report_finger_status(FpDevice *dev,FpFingerStatusFlags status) {
  (void)dev;
  if(cancel_present && status==FP_FINGER_STATUS_PRESENT) goodix_acquisition_cancel(capture);
  return TRUE;
 }
-void __wrap_goodix_send_mcu_switch_to_fdt_down(FpDevice *dev,guint8 *data,guint16 length,gboolean reply,GDestroyNotify destroy,GoodixDefaultCallback cb,gpointer user) {
+void mock_goodix_send_mcu_switch_to_fdt_down(FpDevice *dev,guint8 *data,guint16 length,gboolean reply,GDestroyNotify destroy,GoodixDefaultCallback cb,gpointer user) {
  g_assert_cmpuint(length,==,39);g_assert_null(destroy);g_assert_cmpuint(data[26],==,reply);
  guint8 response[20]={2,0,255,0};cb(dev,reply?response:NULL,reply?20:0,user,NULL);
 }
-void __wrap_goodix_send_mcu_switch_to_fdt_mode(FpDevice *dev,guint8 *data,guint16 length,gboolean reply,GDestroyNotify destroy,GoodixDefaultCallback cb,gpointer user) {
+void mock_goodix_send_mcu_switch_to_fdt_mode(FpDevice *dev,guint8 *data,guint16 length,gboolean reply,GDestroyNotify destroy,GoodixDefaultCallback cb,gpointer user) {
  (void)data;g_assert_cmpuint(length,==,27);g_assert_false(reply);g_assert_null(destroy);cb(dev,NULL,0,user,NULL);
 }
-void __wrap_goodix_send_write_sensor_register(FpDevice *dev,guint16 address,guint16 value,GoodixNoneCallback cb,gpointer user) {
+void mock_goodix_send_write_sensor_register(FpDevice *dev,guint16 address,guint16 value,GoodixNoneCallback cb,gpointer user) {
  g_assert_cmpuint(address,==,0x022c);g_assert_cmpuint(value,==,0x030a);cb(dev,user,NULL);
 }
-void __wrap_goodix_tls_read_image(FpDevice *dev,gpointer data,guint16 length,GoodixImageCallback cb,gpointer user) {
+void mock_goodix_tls_read_image(FpDevice *dev,guint8 *data,guint16 length,GoodixImageCallback cb,gpointer user) {
  guint8 *request=data;g_assert_cmpuint(length,==,10);g_assert_cmpuint(request[0],==,0x45);
  guint8 raw[7684]={0};memcpy(raw+7680,"\xb1\x49\xc0\xf0",4);frames++;cb(dev,raw,sizeof raw,user,NULL);
 }
-void __wrap_goodix_wait_fdt_up(FpDevice *dev,guint timeout,GoodixDefaultCallback cb,gpointer data,GDestroyNotify destroy) {
+void mock_goodix_wait_fdt_up(FpDevice *dev,guint timeout,GoodixDefaultCallback cb,gpointer data,GDestroyNotify destroy) {
  g_assert_true(dev==test_device);g_assert_cmpuint(timeout,==,30000);g_assert_null(event_callback);
  event_callback=cb;event_data=data;event_destroy=destroy;
 }
@@ -42,7 +52,7 @@ static void release_event(GError *error) {
  event_callback=NULL;event_data=NULL;event_destroy=NULL;
  guint8 reply[20]={0,2,255,0};cb(test_device,reply,20,data,error);destroy(data);
 }
-void __wrap_goodix_send_protocol(FpDevice *dev,guint8 opcode,guint8 *data,guint16 length,GDestroyNotify destroy,gboolean checksum,guint timeout,gboolean reply,GoodixCmdCallback cb,gpointer user) {
+void mock_goodix_send_protocol(FpDevice *dev,guint8 opcode,guint8 *data,guint16 length,GDestroyNotify destroy,gboolean checksum,guint timeout,gboolean reply,GoodixCmdCallback cb,gpointer user) {
  g_assert_cmpuint(opcode,==,0x34);g_assert_cmpuint(length,==,40);g_assert_null(destroy);g_assert_true(checksum);g_assert_cmpuint(timeout,==,1000);g_assert_false(reply);
  g_assert_cmpuint(data[0],==,0x8e);for(guint i=27;i<40;i++)g_assert_cmpuint(data[i],==,0);
  up_arms++;

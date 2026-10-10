@@ -24,3 +24,20 @@ python3 packaging/arch/test_recipe.py
 The Arch recipe enables the usual introspection and documentation dependencies and does not suppress failing tests. Its shell syntax and temporary-Git recipe regression pass here. Actual `makepkg` execution and installation/SONAME metadata still require Arch.
 
 The fixed offline matcher diagnostics use a gallery that reached 10 of 12 natural stages; strict production export rejected it. Those partial-gallery scores are useful algorithm comparisons only. No threshold was fitted to held-out probes. Physical free-driver enrollment, genuine/wrong-finger checks, removal, unplug/reopen and fprintd restart remain required local qualification.
+
+## Arch LTO acquisition-test regression
+
+The first Arch build completed compilation but reported two test failures. The
+Goodix acquisition fixture reached the real cancellable accessor on a synthetic
+inactive device. This was reproduced with `CFLAGS='-O2 -fno-plt -flto=auto'` and
+`LDFLAGS='-flto=auto'`: whole-program optimization bypassed the fixture's linker
+`--wrap` boundary. The fixture now compiles the exact acquisition source with
+explicit external-boundary substitutions, as the lifecycle test already does.
+Its production acquisition code and behavioral assertions are unchanged. All 11
+Goodix targets pass with those flags and in the ordinary build. CI now runs both
+configurations rather than relying on the unoptimized linker behavior.
+
+The separate `egis_etu905` cancellation-replay failure is being compared against
+unchanged upstream code; it must not be hidden with `--nocheck`. The original
+GitHub run passed 18 targets and skipped 33 fixture-dependent targets, including
+that replay, so its green result did not establish full Arch replay coverage.

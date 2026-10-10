@@ -14,6 +14,19 @@ permissions:
 jobs:
   build-test:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: default
+            cflags: ''
+            ldflags: ''
+          - variant: arch-lto
+            cflags: '-O2 -fno-plt -flto=auto'
+            ldflags: '-flto=auto'
+    env:
+      CFLAGS: ${{ matrix.cflags }}
+      LDFLAGS: ${{ matrix.ldflags }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -33,5 +46,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: offline-test-log
+          name: offline-test-log-${{ matrix.variant }}
           path: build/meson-logs/testlog.txt

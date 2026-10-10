@@ -490,20 +490,11 @@ if 'goodix521d' in drivers
     endforeach
 endif
 if 'goodix521d' in drivers
-    gx_acquire_wrapped = ['fpi_device_get_cancellable', 'fpi_device_report_finger_status', 'goodix_send_mcu_switch_to_fdt_down',
-                         'goodix_send_mcu_switch_to_fdt_mode',
-                         'goodix_send_write_sensor_register', 'goodix_tls_read_image',
-                         'goodix_wait_fdt_up', 'goodix_send_protocol']
-    gx_acquire_wrap_args = []
-    foreach symbol : gx_acquire_wrapped
-        gx_acquire_wrap_args += '-Wl,--wrap=' + symbol
-    endforeach
     gx_acquisition_test = executable('goodix521d-acquisition', 'goodix521d-acquisition.c',
         include_directories: goodix521d_inc,
         dependencies: libfprint_private_dep,
         link_with: libfprint_drivers,
-        link_whole: test_utils,
-        link_args: gx_acquire_wrap_args)
+        link_whole: test_utils)
     test('goodix521d-acquisition', gx_acquisition_test, suite: ['goodix521d', 'unit-tests'])
 endif
 if 'goodix521d' in drivers and gusb_dep.version().version_compare('>=0.4.0')
