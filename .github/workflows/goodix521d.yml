@@ -48,3 +48,41 @@ jobs:
         with:
           name: offline-test-log-${{ matrix.variant }}
           path: build/meson-logs/testlog.txt
+  egis-baseline-replay:
+    # Compare the unchanged upstream fixture with this branch on a runner that
+    # supports umockdev's Unix ioctl socket. Cloud build tests cannot provide it.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        revision: [upstream, current]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ matrix.revision == 'upstream' && '6f9479c3d55f847c1b3769f28ceb99227f9858cf' || github.sha }}
+      - name: Install real replay dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build pkg-config libglib2.0-dev libgusb-dev libgudev-1.0-dev libssl-dev libpixman-1-dev libcairo2-dev gobject-introspection libgirepository1.0-dev gir1.2-gusb-1.0 python3-gi python3-cairo umockdev
+      - name: Build introspected all-driver library
+        run: |
+          git rev-parse HEAD
+          meson setup build -Ddrivers=all -Dintrospection=true -Dgtk-examples=false -Ddoc=false -Dudev_rules_dir=/usr/lib/udev/rules.d -Dudev_hwdb_dir=/usr/lib/udev/hwdb.d
+          meson compile -C build
+      - name: Replay actual Egis cancellation fixture five times
+        run: |
+          meson test -C build egis_etu905 --repeat=5 --num-processes=1 --print-errorlogs
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          results = [json.loads(line) for line in Path('build/meson-logs/testlog.json').read_text().splitlines()]
+          assert len(results) == 5, results
+          assert all(item['result'] == 'OK' for item in results), results
+          PY
+      - name: Preserve replay logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: egis-replay-${{ matrix.revision }}
+          path: build/meson-logs/
