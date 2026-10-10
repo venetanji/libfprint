@@ -109,7 +109,8 @@ jobs:
           ref: ${{ matrix.revision == 'upstream' && '6f9479c3d55f847c1b3769f28ceb99227f9858cf' || github.sha }}
       - name: Build with Arch packaging flags and LTO
         run: |
-          git rev-parse HEAD
+          # Checkout is owned by the host runner UID, unlike this container.
+          git -c safe.directory="$PWD" rev-parse HEAD
           source /etc/makepkg.conf
           export CFLAGS="$CFLAGS -flto=auto"
           export CXXFLAGS="$CXXFLAGS -flto=auto"
