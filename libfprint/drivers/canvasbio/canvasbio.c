@@ -262,8 +262,8 @@ struct _FpiDeviceCanvasbio
   FpDevice parent;
 
   /* Lifecycle */
-  gboolean      deactivating;
-  gboolean      deactivation_in_progress;
+  gboolean deactivating;
+  gboolean deactivation_in_progress;
 
   /* NCC enrollment state */
   guint8        *enroll_images[5];
@@ -295,7 +295,7 @@ struct _FpiDeviceCanvasbio
   gboolean force_recovery;
   gboolean initial_activation_done;
 
-  };
+};
 
 G_DECLARE_FINAL_TYPE (FpiDeviceCanvasbio, fpi_device_canvasbio, FPI, DEVICE_CANVASBIO, FpDevice)
 G_DEFINE_TYPE (FpiDeviceCanvasbio, fpi_device_canvasbio, FP_TYPE_DEVICE)
@@ -1085,7 +1085,8 @@ cb2000_minutiae_precheck_cb (GObject *source, GAsyncResult *res, gpointer user_d
       fpi_ssm_next_state (ctx->ssm);
       g_free (ctx);
       return;
-    }  if (ctx->action == FPI_DEVICE_ACTION_CAPTURE)
+    }
+  if (ctx->action == FPI_DEVICE_ACTION_CAPTURE)
     {
       /* Capture action must complete explicitly after async precheck. */
       fpi_device_capture_complete (ctx->dev, ctx->img, NULL);
@@ -1404,11 +1405,11 @@ cmd_transfer_cb (FpiUsbTransfer *transfer,
           g_error_matches (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_IO))
         {
           /* If the device sent more data than requested (overflow), tolerate it */
-          if (transfer->actual_length >= cmd->len || transfer->actual_length == (gsize) -1)
+          if (transfer->actual_length >= cmd->len || transfer->actual_length == (gsize) - 1)
             {
               fp_warn ("Command transfer error tolerated (likely overflow): %s", error->message);
               g_clear_error (&error);
-              if (transfer->actual_length == (gsize) -1)
+              if (transfer->actual_length == (gsize) - 1)
                 transfer->actual_length = cmd->len;
             }
           else
@@ -2655,6 +2656,7 @@ early_placement_delay_cb (gpointer user_data)
   FpiSsm *ssm = user_data;
   FpDevice *dev = fpi_ssm_get_device (ssm);
   FpiDeviceCanvasbio *self = FPI_DEVICE_CANVASBIO (dev);
+
   self->early_placement_detected = FALSE;
 
   if (self->deactivating)
@@ -3266,7 +3268,7 @@ cycle_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
     else if (action == FPI_DEVICE_ACTION_VERIFY ||
              action == FPI_DEVICE_ACTION_IDENTIFY)
       {
-        
+
 
         if (self->verify_result == FPI_MATCH_ERROR)
           {
@@ -3282,7 +3284,7 @@ cycle_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
       }
     else if (action == FPI_DEVICE_ACTION_CAPTURE)
       {
-        
+
         /* capture_complete already called in SUBMIT_IMAGE success path. */
         return;
       }
@@ -3443,7 +3445,8 @@ dev_action_common_init (FpiDeviceCanvasbio *self)
   self->deactivation_in_progress = FALSE;
   self->initial_activation_done = FALSE;
   self->force_recovery = FALSE;
-  self->previous_norm_valid = FALSE;}
+  self->previous_norm_valid = FALSE;
+}
 
 static void
 dev_enroll (FpDevice *device)
