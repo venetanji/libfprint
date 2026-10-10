@@ -1400,12 +1400,23 @@ cmd_transfer_cb (FpiUsbTransfer *transfer,
 
   if (error)
     {
-      if (error->message && strstr (error->message, "more data than requested"))
+      if (g_error_matches (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_FAILED) ||
+          g_error_matches (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_IO))
         {
-          fp_warn ("Command transfer overflow tolerated: %s", error->message);
-          g_clear_error (&error);
-          if (transfer->actual_length == 0 || transfer->actual_length == (gsize) -1)
-            transfer->actual_length = cmd->len;
+          /* If the device sent more data than requested (overflow), tolerate it */
+          if (transfer->actual_length >= cmd->len || transfer->actual_length == (gsize) -1)
+            {
+              fp_warn ("Command transfer error tolerated (likely overflow): %s", error->message);
+              g_clear_error (&error);
+              if (transfer->actual_length == (gsize) -1)
+                transfer->actual_length = cmd->len;
+            }
+          else
+            {
+              fp_warn ("Command transfer failed: %s", error->message);
+              fpi_ssm_mark_failed (transfer->ssm, error);
+              return;
+            }
         }
       else
         {

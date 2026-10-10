@@ -16,7 +16,7 @@
 #include <math.h>
 #include <string.h>
 
-#include "drivers/canvasbio-ncc.h"
+#include "drivers/canvasbio/canvasbio-ncc.h"
 
 static void
 test_ncc_decision_labels (void)
