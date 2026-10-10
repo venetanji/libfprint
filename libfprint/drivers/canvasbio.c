@@ -1387,7 +1387,7 @@ cb2000_try_device_assisted_verify (FpiDeviceCanvasbio *self,
     case CB2000_VERIFY_ACK_DEVICE_NOMATCH:
       fp_warn ("[ EXP ] device-assisted verify: finalize ACK indicates no-match (status=0x%02x)",
                self->verify_ack_status_last);
-      fpi_device_verify_report (dev, FPI_MATCH_FAIL, NULL, NULL);
+      self->verify_result = FPI_MATCH_FAIL;
       return TRUE;
 
     case CB2000_VERIFY_ACK_READY:
@@ -3693,7 +3693,7 @@ cycle_run_state (FpiSsm *ssm, FpDevice *dev)
                          cb2000_verify_route_label (self->verify_route_last),
                          self->experimental_device_assisted_verify,
                          self->verify_device_status_short_circuit);
-                fpi_device_verify_report (dev, FPI_MATCH_FAIL, NULL, NULL);
+                self->verify_result = FPI_MATCH_FAIL;
                 fpi_ssm_jump_to_state (ssm, CYCLE_WAIT_REMOVAL);
                 break;
               }
@@ -3860,7 +3860,7 @@ cycle_run_state (FpiSsm *ssm, FpDevice *dev)
             if (self->verify_device_status_short_circuit)
               {
                 self->verify_route_last = CB2000_VERIFY_ROUTE_DEVICE_NOMATCH;
-                fpi_device_verify_report (dev, FPI_MATCH_FAIL, NULL, NULL);
+                self->verify_result = FPI_MATCH_FAIL;
                 fpi_ssm_jump_to_state (ssm, CYCLE_WAIT_REMOVAL);
               }
             else
