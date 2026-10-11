@@ -1,8 +1,11 @@
 /* Source-executed cancellation and reentrant USB/TLS lifetime checks. */
 #include <gio/gio.h>
 #include <stdio.h>
+#include <openssl/crypto.h>
 typedef GObject FpDevice;
 typedef FpDevice FpiDeviceGoodixTls;
+typedef struct {gint interface;} FpiDeviceGoodixTlsClass;
+static FpiDeviceGoodixTlsClass cls;
 typedef struct {FpDevice *dev;gint stage;} FpiSsm;
 typedef struct {guint8 unused;} GoodixTlsServer;
 typedef void (*GoodixNoneCallback)(FpDevice *,gpointer,GError *);
@@ -21,7 +24,8 @@ typedef struct {
  GoodixCmdCallback callback;gpointer user_data;
  gint64 fdt_event_deadline;
  guint8 fdt_event_opcode;
- gboolean terminal_error;
+ gboolean terminal_error,configuration_conflict,first_error_logged,tls_psk_set;
+ guint64 configuration_generation;gint rx_endpoint;gssize rx_requested,rx_actual;guint8 tls_psk[32];
 } FpiDeviceGoodixTlsPrivate;
 static FpiDeviceGoodixTlsPrivate state;
 static guint cancel_log_count;
@@ -37,6 +41,7 @@ static guint commands,tls_callbacks,transitions,failed_ssms,send_calls,event_cal
 static gint command_error,tls_error;
 static gboolean cancel_in_send, fail_send, reenter_cancel;
 #define FPI_DEVICE_GOODIXTLS(d) (d)
+#define FPI_DEVICE_GOODIXTLS_GET_CLASS(d) ((void)(d),&cls)
 #define GOODIX_FLAGS_TLS 0xb0
 #define fp_dbg(...) ((void)0)
 static FpiDeviceGoodixTlsPrivate *fpi_device_goodixtls_get_instance_private(FpDevice *d){(void)d;return &state;}
@@ -56,6 +61,11 @@ static void goodix_read_tls(FpDevice *d,GoodixCmdCallback cb,gpointer p){(void)d
 static int goodix_tls_client_recv(GoodixTlsServer *s,guint8 *b,guint16 n){(void)s;g_assert_cmpuint(n,>,0);b[0]=0x16;return 1;}
 static gboolean goodix_send_pack(FpDevice *d,guint8 flags,guint8 *b,guint16 n,GDestroyNotify f,GError **e){(void)b;(void)f;g_assert_cmpuint(flags,==,GOODIX_FLAGS_TLS);g_assert_cmpuint(n,==,1);send_calls++;if(cancel_in_send)goodix_cancel(d);if(fail_send)g_set_error_literal(e,G_IO_ERROR,G_IO_ERROR_FAILED,"late synchronous TX failure");return !fail_send;}
 static GSource *fpi_device_add_timeout(FpDevice *d,guint ms,void(*cb)(FpDevice*,gpointer),gpointer p,GDestroyNotify f){(void)d;(void)cb;(void)p;(void)f;GSource *source=g_timeout_source_new(ms);g_source_attach(source,NULL);g_source_unref(source);return source;}
+static gpointer fpi_device_get_usb_device(FpDevice *d){return d;}
+static guint releases;
+static gboolean g_usb_device_claim_interface(gpointer d,gint i,gint f,GError **e){(void)d;(void)i;(void)f;(void)e;return TRUE;}
+static gboolean g_usb_device_release_interface(gpointer d,gint i,gint f,GError **e){(void)d;(void)i;(void)f;(void)e;g_assert_null(state.fdt_up_callback);g_assert_null(state.fdt_up_timeout);g_assert_cmpuint(event_calls,==,1);g_assert_cmpuint(event_destroys,==,1);releases++;return TRUE;}
+static gboolean goodix_shutdown_tls(FpDevice *d,GError **e){(void)d;(void)e;return TRUE;}
 #include "cancel.inc"
 static void command_done(FpDevice *d,guint8 *b,guint16 n,gpointer p,GError *e){(void)b;(void)n;(void)p;commands++;command_error=e?e->code:0;g_clear_error(&e);if(reenter_cancel)goodix_cancel(d);}
 static void handshake_command_done(FpDevice *d,guint8 *b,guint16 n,gpointer p,GError *e){(void)d;(void)b;(void)n;commands++;command_error=e?e->code:0;fpi_ssm_mark_failed(p,e);}
@@ -114,5 +124,24 @@ int main(void){
  goodix_cancel(dev);g_assert_cmpuint(event_calls,==,1);g_assert_cmpuint(cancel_log_count,==,1);
  puts("PASS: DOWN cancellation retains direction-specific precancel counters and dispatches exactly once");
 
+ for(guint down=0;down<2;down++) {
+  reset(dev);GError *error=NULL;
+  if(down)goodix_wait_fdt_down(dev,30000,event_done,g_object_ref(dev),event_destroy);
+  else goodix_wait_fdt_up(dev,30000,event_done,g_object_ref(dev),event_destroy);
+  state.fdt_up_started=state.fdt_up_acknowledged=TRUE;state.fdt_up_phases_sent=state.fdt_up_acks=2;
+  state.operation_generation=state.fdt_up_operation+2;
+  GSource *old_timer=g_source_ref(state.fdt_up_timeout);
+  /* The close owner must cancel acquisition first, then cancel transport.
+   * dev_deinit alone intentionally does not dispatch independent waiters. */
+  goodix_cancel(dev);
+  g_assert_true(goodix_dev_deinit(dev,&error));g_assert_no_error(error);
+  g_assert_cmpuint(event_calls,==,1);g_assert_cmpuint(event_destroys,==,1);
+  g_assert_null(state.fdt_up_callback);g_assert_null(state.fdt_up_timeout);g_assert_true(g_source_is_destroyed(old_timer));g_source_unref(old_timer);
+  g_assert_true(goodix_dev_init(dev,&error));g_assert_no_error(error);state.configuration_missing=FALSE;
+  goodix_wait_fdt_down(dev,30000,event_done,g_object_ref(dev),event_destroy);
+  g_assert_nonnull(state.fdt_up_callback);g_assert_cmpuint(state.fdt_event_opcode,==,0x32);
+  goodix_cancel(dev);g_assert_cmpuint(event_calls,==,2);g_assert_cmpuint(event_destroys,==,2);
+ }
+ puts("PASS: real cancel then deinit drains ACKed UP/DOWN owners once and permits immediate fresh owner without old deadline");
  reset(dev);g_clear_object(&state.transfer_cancel_tkn);g_object_unref(dev);
  g_log_remove_handler(NULL,log_handler);g_clear_pointer(&cancel_log,g_free);return 0;}

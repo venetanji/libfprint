@@ -244,9 +244,11 @@ It outlives a completed public verify/identify action without consulting that
 action's cancellable. A new action waits for this guard before arming DOWN.
 A release fault before result publication suppresses that result; a fault after
 completion invalidates the future context without issuing a second result.
-Close and cancellation stop and drain the guard rather than waiting for a
-physical lift. Core finger-status resets on public completion do not count as
-validated removal. Lift after the reported result: a subsequent same-open
+Close and cancellation explicitly retire the transport event owner and its
+acquisition state machine before deinitializing transport and draining USB
+reads. Stopping the read loop alone does not retire the event timer. This
+cleanup does not wait for a physical lift. Core finger-status resets on public
+completion do not count as validated removal. Lift after the reported result: a subsequent same-open
 action may be waiting for that release and correctly issue no new PLACE cue. The narrow transport health exception allows only an
 acknowledged, current, unexpired UP guard, with all other health checks intact.
 

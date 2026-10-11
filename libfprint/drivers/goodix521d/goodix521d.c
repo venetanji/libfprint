@@ -165,7 +165,12 @@ static gboolean
 stop_transport (FpiDeviceGoodix521d *self, GError **error)
 {
   clear_release_guard(self);
-  goodix_acquisition_invalidate_context(self->acquisition);
+  /* A delivered image can leave an independently owned removal SSM alive.
+   * Retire it before deinit: stopping RX alone leaves its event timer/owner
+   * blocking the next bootstrap. Clear driver ownership first so intentional
+   * close cancellation cannot invalidate the accepted reference snapshot. */
+  goodix_acquisition_cancel(self->acquisition);
+  goodix_cancel(FP_DEVICE(self));
   if (!self->transport_open) return TRUE;
   if (!goodix_dev_deinit (FP_DEVICE (self), error)) return FALSE;
   self->transport_open = FALSE;

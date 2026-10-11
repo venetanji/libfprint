@@ -504,6 +504,25 @@ if 'goodix521d' in drivers
         link_with: libfprint_drivers,
         link_whole: test_utils)
     test('goodix521d-acquisition', gx_acquisition_test, suite: ['goodix521d', 'unit-tests'])
+    # Compose real acquisition/FpiSsm with the production transport close path.
+    # Generate unchanged source slices at build time; no compiler invocation or
+    # compile_commands.json is needed when running the installed test binary.
+    gx_acquisition_transport_source = custom_target('goodix521d-acquisition-transport-source',
+        input: files('../libfprint/drivers/goodix521d/transport/goodix.c',
+                     '../libfprint/drivers/goodix521d/goodix521d.c'),
+        output: 'goodix521d-acquisition-transport-generated.h',
+        command: [python3, files('goodix521d-acquisition-transport-generate.py'),
+                  '@INPUT0@', '@INPUT1@', '@OUTPUT@'])
+    gx_acquisition_transport_test = executable('goodix521d-acquisition-transport',
+        'goodix521d-acquisition.c', gx_acquisition_transport_source,
+        c_args: ['-DGOODIX_COMPOSED_TRANSPORT_TEST'],
+        include_directories: goodix521d_inc,
+        dependencies: libfprint_private_dep,
+        link_with: libfprint_drivers,
+        link_whole: test_utils)
+    test('goodix521d-acquisition-transport', gx_acquisition_transport_test,
+        args: ['-p', '/goodix521d/composed'],
+        suite: ['goodix521d', 'unit-tests'])
 endif
 if 'goodix521d' in drivers and gusb_dep.version().version_compare('>=0.4.0')
     gx_json_dep = dependency('json-glib-1.0', required: false)

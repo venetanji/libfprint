@@ -116,6 +116,9 @@ static void reference_image(FpDevice *, guint8 *, guint16, GoodixImageCallback, 
 static void reference_blob(guint16, guint8 [GX_BLOB_SIZE]);
 static const guint8 reference_seed[16];
 static void assert_adc_context_cleared(void);
+#ifdef GOODIX_COMPOSED_TRANSPORT_TEST
+#include "goodix521d-acquisition-transport.h"
+#endif
 
 static void
 trace(const char *step)
@@ -205,6 +208,9 @@ mock_goodix_wait_fdt_up(FpDevice *dev,guint timeout,GoodixDefaultCallback cb,
   g_assert_cmpuint(contact.restore_acks,==,contact.frames);
   g_assert_null(contact.up_wait.callback);g_assert_null(contact.down_wait.callback);
   contact.up_wait=(EventWait){cb,data,destroy};
+#ifdef GOODIX_COMPOSED_TRANSPORT_TEST
+  if(composed_mode)composed_register_up(dev,timeout);
+#endif
 }
 
 static void
@@ -286,6 +292,12 @@ mock_goodix_send_protocol(FpDevice *dev,guint8 opcode,guint8 *payload,guint16 le
     g_assert_cmpuint(contact.none_reports,==,0);
     g_assert_cmpuint(contact.status,==,FP_FINGER_STATUS_NEEDED|FP_FINGER_STATUS_PRESENT);
     g_assert_cmpuint(contact.up_arms++,==,phase);
+#ifdef GOODIX_COMPOSED_TRANSPORT_TEST
+    if(composed_mode) {
+      composed_send_protocol(dev,opcode,payload,length,destroy,checksum,timeout,reply,cb,data);
+      return;
+    }
+#endif
     if (!phase) {
       GError *error=contact_error(FAIL_UP0);
       if (options.cancel_command==FAIL_UP0) goodix_acquisition_cancel(capture);
@@ -1811,6 +1823,130 @@ cache_stage_rejects_active_ready_and_pending_contexts(void)
   reference_teardown();
 }
 
+
+#ifdef GOODIX_COMPOSED_TRANSPORT_TEST
+static void
+composed_command_complete(FpDevice *dev,guint8 *b,guint16 n,gpointer data,GError *error)
+{
+  (void)b;(void)n;(void)data;g_assert_true(dev==test_device);
+  g_assert_no_error(error);composed_commands++;
+}
+
+static void
+composed_reads_drained(FpDevice *dev,gpointer data,GError *error)
+{
+  (void)data;g_assert_true(dev==test_device);g_assert_no_error(error);
+  g_assert_cmpuint(composed_drained++,==,0);
+  g_assert_cmpuint(composed_state.read_outstanding,==,0);
+  g_assert_cmpuint(composed_claims,==,1);
+  g_assert_cmpuint(composed_callbacks,==,1);g_assert_cmpuint(composed_destroys,==,1);
+  g_assert_true(composed_dev_init(dev,&error));g_assert_no_error(error);
+  composed_state.configuration_missing=FALSE;composed_state.inited=TRUE;
+}
+
+static void
+composed_close_reopen(gconstpointer argument)
+{
+  guint variant=GPOINTER_TO_UINT(argument);
+  GError *error=NULL;
+  GxImage saved_reference;guint8 saved_seed[16],otp[64];
+  memset(&composed_state,0,sizeof composed_state);
+  composed_callbacks=composed_destroys=composed_claims=composed_releases=0;
+  composed_commands=composed_packets=composed_drained=0;
+  composed_shutdown_ok=variant!=2;composed_reenter_cancel=variant==1;
+  contact_setup();
+  g_assert_true(composed_dev_init(test_device,&error));g_assert_no_error(error);
+  /* The test's authenticated/configured transport boundary; no hardware I/O. */
+  composed_state.configuration_missing=FALSE;composed_state.inited=TRUE;
+  composed_mode=TRUE;options.hold_up_event=TRUE;contact_start();
+  g_assert_cmpuint(contact.done,==,1);g_assert_cmpuint(contact.released,==,0);
+  g_assert_cmpuint(composed_state.fdt_up_acks,==,2);
+  g_assert_nonnull(composed_state.fdt_up_timeout);
+  g_assert_true(goodix_acquisition_release_pending(capture,NULL));
+  g_assert_true(goodix_acquisition_copy_reference(capture,&saved_reference,saved_seed));
+  GxImage immutable_reference=saved_reference;guint8 immutable_seed[16];
+  memcpy(immutable_seed,saved_seed,16);memcpy(otp,capture->otp,sizeof otp);
+  /* A genuinely old USB read owner retains its token across close/reopen. */
+  GoodixReadOwner *late=g_new0(GoodixReadOwner,1);
+  late->dev=g_object_ref(test_device);late->cancel=g_object_ref(composed_state.transfer_cancel_tkn);
+  late->loop=composed_state.read_loop_generation;composed_state.read_outstanding++;
+  ComposedDriver driver={.device=test_device,.acquisition=capture,
+    .transport_open=variant!=3,.release_pending=TRUE,.contact_waiting=TRUE,
+    .release_generation=capture->generation,.waiting_action_id=99};
+  composed_driver=&driver;
+  /* Completion is synchronous, without dispatching/waiting for the old source. */
+  g_assert_cmpint(g_source_get_ready_time(composed_state.fdt_up_timeout),>,g_get_monotonic_time());
+  gboolean stopped=stop_transport(&driver,&error);
+  if(variant==2) {
+    g_assert_false(stopped);g_assert_error(error,G_IO_ERROR,G_IO_ERROR_TIMED_OUT);
+    g_clear_error(&error);g_assert_true(driver.transport_open);
+    g_assert_nonnull(composed_state.transfer_cancel_tkn);g_assert_cmpuint(composed_releases,==,0);
+  } else {g_assert_true(stopped);g_assert_no_error(error);}
+  g_assert_cmpuint(contact.done,==,1);g_assert_cmpuint(contact.released,==,1);
+  g_assert_error(release_error,G_IO_ERROR,G_IO_ERROR_CANCELLED);
+  g_assert_cmpuint(composed_callbacks,==,1);g_assert_cmpuint(composed_destroys,==,1);
+  g_assert_null(composed_state.fdt_up_callback);g_assert_null(composed_state.fdt_up_timeout);
+  g_assert_null(capture->ssm);g_assert_false(goodix_acquisition_release_pending(capture,NULL));
+  assert_adc_context_cleared();
+  g_assert_cmpmem(&saved_reference,sizeof saved_reference,&immutable_reference,sizeof immutable_reference);
+  g_assert_cmpmem(saved_seed,16,immutable_seed,16);
+  if(variant==2) {
+    composed_shutdown_ok=TRUE;g_assert_true(stop_transport(&driver,&error));g_assert_no_error(error);
+  } else if(variant==3) {
+    /* transport_open=FALSE still cancels owners; this deliberately inconsistent
+     * fixture alone retains the fake interface/token for explicit cleanup. */
+    g_assert_true(composed_dev_deinit(test_device,&error));g_assert_no_error(error);
+  }
+  g_assert_cmpuint(composed_releases,==,1);
+  g_assert_true(stop_transport(&driver,&error));g_assert_no_error(error);
+  g_assert_cmpuint(composed_callbacks,==,1);g_assert_cmpuint(composed_destroys,==,1);
+  g_assert_cmpuint(composed_releases,==,1);
+  /* Reopen is reachable only through the real asynchronous drain callback. */
+  composed_wait_read_idle(test_device,2000,composed_reads_drained,NULL);
+  while(g_main_context_iteration(NULL,FALSE));
+  g_assert_cmpuint(composed_drained,==,0);g_assert_cmpuint(composed_claims,==,1);
+  g_assert_cmpuint(composed_state.read_outstanding,==,1);
+  g_assert_null(composed_state.transfer_cancel_tkn);
+  /* A late successful old UP packet is just as stale as a cancellation error.
+   * Both must retire the retained RX without reaching the packet parser. */
+  g_autofree guint8 *protocol=NULL,*packet=NULL;guint32 protocol_length,packet_length;
+  goodix_encode_protocol(0x34,contact.up_reply,20,TRUE,FALSE,&protocol,&protocol_length);
+  goodix_encode_pack(GOODIX_FLAGS_MSG_PROTOCOL,protocol,protocol_length,FALSE,&packet,&packet_length);
+  FpiUsbTransfer transfer={.buffer=packet,.actual_length=packet_length};
+  composed_receive_data_cb(&transfer,test_device,late,variant>=2 ?
+    g_error_new_literal(G_IO_ERROR,G_IO_ERROR_CANCELLED,"late old read") : NULL);
+  g_assert_cmpuint(composed_state.read_outstanding,==,0);g_assert_cmpuint(composed_packets,==,0);
+  g_assert_cmpuint(composed_callbacks,==,1);g_assert_cmpuint(composed_destroys,==,1);
+  g_assert_cmpuint(composed_drained,==,0);g_assert_cmpuint(composed_claims,==,1);
+  gint64 drain_deadline=g_get_monotonic_time()+2*G_USEC_PER_SEC;
+  while(!composed_drained) {
+    g_assert_cmpint(g_get_monotonic_time(),<,drain_deadline);
+    while(g_main_context_iteration(NULL,FALSE));
+    if(!composed_drained)g_usleep(1000);
+  }
+  g_assert_cmpuint(composed_claims,==,2);
+  guint8 command[2]={0,0};
+  composed_send_protocol(test_device,0xa4,command,2,NULL,TRUE,GOODIX_TIMEOUT,FALSE,composed_command_complete,NULL);
+  g_assert_cmpuint(composed_commands,==,1);g_assert_false(composed_state.ack);
+  g_assert_null(composed_state.timeout);
+  goodix_acquisition_free(capture);
+  capture=goodix_acquisition_new(test_device,otp);
+  driver.acquisition=capture;driver.transport_open=TRUE;
+  g_assert_true(goodix_acquisition_stage_reference(capture,&saved_reference,saved_seed));
+  g_assert_true(goodix_acquisition_commit_reference(capture));
+  contact_reset(saved_seed);options.hold_up_event=TRUE;contact_start();
+  g_assert_cmpuint(contact.done,==,1);g_assert_cmpuint(contact.released,==,0);
+  g_assert_cmpuint(composed_state.fdt_up_acks,==,2);
+  g_assert_false(goodix_fdt_up_record(test_device,contact.up_reply,20));
+  goodix_fdt_up_maybe_complete(test_device);
+  assert_image_success();
+  g_assert_cmpuint(composed_callbacks,==,2);g_assert_cmpuint(composed_destroys,==,2);
+  g_assert_true(stop_transport(&driver,&error));g_assert_no_error(error);
+  g_assert_cmpuint(composed_releases,==,2);g_assert_cmpuint(composed_claims,==,2);
+  composed_driver=NULL;composed_mode=FALSE;contact_teardown();
+}
+#endif
+
 int main(int argc, char **argv)
 {
   g_test_init(&argc,&argv,NULL);
@@ -1864,6 +2000,12 @@ int main(int argc, char **argv)
   g_test_add_func("/goodix521d/acquisition/cache-stage-requires-strict-85-percent-interior",cache_stage_requires_strict_85_percent_interior);
   g_test_add_func("/goodix521d/acquisition/cache-helpers-reject-null-and-alias-without-mutation",cache_helpers_reject_null_and_alias_without_mutation);
   g_test_add_func("/goodix521d/acquisition/cache-stage-rejects-active-ready-and-pending-contexts",cache_stage_rejects_active_ready_and_pending_contexts);
+#ifdef GOODIX_COMPOSED_TRANSPORT_TEST
+  g_test_add_data_func("/goodix521d/composed/early-result-close-reopen",GUINT_TO_POINTER(0),composed_close_reopen);
+  g_test_add_data_func("/goodix521d/composed/close-reentrant-cancel",GUINT_TO_POINTER(1),composed_close_reopen);
+  g_test_add_data_func("/goodix521d/composed/close-shutdown-failure-retry",GUINT_TO_POINTER(2),composed_close_reopen);
+  g_test_add_data_func("/goodix521d/composed/close-already-closed-owner",GUINT_TO_POINTER(3),composed_close_reopen);
+#endif
   int result=g_test_run();
   g_log_remove_handler("libfprint-goodix521d",log_handler);g_array_unref(timing_records);
   return result;

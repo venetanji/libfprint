@@ -142,6 +142,9 @@ static struct {
   gboolean release_pending, forbid_cancellable, release_error_on_report;
   guint64 release_generation;
   guint release_health_queries;
+  gboolean acquisition_cancelled, track_close_order;
+  guint cleanup_serial, cache_copy_order, acquisition_cancel_order, transport_cancel_order, deinit_order;
+  guint release_cancellations;
   void (*release_callback)(FpDevice *, guint64, gpointer, GError *);
   gpointer release_data;
   GoodixAcquired capture_callback;
@@ -372,6 +375,8 @@ gboolean mock_dev_init (FpDevice *device, GError **error)
 }
 gboolean mock_dev_deinit (FpDevice *device, GError **error)
 {
+  /* Real deinit releases resources; it does not consume detached FDT owners. */
+  if (state.track_close_order && !state.deinit_order) state.deinit_order=++state.cleanup_serial;
   state.stops++;
   if (state.fail_cleanup) {
     g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT, "synthetic cleanup failure");
@@ -382,6 +387,18 @@ gboolean mock_dev_deinit (FpDevice *device, GError **error)
 void mock_cancel (FpDevice *device)
 {
   state.cancels++;
+  if (state.track_close_order && !state.transport_cancel_order)
+    state.transport_cancel_order=++state.cleanup_serial;
+  if (state.release_pending) {
+    /* Match the independent transport waiter: only goodix_cancel consumes its
+     * timer/owner and synchronously unwinds the acquisition SSM. */
+    g_assert_true(state.acquisition_cancelled);
+    g_assert_false(SELF(device)->release_pending);
+    state.release_pending=FALSE;
+    state.release_cancellations++;
+    state.release_callback(device,state.release_generation,state.release_data,
+      g_error_new_literal(G_IO_ERROR,G_IO_ERROR_CANCELLED,"synthetic release owner cancellation"));
+  }
   if (state.cancel_unwinds_error) {
     operation_error (device, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED,
                                                  "synchronous command unwind"));
@@ -436,12 +453,12 @@ gboolean mock_configure (const guint8 factory[64], guint8 config[256], GError **
 GoodixAcquisition *mock_acquisition_new (FpDevice *device, const guint8 factory[64])
 {
   state.acquisitions_created++;
-  state.release_generation=0;
+  state.release_generation=0;state.acquisition_cancelled=FALSE;
   return (GoodixAcquisition *) g_malloc0 (1);
 }
 void mock_acquisition_invalidate_context (GoodixAcquisition *acquisition) {
+  /* Invalidating detector bytes does not finish the SSM or FDT waiter. */
   state.acquisition_ready=FALSE;state.invalidations++;
-  state.release_pending=FALSE;
 }
 gboolean mock_acquisition_commit_reference (GoodixAcquisition *acquisition) {
   if (state.commit_failure) return FALSE;
@@ -450,6 +467,7 @@ gboolean mock_acquisition_commit_reference (GoodixAcquisition *acquisition) {
 gboolean mock_acquisition_copy_reference (GoodixAcquisition *acquisition, GxImage *image, guint8 seed[16])
 {
   state.cache_copies++;
+  if (state.track_close_order && !state.cache_copy_order) state.cache_copy_order=++state.cleanup_serial;
   if (!state.acquisition_ready || state.cache_copy_fail) return FALSE;
   *image=state.accepted_reference;memcpy(seed,state.accepted_seed,16);return TRUE;
 }
@@ -466,7 +484,13 @@ void mock_acquisition_set_release_callback (GoodixAcquisition *acquisition,
 { state.release_callback=callback;state.release_data=data; }
 gboolean mock_acquisition_release_pending (GoodixAcquisition *acquisition, guint64 *generation)
 { if (generation) *generation=state.release_generation;return state.release_pending; }
-void mock_acquisition_cancel (GoodixAcquisition *acquisition) { state.release_pending=FALSE; }
+void mock_acquisition_cancel (GoodixAcquisition *acquisition)
+{
+  if (state.track_close_order && !state.acquisition_cancel_order)
+    state.acquisition_cancel_order=++state.cleanup_serial;
+  state.acquisition_cancelled=TRUE;
+  mock_acquisition_invalidate_context(acquisition);
+}
 void mock_acquisition_free (GoodixAcquisition *acquisition)
 {
   state.acquisitions_freed++;
@@ -483,6 +507,7 @@ void mock_acquisition_start (GoodixAcquisition *acquisition, gboolean reference,
 {
   if (!reference) g_assert_true(state.acquisition_ready);
   g_assert_false(state.release_pending);
+  state.acquisition_cancelled=FALSE;
   state.captures++;
   state.capture_reference=reference;
   if (reference) {
@@ -3032,10 +3057,87 @@ test_cache_scalar_log (gconstpointer data)
   g_clear_pointer(&cache_log_records,g_ptr_array_unref);
 }
 
+static void
+test_close_consumes_detached_owner_before_deinit (void)
+{
+  reset_state();
+  FpDevice *device=new_public_device();open_with_reference(device);
+  g_autoptr(FpPrint) print=make_verification_print(device);
+  start_public_match(device,print,ACTION_VERIFY);deliver_held_image(device,1);
+  wait_public_callbacks(2);
+  guint64 old_generation=state.release_generation;
+  gpointer old_data=state.release_data;
+  void (*old_callback)(FpDevice *,guint64,gpointer,GError *)=state.release_callback;
+  state.track_close_order=TRUE;state.hold_drain=TRUE;
+  fp_device_close(device,NULL,public_close_done,NULL);
+  g_assert_cmpuint(state.release_cancellations,==,1);
+  g_assert_false(state.release_pending);
+  g_assert_false(SELF(device)->release_pending);
+  g_assert_cmpuint(state.cache_copy_order,>,0);
+  g_assert_cmpuint(state.cache_copy_order,<,state.acquisition_cancel_order);
+  g_assert_cmpuint(state.acquisition_cancel_order,<,state.transport_cancel_order);
+  g_assert_cmpuint(state.transport_cancel_order,<,state.deinit_order);
+  g_assert_cmpuint(state.usb_closes,==,0);
+  g_assert_true(SELF(device)->reference_cache.pending_close);
+  g_assert_false(SELF(device)->reference_cache.valid);
+  /* Repeated cleanup is harmless after the synchronous owner was consumed. */
+  g_autoptr(GError) error=NULL;
+  g_assert_true(stop_transport(SELF(device),&error));
+  g_assert_no_error(error);
+  g_assert_cmpuint(state.release_cancellations,==,1);
+  release_read_drain(NULL);wait_public_callbacks(3);
+  g_assert_true(state.public_success);
+  g_assert_true(SELF(device)->reference_cache.valid);
+  g_assert_cmpuint(state.usb_closes,==,1);
+  state.track_close_order=FALSE;state.hold_drain=FALSE;
+  fp_device_open(device,NULL,public_open_done,NULL);wait_public_callbacks(4);
+  g_assert_true(state.public_success);
+  g_assert_cmpuint(state.starts,==,2);
+  g_assert_cmpuint(state.reference_captures,==,1);
+  g_assert_cmpuint(state.cache_stages,==,1);
+  start_public_match(device,print,ACTION_VERIFY);deliver_held_image(device,2);
+  wait_public_callbacks(5);
+  old_callback(device,old_generation,old_data,
+    g_error_new_literal(G_IO_ERROR,G_IO_ERROR_TIMED_OUT,"late old release owner"));
+  while(g_main_context_iteration(NULL,FALSE));
+  g_assert_true(SELF(device)->reference_valid);
+  g_assert_true(SELF(device)->release_pending);
+  g_assert_cmpuint(state.completed[ACTION_VERIFY],==,2);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  g_clear_object(&print);finish_state(device);
+}
+
+static void
+test_stop_retires_owner_without_open_transport (void)
+{
+  reset_state();
+  FpDevice *device=new_public_device();open_with_reference(device);
+  g_autoptr(FpPrint) print=make_verification_print(device);
+  start_public_match(device,print,ACTION_VERIFY);deliver_held_image(device,1);
+  wait_public_callbacks(2);
+  /* A prior partial teardown may have already reset this flag. Independent
+   * command/FDT ownership must still be cancelled before the early return. */
+  SELF(device)->transport_open=FALSE;
+  g_autoptr(GError) error=NULL;
+  g_assert_true(stop_transport(SELF(device),&error));
+  g_assert_no_error(error);
+  g_assert_cmpuint(state.release_cancellations,==,1);
+  g_assert_false(state.release_pending);
+  g_assert_false(SELF(device)->release_pending);
+  g_assert_cmpuint(state.stops,==,0);
+  g_assert_true(stop_transport(SELF(device),&error));
+  g_assert_cmpuint(state.release_cancellations,==,1);
+  g_assert_cmpuint(state.stops,==,0);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  g_clear_object(&print);finish_state(device);
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func("/goodix521d/release/stop-without-open-transport",test_stop_retires_owner_without_open_transport);
+  g_test_add_func("/goodix521d/release/close-consumes-owner-before-deinit",test_close_consumes_detached_owner_before_deinit);
   const gchar *cache_logs[]={"staged","mismatch-silent","stage-failed-silent","boot-failed-silent"};
   for (guint i=0;i<G_N_ELEMENTS(cache_logs);i++) {
     g_autofree gchar *path=g_strdup_printf("/goodix521d/cache/log-%s",cache_logs[i]);

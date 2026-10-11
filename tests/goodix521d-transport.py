@@ -113,7 +113,9 @@ def main():
                                 'static void on_goodix_tls_server_ready') +
                         segment(source, 'enum goodix_tls_handshake_stages',
                                 'static void do_tls_handshake') +
-                        segment(source, 'void goodix_cancel', '// ---- TLS SECTION END ----'))
+                        segment(source, 'void goodix_cancel', '// ---- TLS SECTION END ----') +
+                        segment(source, 'gboolean goodix_dev_init', 'void goodix_reset_state') +
+                        segment(source, 'gboolean goodix_dev_deinit', '// ---- DEV SECTION END ----'))
         (build / 'cancel.inc').write_text(cancellation)
         opening = stop_loop + segment(source, 'gboolean goodix_dev_init',
                                       '// ---- DEV SECTION END ----')
