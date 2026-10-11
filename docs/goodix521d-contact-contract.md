@@ -44,8 +44,10 @@ those IRQ bits alone in a manual snapshot do not invalidate the context.
    updates future image DACs via59bc8/58888, then restores022c=020a with
    acknowledged opcode80 payload `00 2c 02 0a 02` before UP (5a2bc/5a2f7).
    Current image pixels remain unchanged; no quality-selection loop is used.
-5. Opcode34: both ordered UP ACKs and a current20-byte IRQ0200 event. Only then
-   publish removal, update the DOWN seed, and hand a contact to preprocessing.
+5. Opcode34: after both ordered arm ACKs, hand the owned image to
+   preprocessing without waiting for removal. Keep a separate release guard.
+   Only a current20-byte IRQ0200 event may update the DOWN seed and permit
+   another capture. The guard remains independent of public result completion.
 
 DOWN builder5ae3c–5af1a uses a zeroed40-byte payload: byte0=9c for the qualified
 initial globals;1=1;2..9=factory FDT DAC LE16;10..25=DOWN seed;26=phase;27=0;
@@ -99,3 +101,38 @@ differs from older Linux39-byte requests ending in0. This is a real firmware
 setup difference; it is not labeled a recovered settling count or a DAC offset.
 Consequently old saturated first-frame bursts do not prove current first-frame
 behavior. Physical first-capture quality remains a hardware validation item.
+
+## Early sample publication
+
+Windows67850→67b15→6da00→6dae2→6a7a4 completes the pending sample request
+through the WDF table at6a97a;6dae7 clears the request. This precedes68692
+setting contact flag+cc and687c7 arming UP. It proves sample publication order,
+not the eventual WBF matcher completion time. A later DOWN handler682ce checks
++cc and rearms UP rather than capturing. New request6c08d likewise selects UP
+when+cc remains set. Valid UP clears+cc at69435 before next DOWN.
+
+Linux follows this separation with its own generation-owned release guard,
+but waits for both arm ACKs before image publication. Within one public-open session, no reference-refresh
+candidate or new contact bypasses validated removal. A result delivered before
+release does not assert absence or make the next contact eligible.
+
+## Retained accepted reference after restoration
+
+The pinned power-loss handler5f770 marks recovery and5f7bf calls5f304. That
+path invokes sensor table+38 (55020) to regenerate factory configuration/DACs
+and table+40 to upload, without clearing accepted reference-ready+c0 or
+ImageBase+128. Request0 startup tests+c0 at66ef8 and uses retained-reference
+initialization5eba0 at66f4d; it does not necessarily call696cc again. Thus an
+uninterrupted MCU/transport generation is not a demonstrated prerequisite for
+retaining the accepted raw baseline. Disk cache parsing alone still does not
+set readiness.
+
+Linux retains only an accepted raw reference/F1 seed after clean close on the
+same device object, with exact factory/config/profile binding. Full reset, key
+verification, configuration restoration and TLS authentication still precede
+cache staging and fresh processing initialization. Old detector/contact/event
+ownership and adaptive/exposure history do not survive. The normal-close
+cancellation of an owed UP guard is expected cleanup; a new public session
+requires a fresh authenticated capture, rather than treating cached data as
+a match or asserting physical absence. Runtime faults and failed restoration
+remove cache eligibility.

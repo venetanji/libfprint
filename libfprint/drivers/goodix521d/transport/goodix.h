@@ -289,3 +289,8 @@ typedef struct {
 } GoodixTransportHealth;
 gboolean goodix_transport_health(FpDevice *dev, GoodixTransportHealth *snapshot,
                                   GError **error);
+/* Main-thread, read-only check allowing an ACKed current UP detector only.
+ * Does not consume the event or permit another capture before release. */
+gboolean goodix_transport_health_during_release(FpDevice *dev,
+                                                GoodixTransportHealth *snapshot,
+                                                GError **error);

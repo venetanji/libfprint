@@ -22,6 +22,7 @@
 #define goodix_wait_read_idle mock_wait_read_idle
 #define goodix_dev_init mock_dev_init
 #define goodix_transport_health mock_transport_health
+#define goodix_transport_health_during_release mock_transport_health_during_release
 #define goodix_dev_deinit mock_dev_deinit
 #define goodix_cancel mock_cancel
 #define goodix_start_read_loop mock_start_read_loop
@@ -38,8 +39,12 @@
 #define goodix521d_read_private mock_read_private
 #define goodix521d_configure mock_configure
 #define goodix_acquisition_cancel mock_acquisition_cancel
+#define goodix_acquisition_set_release_callback mock_acquisition_set_release_callback
+#define goodix_acquisition_release_pending mock_acquisition_release_pending
 #define goodix_acquisition_invalidate_context mock_acquisition_invalidate_context
 #define goodix_acquisition_commit_reference mock_acquisition_commit_reference
+#define goodix_acquisition_copy_reference mock_acquisition_copy_reference
+#define goodix_acquisition_stage_reference mock_acquisition_stage_reference
 #define goodix_acquisition_new mock_acquisition_new
 #define goodix_acquisition_free mock_acquisition_free
 #define goodix_acquisition_start mock_acquisition_start
@@ -117,7 +122,11 @@ static struct {
   OcReject matcher_reject;
   guint32 matcher_status;
   gboolean acquisition_ready, commit_failure;
-  guint invalidations, reference_commits;
+  guint invalidations, reference_commits, cache_copies, cache_stages;
+  GxImage accepted_reference, staged_reference;
+  guint8 accepted_seed[16], staged_seed[16];
+  gboolean cache_copy_fail, cache_stage_fail, session_init_fail, session_init_empty_failure;
+  guint8 factory_tag, configuration_tag;
   guint sessions_created, sessions_freed, acquisitions_created, acquisitions_freed;
   GError *error;
   gboolean public_api, usb_open, public_success, public_match;
@@ -130,6 +139,11 @@ static struct {
   FpDevice *drain_device;
   GoodixNoneCallback drain_callback;
   gpointer drain_data;
+  gboolean release_pending, forbid_cancellable, release_error_on_report;
+  guint64 release_generation;
+  guint release_health_queries;
+  void (*release_callback)(FpDevice *, guint64, gpointer, GError *);
+  gpointer release_data;
   GoodixAcquired capture_callback;
   gpointer capture_data;
   GPtrArray *prints;
@@ -156,6 +170,7 @@ worker_gate (void)
 GCancellable *
 mock_get_cancellable (FpDevice *device)
 {
+  g_assert_false(state.forbid_cancellable);
   return state.cancellable;
 }
 
@@ -254,6 +269,11 @@ void mock_verify_report (FpDevice *device, FpiMatchResult result, FpPrint *print
   state.reports++;
   state.report_retry = error && error->domain == FP_DEVICE_RETRY;
   state.last_match_report = result;
+  if (state.release_error_on_report) {
+    state.release_pending=FALSE;
+    state.release_callback(device,state.release_generation,state.release_data,
+      g_error_new_literal(G_IO_ERROR,G_IO_ERROR_TIMED_OUT,"release failed during result report"));
+  }
   if (state.public_api)
     fpi_device_verify_report (device, result, print, error);
   else
@@ -323,13 +343,22 @@ mock_wait_read_idle (FpDevice *device, guint timeout_ms,
 
 gboolean mock_transport_health (FpDevice *device, GoodixTransportHealth *health, GError **error)
 {
-  if (state.fail_health) {
+  if (state.fail_health || state.release_pending) {
     memset(health,0,sizeof *health);
     g_set_error_literal(error,G_IO_ERROR,G_IO_ERROR_FAILED,"synthetic idle transport loss");
     return FALSE;
   }
   *health=state.health;
   return TRUE;
+}
+gboolean mock_transport_health_during_release (FpDevice *device, GoodixTransportHealth *health, GError **error)
+{
+  state.release_health_queries++;
+  gboolean pending=state.release_pending;
+  state.release_pending=FALSE;
+  gboolean healthy=mock_transport_health(device,health,error);
+  state.release_pending=pending;
+  return healthy;
 }
 gboolean mock_dev_init (FpDevice *device, GError **error)
 {
@@ -399,24 +428,45 @@ gboolean mock_read_private (const char *path, guint8 *data, gsize length, GError
     g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "synthetic missing input");
     return FALSE;
   }
-  memset (data, 0, length);
+  memset (data, state.factory_tag, length);
   return TRUE;
 }
 gboolean mock_configure (const guint8 factory[64], guint8 config[256], GError **error)
-{ memset (config, 0, 256); return TRUE; }
+{ memset (config, state.configuration_tag, 256); return TRUE; }
 GoodixAcquisition *mock_acquisition_new (FpDevice *device, const guint8 factory[64])
 {
   state.acquisitions_created++;
+  state.release_generation=0;
   return (GoodixAcquisition *) g_malloc0 (1);
 }
 void mock_acquisition_invalidate_context (GoodixAcquisition *acquisition) {
   state.acquisition_ready=FALSE;state.invalidations++;
+  state.release_pending=FALSE;
 }
 gboolean mock_acquisition_commit_reference (GoodixAcquisition *acquisition) {
   if (state.commit_failure) return FALSE;
   state.acquisition_ready=TRUE;state.reference_commits++;return TRUE;
 }
-void mock_acquisition_cancel (GoodixAcquisition *acquisition) { }
+gboolean mock_acquisition_copy_reference (GoodixAcquisition *acquisition, GxImage *image, guint8 seed[16])
+{
+  state.cache_copies++;
+  if (!state.acquisition_ready || state.cache_copy_fail) return FALSE;
+  *image=state.accepted_reference;memcpy(seed,state.accepted_seed,16);return TRUE;
+}
+gboolean mock_acquisition_stage_reference (GoodixAcquisition *acquisition, const GxImage *image, const guint8 seed[16])
+{
+  state.cache_stages++;
+  g_assert_false(state.acquisition_ready);
+  g_assert_false(state.release_pending);
+  if (!image->valid || state.cache_stage_fail) return FALSE;
+  state.staged_reference=*image;memcpy(state.staged_seed,seed,16);return TRUE;
+}
+void mock_acquisition_set_release_callback (GoodixAcquisition *acquisition,
+  void (*callback)(FpDevice *, guint64, gpointer, GError *), gpointer data)
+{ state.release_callback=callback;state.release_data=data; }
+gboolean mock_acquisition_release_pending (GoodixAcquisition *acquisition, guint64 *generation)
+{ if (generation) *generation=state.release_generation;return state.release_pending; }
+void mock_acquisition_cancel (GoodixAcquisition *acquisition) { state.release_pending=FALSE; }
 void mock_acquisition_free (GoodixAcquisition *acquisition)
 {
   state.acquisitions_freed++;
@@ -432,6 +482,7 @@ void mock_acquisition_start (GoodixAcquisition *acquisition, gboolean reference,
                             GoodixAcquired callback, gpointer data)
 {
   if (!reference) g_assert_true(state.acquisition_ready);
+  g_assert_false(state.release_pending);
   state.captures++;
   state.capture_reference=reference;
   if (reference) {
@@ -445,6 +496,16 @@ OcSession *mock_session_new (const guint16 frame[OC_FRAME_PIXELS],
                             GoodixChicagoProfile profile, GError **error)
 {
   worker_gate ();
+  if (state.session_init_empty_failure) return NULL;
+  if (state.session_init_fail) {
+    g_set_error_literal(error,G_IO_ERROR,G_IO_ERROR_INVALID_DATA,"synthetic cached reference initialization failure");
+    return NULL;
+  }
+  state.accepted_reference.valid=TRUE;
+  for (guint i=0;i<OC_FRAME_PIXELS;i++) {
+    state.accepted_reference.pixels[2*i]=frame[i]&255;
+    state.accepted_reference.pixels[2*i+1]=frame[i]>>8;
+  }
   return new_session ();
 }
 void mock_session_free (OcSession *session)
@@ -1584,7 +1645,8 @@ test_public_cancel_verify_recovers_reference (void)
   g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
   open_with_reference(device);
   g_assert_cmpuint(state.sessions_created,==,3);
-  g_assert_cmpuint(state.reference_captures,==,3);
+  g_assert_cmpuint(state.reference_captures,==,2);
+  g_assert_cmpuint(state.cache_stages,==,1);
   run_verification(device,print,3,FALSE);
   assert_print_unchanged(print,original);
   g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
@@ -2432,10 +2494,594 @@ test_rebase_timing_ok (void)
   timing_test_end(handler);
 }
 
+static void
+deliver_held_image (FpDevice *device, guint8 tag)
+{
+  GxImage image={0};image.valid=TRUE;image.pixels[0]=tag;
+  state.release_pending=TRUE;state.release_generation++;
+  state.capture_callback(device,&image,GOODIX_ACQUIRED_IMAGE,state.capture_data,NULL);
+}
+
+static void
+deliver_release (FpDevice *device, GError *error)
+{
+  g_assert_nonnull(state.release_callback);
+  state.release_pending=FALSE;
+  state.release_callback(device,state.release_generation,state.release_data,error);
+}
+
+static void
+test_public_result_before_release (gconstpointer data)
+{
+  Action action=GPOINTER_TO_INT(data);
+  reset_state();
+  FpDevice *device=new_public_device();open_with_reference(device);
+  g_autoptr(FpPrint) print=make_verification_print(device);
+  g_autoptr(GBytes) original=serialized_print(print);
+  start_public_match(device,print,action);
+  guint callbacks=state.public_callbacks+1;
+  deliver_held_image(device,1);
+  wait_public_callbacks(callbacks);
+  g_assert_true(state.public_success);
+  g_assert_true(state.public_match);
+  g_assert_true(state.release_pending);
+  g_assert_cmpint(SELF(device)->action,==,ACTION_NONE);
+  g_assert_cmpint(fp_device_get_finger_status(device),==,FP_FINGER_STATUS_NONE);
+  g_assert_cmpuint(state.release_health_queries,>,0);
+  guint captures=state.captures, starts=state.starts;
+  start_public_match(device,print,action);
+  guint64 id=SELF(device)->timing.action_id;
+  gint64 deadline=SELF(device)->deadline_us;
+  g_assert_cmpuint(state.captures,==,captures);
+  g_assert_cmpuint(state.starts,==,starts);
+  g_assert_cmpuint(state.matcher_calls,==,1);
+  g_assert_cmpuint(SELF(device)->contacts,==,0);
+  deliver_release(device,NULL);
+  g_assert_cmpuint(state.captures,==,captures); /* Unwind release callback first. */
+  wait_captures(captures+1);
+  g_assert_cmpuint(SELF(device)->timing.action_id,==,id);
+  g_assert_cmpint(SELF(device)->deadline_us,==,deadline);
+  finish_recovered_match(device,2);
+  g_assert_cmpuint(state.completed[action],==,2);
+  assert_print_unchanged(print,original);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  g_clear_object(&print);finish_state(device);
+}
+
+static void
+test_public_enroll_before_release (gconstpointer data)
+{
+  gboolean cancel=GPOINTER_TO_INT(data);
+  reset_state();
+  FpDevice *device=new_public_device();open_with_reference(device);
+  g_autoptr(FpPrint) print=g_object_ref_sink(fp_print_new(device));
+  fp_device_enroll(device,print,state.cancellable,NULL,NULL,NULL,public_enroll_done,NULL);
+  guint captures=state.captures;
+  state.cancel_progress=cancel;
+  deliver_held_image(device,1);
+  gint64 limit=g_get_monotonic_time()+5*G_TIME_SPAN_SECOND;
+  while (!state.progress) {
+    g_assert_cmpint(g_get_monotonic_time(),<,limit);
+    while(g_main_context_iteration(NULL,FALSE));
+    g_usleep(1000);
+  }
+  g_assert_cmpuint(state.progress,==,1);
+  g_assert_cmpuint(state.last_stage,==,1);
+  g_assert_cmpuint(state.captures,==,captures);
+  if (cancel) {
+    wait_public_callbacks(2);
+    g_assert_error(state.public_error,G_IO_ERROR,G_IO_ERROR_CANCELLED);
+    g_assert_false(SELF(device)->release_pending);
+  } else {
+    g_assert_true(SELF(device)->release_pending);
+    g_assert_true(SELF(device)->contact_waiting);
+    g_assert_cmpuint(SELF(device)->contacts,==,1);
+    deliver_release(device,NULL);
+    wait_captures(captures+1);
+    g_assert_cmpuint(state.progress,==,1);
+    g_assert_cmpuint(SELF(device)->contacts,==,2);
+    g_assert_cmpuint(state.starts,==,1);
+    cancel_operation(device);wait_public_callbacks(2);
+  }
+  g_clear_error(&state.public_error);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  g_clear_object(&print);finish_state(device);
+}
+
+static void
+test_release_during_processing (gconstpointer data)
+{
+  guint mode=GPOINTER_TO_UINT(data);
+  reset_state();
+  FpDevice *device=new_public_device();open_with_reference(device);
+  g_autoptr(FpPrint) print=make_verification_print(device);
+  g_autoptr(GBytes) original=serialized_print(print);
+  start_public_match(device,print,ACTION_VERIFY);
+  guint callbacks=state.public_callbacks+1;
+  state.block_worker=mode!=0;state.worker_entered=state.release_worker=FALSE;
+  deliver_held_image(device,1);
+  if (mode) wait_reference_worker();
+  if (mode==0 || mode==1)
+    deliver_release(device,g_error_new_literal(G_IO_ERROR,G_IO_ERROR_TIMED_OUT,"synthetic release failure"));
+  else if (mode==2) { state.health.tls++;deliver_release(device,NULL); }
+  else if (mode==3) cancel_operation(device);
+  else if (mode==4) SELF(device)->deadline_us=test_monotonic_time()-1;
+  else deliver_release(device,NULL);
+  if (mode) {
+    /* Release failure cannot destroy algorithm memory still owned by a worker. */
+    while(g_main_context_iteration(NULL,FALSE));
+    g_assert_cmpuint(state.sessions_freed,==,0);
+    release_processing();
+  }
+  wait_public_callbacks(callbacks);
+  g_assert_cmpuint(state.completed[ACTION_VERIFY],==,1);
+  if (mode==5) {
+    g_assert_true(state.public_success);
+    g_assert_no_error(state.public_error);
+    g_assert_false(SELF(device)->release_pending);
+    g_assert_cmpuint(state.reports,==,1);
+  } else {
+    g_assert_false(state.public_success);
+    g_assert_nonnull(state.public_error);
+    g_assert_cmpuint(state.reports,==,0);
+    g_assert_null(SELF(device)->session);
+    g_assert_false(state.acquisition_ready);
+  }
+  assert_print_unchanged(print,original);
+  g_clear_error(&state.public_error);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  g_clear_object(&print);finish_state(device);
+}
+
+static void
+test_release_same_stack (void)
+{
+  reset_state();
+  FpDevice *device=new_public_device();open_with_reference(device);
+  g_autoptr(FpPrint) print=make_verification_print(device);
+  start_public_match(device,print,ACTION_VERIFY);
+  deliver_held_image(device,1);
+  deliver_release(device,NULL); /* Buffered UP before image's queued idle runs. */
+  wait_public_callbacks(2);
+  g_assert_true(state.public_success);
+  g_assert_false(SELF(device)->release_pending);
+  g_assert_false(SELF(device)->contact_waiting);
+  g_assert_cmpuint(state.release_health_queries,==,0);
+  guint captures=state.captures;
+  start_public_match(device,print,ACTION_VERIFY);
+  g_assert_cmpuint(state.captures,==,captures+1);
+  finish_recovered_match(device,2);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  g_clear_object(&print);finish_state(device);
+}
+
+static void
+test_release_fault_after_result (gconstpointer data)
+{
+  guint mode=GPOINTER_TO_UINT(data);
+  reset_state();
+  FpDevice *device=new_public_device();open_with_reference(device);
+  g_autoptr(FpPrint) print=make_verification_print(device);
+  start_public_match(device,print,ACTION_VERIFY);
+  state.release_error_on_report=mode==1;
+  deliver_held_image(device,1);
+  wait_public_callbacks(2);
+  g_assert_true(state.public_success);
+  g_assert_true(state.public_match);
+  g_assert_no_error(state.public_error);
+  g_assert_cmpuint(state.succeeded[ACTION_VERIFY],==,1);
+  state.release_error_on_report=FALSE;
+  if (mode==0) {
+    state.forbid_cancellable=TRUE;
+    deliver_release(device,g_error_new_literal(G_IO_ERROR,G_IO_ERROR_TIMED_OUT,"detached release timeout"));
+    while(g_main_context_iteration(NULL,FALSE));
+    state.forbid_cancellable=FALSE;
+  }
+  g_assert_cmpuint(state.completed[ACTION_VERIFY],==,1);
+  g_assert_cmpuint(state.public_callbacks,==,2);
+  g_assert_true(state.public_success);
+  g_assert_false(SELF(device)->reference_valid);
+  g_assert_false(SELF(device)->transport_open);
+  g_assert_null(SELF(device)->session);
+  g_assert_false(state.acquisition_ready);
+  start_public_match(device,print,ACTION_VERIFY);
+  supply_recovery_reference(device);finish_recovered_match(device,2);
+  g_assert_cmpuint(state.completed[ACTION_VERIFY],==,2);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  g_clear_object(&print);finish_state(device);
+}
+
+static void
+test_waiting_action_release_failure (gconstpointer data)
+{
+  guint mode=GPOINTER_TO_UINT(data);
+  reset_state();
+  FpDevice *device=new_public_device();open_with_reference(device);
+  g_autoptr(FpPrint) print=make_verification_print(device);
+  start_public_match(device,print,ACTION_VERIFY);deliver_held_image(device,1);
+  wait_public_callbacks(2);
+  guint64 old_generation=state.release_generation;
+  guint captures=state.captures;
+  start_public_match(device,print,ACTION_VERIFY);
+  g_assert_cmpuint(state.captures,==,captures);
+  if (mode==0) deliver_release(device,g_error_new_literal(G_IO_ERROR,G_IO_ERROR_TIMED_OUT,"prior contact release failed"));
+  else if (mode==1) cancel_operation(device);
+  else {
+    SELF(device)->deadline_us=test_monotonic_time()-1;
+    deliver_release(device,NULL);
+  }
+  wait_public_callbacks(3);
+  g_assert_nonnull(state.public_error);
+  g_assert_false(state.public_success);
+  g_assert_cmpuint(state.completed[ACTION_VERIFY],==,2);
+  g_assert_cmpuint(state.succeeded[ACTION_VERIFY],==,1);
+  g_assert_cmpuint(state.captures,==,captures);
+  g_assert_cmpuint(state.matcher_calls,==,1);
+  /* A late old release must not damage the new reference/capture action. */
+  g_clear_object(&state.cancellable);state.cancellable=g_cancellable_new();
+  start_public_match(device,print,ACTION_VERIFY);
+  guint64 action_id=SELF(device)->timing.action_id;
+  state.release_callback(device,old_generation,state.release_data,
+    g_error_new_literal(G_IO_ERROR,G_IO_ERROR_FAILED,"stale release failure"));
+  while(g_main_context_iteration(NULL,FALSE));
+  g_assert_cmpuint(SELF(device)->timing.action_id,==,action_id);
+  supply_recovery_reference(device);finish_recovered_match(device,2);
+  g_assert_cmpuint(state.completed[ACTION_VERIFY],==,3);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  g_clear_object(&print);finish_state(device);
+}
+
+static void
+test_close_during_detached_release (void)
+{
+  reset_state();
+  FpDevice *device=new_public_device();open_with_reference(device);
+  g_autoptr(FpPrint) print=make_verification_print(device);
+  start_public_match(device,print,ACTION_VERIFY);deliver_held_image(device,1);
+  wait_public_callbacks(2);
+  guint64 old_generation=state.release_generation;
+  state.hold_drain=TRUE;
+  fp_device_close(device,NULL,public_close_done,NULL);
+  g_assert_false(SELF(device)->release_pending);
+  g_assert_false(state.release_pending);
+  g_assert_cmpuint(state.usb_closes,==,0);
+  g_assert_nonnull(state.drain_callback);
+  state.forbid_cancellable=TRUE;
+  state.release_callback(device,old_generation,state.release_data,NULL);
+  state.release_callback(device,old_generation,state.release_data,
+    g_error_new_literal(G_IO_ERROR,G_IO_ERROR_FAILED,"late close release"));
+  state.forbid_cancellable=FALSE;
+  release_read_drain(NULL);wait_public_callbacks(3);
+  g_assert_true(state.public_success);
+  g_assert_cmpuint(state.usb_closes,==,1);
+  g_assert_cmpuint(state.close_completed,==,1);
+  g_assert_cmpuint(state.completed[ACTION_VERIFY],==,1);
+  g_clear_object(&print);finish_state(device);
+}
+
+static void
+test_release_callback_after_reopen (void)
+{
+  reset_state();
+  FpDevice *device=new_public_device();open_with_reference(device);
+  g_autoptr(FpPrint) print=make_verification_print(device);
+  start_public_match(device,print,ACTION_VERIFY);deliver_held_image(device,1);
+  wait_public_callbacks(2);
+  guint64 old_generation=state.release_generation;
+  gpointer old_data=state.release_data;
+  void (*old_callback)(FpDevice *,guint64,gpointer,GError *)=state.release_callback;
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  open_with_reference(device);
+  start_public_match(device,print,ACTION_VERIFY);deliver_held_image(device,2);
+  wait_public_callbacks(4);
+  g_assert_true(state.public_success);
+  g_assert_cmpuint(state.release_generation,==,old_generation);
+  old_callback(device,old_generation,old_data,
+    g_error_new_literal(G_IO_ERROR,G_IO_ERROR_FAILED,"release from previous public open"));
+  while(g_main_context_iteration(NULL,FALSE));
+  g_assert_true(SELF(device)->release_pending);
+  g_assert_true(SELF(device)->reference_valid);
+  g_assert_nonnull(SELF(device)->session);
+  deliver_release(device,NULL);
+  while(g_main_context_iteration(NULL,FALSE));
+  g_assert_false(SELF(device)->release_pending);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  g_clear_object(&print);finish_state(device);
+}
+
+static void
+test_report_cancel_during_release (void)
+{
+  reset_state();
+  FpDevice *device=new_public_device();open_with_reference(device);
+  g_autoptr(FpPrint) print=make_verification_print(device);
+  start_public_match(device,print,ACTION_VERIFY);
+  state.cancel_report=TRUE;deliver_held_image(device,1);
+  wait_public_callbacks(2);
+  g_assert_error(state.public_error,G_IO_ERROR,G_IO_ERROR_CANCELLED);
+  g_assert_cmpuint(state.reports,==,1);
+  g_assert_cmpuint(state.completed[ACTION_VERIFY],==,1);
+  g_assert_cmpuint(state.succeeded[ACTION_VERIFY],==,0);
+  g_assert_false(state.release_pending);
+  g_assert_false(SELF(device)->release_pending);
+  g_assert_null(SELF(device)->session);
+  g_clear_error(&state.public_error);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  g_clear_object(&print);finish_state(device);
+}
+
+static void
+test_public_clean_close_reference_cache (gconstpointer data)
+{
+  gboolean held=GPOINTER_TO_INT(data);
+  reset_state();
+  memset(state.accepted_seed,0x35,16);
+  FpDevice *device=new_public_device();open_with_reference(device);
+  g_autoptr(FpPrint) print=make_verification_print(device);
+  g_autoptr(GBytes) original=serialized_print(print);
+  if (held) {
+    start_public_match(device,print,ACTION_VERIFY);deliver_held_image(device,1);
+    wait_public_callbacks(2);
+    g_assert_true(state.release_pending);
+  }
+  guint callbacks=state.public_callbacks;
+  guint captures=state.reference_captures;
+  guint commits=state.reference_commits;
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  g_assert_null(SELF(device)->session);
+  g_assert_false(state.release_pending);
+  g_assert_cmpuint(state.sessions_freed,==,1);
+  fp_device_open(device,NULL,public_open_done,NULL);
+  wait_public_callbacks(callbacks+1);
+  g_assert_true(state.public_success);
+  g_assert_no_error(state.public_error);
+  g_assert_cmpuint(state.cache_stages,==,1);
+  g_assert_cmpuint(state.reference_captures,==,captures);
+  g_assert_cmpuint(state.reference_commits,==,commits+1);
+  g_assert_cmpuint(state.starts,==,2); /* Reopen still resets/authenticates/configures/TLS. */
+  g_assert_cmpuint(state.health.read_loop,==,2);
+  g_assert_cmpuint(state.health.tls,==,2);
+  g_assert_cmpuint(state.health.configuration,==,2);
+  g_assert_cmpuint(state.sessions_created,==,2); /* No OC/adaptive history crosses close. */
+  g_assert_true(state.acquisition_ready);
+  guint8 seed[16];memset(seed,0x35,16);
+  g_assert_cmpmem(state.staged_seed,16,seed,16);
+  g_assert_true(state.staged_reference.valid);
+  assert_print_unchanged(print,original);
+  run_verification(device,print,2,FALSE);
+  assert_print_unchanged(print,original);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  g_clear_object(&print);finish_state(device);
+}
+
+static void
+assert_cache_cleared (FpDevice *device)
+{
+  ReferenceCache empty={0};
+  g_assert_cmpmem(&SELF(device)->reference_cache,sizeof empty,&empty,sizeof empty);
+}
+
+static void
+test_cache_binding_mismatch (gconstpointer data)
+{
+  guint mode=GPOINTER_TO_UINT(data);
+  reset_state();
+  FpDevice *device=new_public_device();open_with_reference(device);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  g_assert_true(SELF(device)->reference_cache.valid);
+  if (mode==0) state.factory_tag=1;
+  else if (mode==1) state.configuration_tag=1;
+  else if (mode==2) SELF(device)->reference_cache.profile++;
+  else if (mode==3) SELF(device)->reference_cache.backend_version++;
+  else SELF(device)->reference_cache.preprocess_version++;
+  open_with_reference(device);
+  g_assert_cmpuint(state.cache_stages,==,0);
+  g_assert_cmpuint(state.reference_captures,==,2);
+  g_assert_cmpuint(state.starts,==,2);
+  g_assert_cmpuint(state.sessions_created,==,2);
+  assert_cache_cleared(device);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  finish_state(device);
+}
+
+static void
+test_cache_cleanup_failure (gconstpointer data)
+{
+  guint mode=GPOINTER_TO_UINT(data);
+  reset_state();
+  FpDevice *device=new_public_device();open_with_reference(device);
+  state.hold_drain=TRUE;
+  state.fail_cleanup=mode==0;
+  fp_device_close(device,NULL,public_close_done,NULL);
+  if (mode==1) {
+    g_assert_true(SELF(device)->reference_cache.pending_close);
+    g_assert_false(SELF(device)->reference_cache.valid);
+    release_read_drain(g_error_new_literal(G_IO_ERROR,G_IO_ERROR_TIMED_OUT,"cache close drain failed"));
+  }
+  wait_public_callbacks(2);
+  g_assert_false(state.public_success);
+  assert_cache_cleared(device);
+  state.fail_cleanup=FALSE;state.hold_drain=FALSE;
+  g_clear_error(&state.public_error);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  assert_cache_cleared(device);
+  open_with_reference(device);
+  g_assert_cmpuint(state.reference_captures,==,2);
+  g_assert_cmpuint(state.cache_stages,==,0);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  finish_state(device);
+}
+
+static void
+test_cache_runtime_fault (gconstpointer data)
+{
+  guint mode=GPOINTER_TO_UINT(data);
+  reset_state();
+  FpDevice *device=new_public_device();open_with_reference(device);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  fp_device_open(device,NULL,public_open_done,NULL);wait_public_callbacks(2);
+  g_assert_true(state.public_success);
+  g_autoptr(FpPrint) print=make_verification_print(device);
+  start_public_match(device,print,ACTION_VERIFY);
+  if (mode==0) {
+    deliver_held_image(device,1);wait_public_callbacks(3);
+    deliver_release(device,g_error_new_literal(G_IO_ERROR,G_IO_ERROR_TIMED_OUT,"cached context release fault"));
+    while(g_main_context_iteration(NULL,FALSE));
+  } else if (mode==1) {
+    state.capture_callback(device,NULL,GOODIX_ACQUIRED_IMAGE,state.capture_data,
+      g_error_new_literal(G_IO_ERROR,G_IO_ERROR_FAILED,"cached context capture fault"));
+    wait_public_callbacks(3);
+  } else if (mode==2) {
+    state.capture_callback(device,NULL,GOODIX_ACQUIRED_REFRESH_REQUIRED,state.capture_data,NULL);
+    wait_public_callbacks(3);
+  } else {
+    cancel_operation(device);wait_public_callbacks(3);
+  }
+  assert_cache_cleared(device);
+  g_clear_error(&state.public_error);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  assert_cache_cleared(device);
+  g_clear_object(&state.cancellable);state.cancellable=g_cancellable_new();
+  open_with_reference(device);
+  g_assert_cmpuint(state.reference_captures,==,2);
+  g_assert_cmpuint(state.cache_stages,==,1);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  g_clear_object(&print);finish_state(device);
+}
+
+static void
+test_cache_reopen_failure (gconstpointer data)
+{
+  guint mode=GPOINTER_TO_UINT(data);
+  reset_state();
+  FpDevice *device=new_public_device();open_with_reference(device);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  if (mode==0) SELF(device)->reference_cache.image.valid=FALSE;
+  else if (mode==1) state.cache_stage_fail=TRUE;
+  else if (mode==2) state.session_init_fail=TRUE;
+  else if (mode==3) state.session_init_empty_failure=TRUE;
+  else if (mode==4) state.fail_init=TRUE;
+  else { state.block_worker=TRUE;state.worker_entered=state.release_worker=FALSE; }
+  fp_device_open(device,state.cancellable,public_open_done,NULL);
+  if (mode>=5) {
+    wait_reference_worker();
+    g_assert_false(state.acquisition_ready);
+    g_assert_cmpuint(state.reference_commits,==,1);
+    if (mode==5) cancel_operation(device);
+    else if (mode==6) SELF(device)->deadline_us=test_monotonic_time()-1;
+    else state.health.configuration++;
+    release_processing();
+  }
+  wait_public_callbacks(2);
+  g_assert_false(state.public_success);
+  g_assert_nonnull(state.public_error);
+  g_assert_false(fp_device_is_open(device));
+  g_assert_false(state.usb_open);
+  g_assert_cmpuint(state.reference_commits,==,1);
+  g_assert_cmpuint(state.reference_captures,==,1);
+  g_assert_null(SELF(device)->session);
+  assert_cache_cleared(device);
+  state.cache_stage_fail=state.session_init_fail=state.session_init_empty_failure=state.fail_init=FALSE;
+  state.block_worker=FALSE;
+  g_clear_object(&state.cancellable);state.cancellable=g_cancellable_new();
+  open_with_reference(device);
+  g_assert_cmpuint(state.reference_captures,==,2);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  finish_state(device);
+}
+
+static void
+test_cache_unhealthy_close (gconstpointer data)
+{
+  guint mode=GPOINTER_TO_UINT(data);
+  reset_state();
+  FpDevice *device=new_public_device();open_with_reference(device);
+  if (mode==0) state.fail_health=TRUE;
+  else state.cache_copy_fail=TRUE;
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  assert_cache_cleared(device);
+  state.fail_health=state.cache_copy_fail=FALSE;
+  open_with_reference(device);
+  g_assert_cmpuint(state.reference_captures,==,2);
+  g_assert_cmpuint(state.cache_stages,==,0);
+  g_assert_true(fp_device_close_sync(device,NULL,&state.public_error));
+  finish_state(device);
+}
+
+static GPtrArray *cache_log_records;
+static void
+capture_cache_log (const gchar *domain, GLogLevelFlags level, const gchar *message, gpointer unused)
+{
+  (void)domain;(void)level;(void)unused;
+  if (g_str_has_prefix(message,"goodix-reference-cache "))
+    g_ptr_array_add(cache_log_records,g_strdup(message));
+}
+static void
+test_cache_scalar_log (gconstpointer data)
+{
+  guint mode=GPOINTER_TO_UINT(data);
+  cache_log_records=g_ptr_array_new_with_free_func(g_free);
+  guint handler=g_log_set_handler("libfprint-goodix521d",G_LOG_LEVEL_MESSAGE,capture_cache_log,NULL);
+  if (mode==0) test_public_clean_close_reference_cache(GINT_TO_POINTER(0));
+  else if (mode==1) test_cache_binding_mismatch(GINT_TO_POINTER(0));
+  else test_cache_reopen_failure(GINT_TO_POINTER(mode==2?1:4));
+  g_assert_cmpuint(cache_log_records->len,==,mode==0?1:0);
+  if (mode==0)
+    g_assert_cmpstr(g_ptr_array_index(cache_log_records,0),==,"goodix-reference-cache action_id=2 status=staged");
+  g_log_remove_handler("libfprint-goodix521d",handler);
+  g_clear_pointer(&cache_log_records,g_ptr_array_unref);
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  const gchar *cache_logs[]={"staged","mismatch-silent","stage-failed-silent","boot-failed-silent"};
+  for (guint i=0;i<G_N_ELEMENTS(cache_logs);i++) {
+    g_autofree gchar *path=g_strdup_printf("/goodix521d/cache/log-%s",cache_logs[i]);
+    g_test_add_data_func(path,GUINT_TO_POINTER(i),test_cache_scalar_log);
+  }
+  const gchar *cache_bindings[]={"factory","configuration","profile","backend-version","preprocess-version"};
+  for (guint i=0;i<G_N_ELEMENTS(cache_bindings);i++) {
+    g_autofree gchar *path=g_strdup_printf("/goodix521d/cache/mismatch-%s",cache_bindings[i]);
+    g_test_add_data_func(path,GUINT_TO_POINTER(i),test_cache_binding_mismatch);
+  }
+  g_test_add_data_func("/goodix521d/cache/close-teardown-failure",GINT_TO_POINTER(0),test_cache_cleanup_failure);
+  g_test_add_data_func("/goodix521d/cache/close-drain-failure",GINT_TO_POINTER(1),test_cache_cleanup_failure);
+  g_test_add_data_func("/goodix521d/cache/close-unhealthy",GINT_TO_POINTER(0),test_cache_unhealthy_close);
+  g_test_add_data_func("/goodix521d/cache/close-copy-failure",GINT_TO_POINTER(1),test_cache_unhealthy_close);
+  const gchar *cache_faults[]={"release","capture","refresh","cancel"};
+  for (guint i=0;i<G_N_ELEMENTS(cache_faults);i++) {
+    g_autofree gchar *path=g_strdup_printf("/goodix521d/cache/runtime-%s-fault",cache_faults[i]);
+    g_test_add_data_func(path,GUINT_TO_POINTER(i),test_cache_runtime_fault);
+  }
+  const gchar *cache_open_failures[]={"malformed","stage","algorithm","empty-algorithm","bootstrap","cancel","deadline","health"};
+  for (guint i=0;i<G_N_ELEMENTS(cache_open_failures);i++) {
+    g_autofree gchar *path=g_strdup_printf("/goodix521d/cache/reopen-%s-failure",cache_open_failures[i]);
+    g_test_add_data_func(path,GUINT_TO_POINTER(i),test_cache_reopen_failure);
+  }
+  g_test_add_data_func("/goodix521d/cache/public-clean-close",GINT_TO_POINTER(0),test_public_clean_close_reference_cache);
+  g_test_add_data_func("/goodix521d/cache/public-held-close",GINT_TO_POINTER(1),test_public_clean_close_reference_cache);
+  g_test_add_func("/goodix521d/release/report-cancel",test_report_cancel_during_release);
+  g_test_add_func("/goodix521d/release/stale-callback-after-reopen",test_release_callback_after_reopen);
+  g_test_add_data_func("/goodix521d/release/enroll-progress-before-up",GINT_TO_POINTER(0),test_public_enroll_before_release);
+  g_test_add_data_func("/goodix521d/release/enroll-progress-cancel",GINT_TO_POINTER(1),test_public_enroll_before_release);
+  g_test_add_func("/goodix521d/release/buffered-same-stack-up",test_release_same_stack);
+  g_test_add_func("/goodix521d/release/close-held-guard",test_close_during_detached_release);
+  const gchar *release_worker_modes[]={"fault-before-worker","fault-during-worker","health-loss-worker","cancel-worker","deadline-worker","success-during-worker"};
+  for (guint i=0;i<G_N_ELEMENTS(release_worker_modes);i++) {
+    g_autofree gchar *path=g_strdup_printf("/goodix521d/release/%s",release_worker_modes[i]);
+    g_test_add_data_func(path,GUINT_TO_POINTER(i),test_release_during_processing);
+  }
+  g_test_add_data_func("/goodix521d/release/fault-after-result",GINT_TO_POINTER(0),test_release_fault_after_result);
+  g_test_add_data_func("/goodix521d/release/fault-during-report",GINT_TO_POINTER(1),test_release_fault_after_result);
+  const gchar *release_wait_modes[]={"fault","cancel","deadline"};
+  for (guint i=0;i<G_N_ELEMENTS(release_wait_modes);i++) {
+    g_autofree gchar *path=g_strdup_printf("/goodix521d/release/waiting-action-%s",release_wait_modes[i]);
+    g_test_add_data_func(path,GUINT_TO_POINTER(i),test_waiting_action_release_failure);
+  }
+  g_test_add_data_func("/goodix521d/release/public-verify-before-up",GINT_TO_POINTER(ACTION_VERIFY),test_public_result_before_release);
+  g_test_add_data_func("/goodix521d/release/public-identify-before-up",GINT_TO_POINTER(ACTION_IDENTIFY),test_public_result_before_release);
   g_test_add_func("/goodix521d/refresh/rebase-timing-ok",test_rebase_timing_ok);
   g_test_add_func("/goodix521d/reuse/capture-callback-consumed-once",test_acquisition_callback_consumed_once);
   g_test_add_data_func("/goodix521d/refresh/invalid-reference-outcome",GUINT_TO_POINTER(0),test_refresh_invalid_outcome);

@@ -1990,8 +1990,8 @@ static void fpi_device_goodixtls_init(FpiDeviceGoodixTls *self) {}
 
 static void fpi_device_goodixtls_class_init(FpiDeviceGoodixTlsClass *class) {}
 
-gboolean goodix_transport_health(FpDevice *dev, GoodixTransportHealth *snapshot,
-                                  GError **error)
+static gboolean goodix_transport_health_full(FpDevice *dev, GoodixTransportHealth *snapshot,
+                                             gboolean during_release, GError **error)
 {
     FpiDeviceGoodixTlsPrivate *priv =
         fpi_device_goodixtls_get_instance_private(FPI_DEVICE_GOODIXTLS(dev));
@@ -2009,7 +2009,16 @@ gboolean goodix_transport_health(FpDevice *dev, GoodixTransportHealth *snapshot,
                             "Acquisition configuration unavailable");
         return FALSE;
     }
-    if (priv->ack || priv->reply || priv->callback || priv->fdt_up_callback ||
+    /* Only the already ACKed, current UP detector may coexist with CPU work.
+     * Its own event deadline remains live; command ownership is still idle. */
+    gboolean release_owned = during_release && priv->fdt_up_callback &&
+        priv->fdt_event_opcode == 0x34 && goodix_fdt_up_current(priv) &&
+        priv->fdt_up_phases_sent == 2 && priv->fdt_up_acks == 2 &&
+        priv->fdt_up_acknowledged && priv->fdt_up_timeout &&
+        !g_source_is_destroyed(priv->fdt_up_timeout) &&
+        g_get_monotonic_time() < priv->fdt_event_deadline;
+    if (priv->ack || priv->reply || priv->callback ||
+        (priv->fdt_up_callback && !release_owned) ||
         priv->tls_ssm || priv->tls_ready_callback || priv->timeout || priv->length) {
         g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_BUSY,
                             "Goodix transport has an unfinished operation");
@@ -2021,5 +2030,17 @@ gboolean goodix_transport_health(FpDevice *dev, GoodixTransportHealth *snapshot,
         priv->configuration_generation
     };
     return TRUE;
+}
+gboolean goodix_transport_health(FpDevice *dev, GoodixTransportHealth *snapshot,
+                                  GError **error)
+{
+    return goodix_transport_health_full(dev, snapshot, FALSE, error);
+}
+
+gboolean goodix_transport_health_during_release(FpDevice *dev,
+                                                GoodixTransportHealth *snapshot,
+                                                GError **error)
+{
+    return goodix_transport_health_full(dev, snapshot, TRUE, error);
 }
 /* End transport health */

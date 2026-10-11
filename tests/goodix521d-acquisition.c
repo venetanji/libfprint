@@ -69,6 +69,7 @@ static struct {
   gboolean hold_down1, hold_down_event, hold_manual1, hold_up1, hold_up_event;
   guint hold_restore;
   gboolean cancel_present, cancel_removal, cancel_none, free_on_complete, pattern_image;
+  gboolean up_in_image_callback, cancel_public_token_on_image;
   guint down_length, manual_length, up_length;
   gboolean use_flat_pixel, hold_image;
   guint16 flat_pixel;
@@ -80,7 +81,8 @@ static struct {
 static struct {
   guint frames, registers, restores, restore_acks, manual_sends;
   guint down_arms, up_arms, down_ack_mask, up_ack_mask;
-  guint done, present_reports, removal_reports, none_reports;
+  guint done, released, present_reports, removal_reports, none_reports;
+  guint64 release_generation;
   FpFingerStatusFlags status;
   GoodixAcquiredOutcome outcome;
   GxImage image;
@@ -98,7 +100,10 @@ static struct {
   GString *trace;
 } contact;
 
-static GError *result_error;
+static GError *result_error, *release_error;
+static GCancellable *action_cancellable;
+static gboolean public_action_available;
+static guint cancellable_reads;
 static FpDevice *test_device;
 static GoodixAcquisition *capture;
 static gboolean capture_mode, reference_mode;
@@ -147,7 +152,12 @@ emit_event(EventWait *wait, const guint8 reply[20], guint length, GError *error)
 static void emit_down(void) { emit_event(&contact.down_wait,contact.down_reply,options.down_length,NULL); }
 static void emit_up(void) { emit_event(&contact.up_wait,contact.up_reply,options.up_length,NULL); }
 
-GCancellable *mock_fpi_device_get_cancellable(FpDevice *dev) {(void)dev;return NULL;}
+GCancellable *mock_fpi_device_get_cancellable(FpDevice *dev)
+{
+  g_assert_true(dev==test_device);g_assert_true(public_action_available);
+  cancellable_reads++;
+  return action_cancellable;
+}
 
 gboolean
 mock_fpi_device_report_finger_status(FpDevice *dev,FpFingerStatusFlags status)
@@ -212,7 +222,7 @@ finish_up1(FpDevice *dev,GoodixCmdCallback cb,gpointer data)
   GError *error=contact_error(FAIL_UP1);
   if (!error) contact.up_ack_mask|=2;
   cb(dev,NULL,0,data,error);
-  if (!error && !options.hold_up_event) emit_up();
+  if (!error && !options.hold_up_event && contact.up_wait.callback) emit_up();
 }
 
 void
@@ -394,8 +404,33 @@ acquired(FpDevice *dev,const GxImage *image,GoodixAcquiredOutcome outcome,
     g_assert_cmpmem(image->pixels,sizeof image->pixels,contact.expected_pixels,sizeof contact.expected_pixels);
     contact.image=*image;
   }
-  g_assert_null(capture->ssm);
+  if (!error && outcome==GOODIX_ACQUIRED_IMAGE) {
+    g_assert_nonnull(capture->ssm);
+    g_assert_cmpuint(contact.restore_acks,==,1);g_assert_cmpuint(contact.up_ack_mask,==,3);
+    g_assert_cmpuint(contact.none_reports,==,0);g_assert_cmpuint(contact.released,==,0);
+    g_assert_true(goodix_acquisition_release_pending(capture,&contact.release_generation));
+    g_assert_cmpuint(contact.release_generation,==,capture->generation);
+    /* Public action completion can erase its cancellable. The independent
+     * release guard must never ask libfprint for the old or a newer action. */
+    if(options.cancel_public_token_on_image) g_cancellable_cancel(action_cancellable);
+    public_action_available=FALSE;g_clear_object(&action_cancellable);
+    if(options.up_in_image_callback) emit_up();
+  } else {
+    g_assert_null(capture->ssm);
+    g_assert_false(goodix_acquisition_release_pending(capture,NULL));
+  }
   if (options.free_on_complete) {goodix_acquisition_free(capture);capture=NULL;}
+}
+
+static void
+released(FpDevice *dev,guint64 generation,gpointer data,GError *error)
+{
+  GoodixAcquisition *guard=data;
+  g_assert_true(dev==test_device);g_assert_cmpuint(contact.done,==,1);
+  g_assert_true(contact.image.valid);g_assert_cmpuint(++contact.released,==,1);
+  g_assert_cmpuint(generation,==,contact.release_generation);
+  g_assert_null(guard->ssm);g_assert_false(goodix_acquisition_release_pending(guard,NULL));
+  g_assert_null(release_error);release_error=error;
 }
 static struct {
   guint attempts, commands, images, completions;
@@ -587,6 +622,8 @@ static void
 reference_setup(void)
 {
   reset_timing();
+  public_action_available=TRUE;g_clear_object(&action_cancellable);
+  action_cancellable=g_cancellable_new();
   guint8 otp[64]={0};
   otp[23]=0x6e|(capture_mode?0x80:0);otp[26]=37;otp[33]=47;otp[40]=7;
   otp[41]=39;otp[42]=49;otp[43]=41;otp[44]=97;otp[45]=101;otp[46]=103;
@@ -607,7 +644,7 @@ reference_teardown(void)
   g_assert_null(capture->ssm);
   goodix_acquisition_free(capture);capture=NULL;
   g_clear_object(&test_device);
-  g_clear_error(&result_error);
+  g_clear_error(&result_error);g_clear_error(&release_error);g_clear_object(&action_cancellable);
   reference_mode=FALSE;
 }
 
@@ -727,7 +764,10 @@ contact_reset(const guint8 seed[16])
   contact.manual_reply[4]+=18;
   const guint8 up_raw[16]={0,0,1,0,2,0,0xfe,1,0,2,0xff,0xff,0x23,1,5,4};
   memcpy(contact.up_reply+4,up_raw,16);
-  g_clear_error(&result_error);reset_timing();
+  g_clear_error(&result_error);g_clear_error(&release_error);reset_timing();
+  public_action_available=TRUE;g_clear_object(&action_cancellable);
+  action_cancellable=g_cancellable_new();
+  goodix_acquisition_set_release_callback(capture,released,capture);
   goodix_acquisition_set_timing_context(capture,1234567,4);
 }
 
@@ -756,10 +796,12 @@ contact_teardown(void)
   if (contact.down_wait.callback) emit_down();
   if (contact.up_wait.callback) emit_up();
   g_assert_cmpuint(contact.done,==,1);
+  g_assert_cmpuint(contact.released,==,contact.image.valid?1:0);
   g_assert_null(contact.held_down1);g_assert_null(contact.held_up1);
   g_assert_null(contact.held_manual1);g_assert_null(contact.held_restore);g_assert_null(contact.held_image);
   if (capture) {g_assert_null(capture->ssm);goodix_acquisition_free(capture);capture=NULL;}
-  g_clear_object(&test_device);g_clear_error(&result_error);
+  g_clear_object(&test_device);g_clear_error(&result_error);g_clear_error(&release_error);
+  g_clear_object(&action_cancellable);
   if(contact.trace) g_string_free(contact.trace,TRUE);
   contact.trace=NULL;reference_mode=FALSE;adc_fixture=adc_minimum_fixture=FALSE;
 }
@@ -768,6 +810,8 @@ static void
 assert_image_success(void)
 {
   g_assert_cmpuint(contact.done,==,1);g_assert_no_error(result_error);
+  g_assert_cmpuint(contact.released,==,1);g_assert_no_error(release_error);
+  if(capture) g_assert_false(goodix_acquisition_release_pending(capture,NULL));
   g_assert_cmpuint(contact.outcome,==,GOODIX_ACQUIRED_IMAGE);
   g_assert_true(contact.image.valid);
   g_assert_cmpmem(contact.image.pixels,sizeof contact.image.pixels,
@@ -801,8 +845,11 @@ contact_first_image_bytes_delivered_once(void)
   contact_start();
   g_assert_cmpuint(contact.frames,==,1);g_assert_cmpuint(contact.registers,==,1);
   g_assert_cmpuint(contact.restores,==,1);g_assert_cmpuint(contact.restore_acks,==,1);
-  g_assert_cmpuint(contact.done,==,0);g_assert_false(contact.image.valid);
+  g_assert_cmpuint(contact.done,==,1);g_assert_true(contact.image.valid);
   g_assert_cmpuint(contact.up_ack_mask,==,3);g_assert_cmpuint(contact.none_reports,==,0);
+  guint64 generation=0;
+  g_assert_true(goodix_acquisition_release_pending(capture,&generation));
+  g_assert_cmpuint(generation,==,contact.release_generation);g_assert_cmpuint(contact.released,==,0);
   emit_up();assert_image_success();
   const guint8 zero_prefix[5]={0};
   g_assert_cmpmem(contact.image.prefix,5,zero_prefix,5);
@@ -933,7 +980,8 @@ contact_waits_for_boundaries(void)
   g_assert_cmpuint(contact.removal_reports,==,0);g_assert_cmpuint(contact.none_reports,==,0);
   cb=contact.held_up1;data=contact.held_up1_data;contact.held_up1=NULL;
   finish_up1(test_device,cb,data);
-  g_assert_cmpuint(contact.done,==,0);g_assert_cmpuint(contact.none_reports,==,0);
+  g_assert_cmpuint(contact.done,==,1);g_assert_cmpuint(contact.none_reports,==,0);
+  g_assert_cmpuint(contact.released,==,0);g_assert_true(goodix_acquisition_release_pending(capture,NULL));
   emit_up();assert_image_success();contact_teardown();
 }
 
@@ -981,8 +1029,11 @@ contact_rejects_malformed_replies(void)
     if(which==1)options.manual_length=length;
     if(which==2)options.up_length=length;
     contact_start();g_assert_cmpuint(contact.done,==,1);
-    g_assert_error(result_error,FP_DEVICE_ERROR,FP_DEVICE_ERROR_PROTO);
-    g_assert_false(contact.image.valid);g_assert_cmpuint(contact.none_reports,==,0);
+    if(which==2) {
+      g_assert_no_error(result_error);g_assert_error(release_error,FP_DEVICE_ERROR,FP_DEVICE_ERROR_PROTO);
+      g_assert_true(contact.image.valid);g_assert_cmpuint(contact.released,==,1);
+    } else {g_assert_error(result_error,FP_DEVICE_ERROR,FP_DEVICE_ERROR_PROTO);g_assert_false(contact.image.valid);}
+    g_assert_cmpuint(contact.none_reports,==,0);
     if(which<2)g_assert_cmpuint(contact.frames,==,0);
     assert_no_successor_contact();contact_teardown();
   }
@@ -991,8 +1042,11 @@ contact_rejects_malformed_replies(void)
     contact_setup();guint8 *reply=which?contact.up_reply:contact.down_reply;
     reply[0]=irqs[i];reply[1]=irqs[i]>>8;
     contact_start();g_assert_cmpuint(contact.done,==,1);
-    g_assert_error(result_error,FP_DEVICE_ERROR,FP_DEVICE_ERROR_PROTO);
-    g_assert_cmpuint(contact.none_reports,==,0);g_assert_false(contact.image.valid);
+    if(which) {
+      g_assert_no_error(result_error);g_assert_error(release_error,FP_DEVICE_ERROR,FP_DEVICE_ERROR_PROTO);
+      g_assert_true(contact.image.valid);g_assert_cmpuint(contact.released,==,1);
+    } else {g_assert_error(result_error,FP_DEVICE_ERROR,FP_DEVICE_ERROR_PROTO);g_assert_false(contact.image.valid);}
+    g_assert_cmpuint(contact.none_reports,==,0);
     if(!which)g_assert_cmpuint(contact.frames,==,0);
     assert_no_successor_contact();contact_teardown();
   }
@@ -1028,8 +1082,11 @@ contact_cancellation_stops_successors(void)
         else {contact.held_up1=NULL;finish_up1(test_device,cb,data);}
       }
     }
-    g_assert_cmpuint(contact.done,==,1);g_assert_error(result_error,G_IO_ERROR,G_IO_ERROR_CANCELLED);
-    g_assert_false(contact.image.valid);
+    g_assert_cmpuint(contact.done,==,1);
+    if(point==2) {
+      g_assert_no_error(result_error);g_assert_error(release_error,G_IO_ERROR,G_IO_ERROR_CANCELLED);
+      g_assert_true(contact.image.valid);g_assert_cmpuint(contact.released,==,1);
+    } else {g_assert_error(result_error,G_IO_ERROR,G_IO_ERROR_CANCELLED);g_assert_false(contact.image.valid);}
     if(point==0 || point==4 || point==5 || point==7)g_assert_cmpuint(contact.frames,==,0);
     if(point==7)g_assert_cmpuint(contact.down_arms,==,1);
     if(point==8)g_assert_cmpuint(contact.up_arms,==,1);
@@ -1321,8 +1378,10 @@ adc_crc_and_transport_errors_invalidate_without_extra_update(void)
     if(point==2) options.failure=FAIL_RESTORE;
     if(point==3) options.failure=FAIL_UP0;
     if(point==4) options.up_length=19;
-    contact_start();g_assert_cmpuint(contact.done,==,1);g_assert_nonnull(result_error);
-    g_assert_false(contact.image.valid);g_assert_cmpuint(contact.none_reports,==,0);
+    contact_start();g_assert_cmpuint(contact.done,==,1);
+    if(point==4) {g_assert_no_error(result_error);g_assert_nonnull(release_error);g_assert_true(contact.image.valid);}
+    else {g_assert_nonnull(result_error);g_assert_false(contact.image.valid);}
+    g_assert_cmpuint(contact.none_reports,==,0);
     g_assert_cmpuint(adc_update_calls,==,updates+(point>=2));
     if(point<2) {g_assert_cmpuint(contact.restores,==,0);g_assert_cmpuint(contact.up_arms,==,0);}
     assert_adc_context_cleared();assert_no_successor_contact();contact_teardown();
@@ -1383,6 +1442,375 @@ adc_stale_image_owner_cannot_mutate_new_reference(void)
   contact_teardown();
 }
 
+static void
+contact_release_survives_public_action_completion(void)
+{
+  contact_setup();options.hold_up_event=TRUE;options.cancel_public_token_on_image=TRUE;
+  guint reads=cancellable_reads;
+  contact_start();
+  g_assert_cmpuint(contact.done,==,1);g_assert_cmpuint(contact.released,==,0);
+  g_assert_no_error(result_error);g_assert_true(contact.image.valid);
+  g_assert_false(public_action_available);g_assert_null(action_cancellable);
+  g_assert_cmpuint(cancellable_reads,==,reads+1);
+  guint64 generation=0;
+  g_assert_true(goodix_acquisition_release_pending(capture,&generation));
+  g_assert_cmpuint(generation,==,contact.release_generation);
+  emit_up();assert_image_success();
+  g_assert_cmpuint(cancellable_reads,==,reads+1);
+  g_assert_cmpuint(capture->generation,==,generation);
+  contact_teardown();
+}
+
+static void
+contact_uses_original_cancellable_before_image(void)
+{
+  contact_setup();options.hold_restore=1;
+  GCancellable *original=g_object_ref(action_cancellable);
+  guint reads=cancellable_reads;
+  contact_start();g_assert_cmpuint(contact.done,==,0);
+  /* A different public action token must not replace this capture's owner. */
+  g_clear_object(&action_cancellable);action_cancellable=g_cancellable_new();
+  g_cancellable_cancel(original);
+  GoodixNoneCallback cb=contact.held_restore;gpointer data=contact.held_restore_data;
+  contact.held_restore=NULL;contact.restore_acks++;cb(test_device,data,NULL);
+  g_assert_cmpuint(contact.done,==,1);g_assert_false(contact.image.valid);
+  g_assert_error(result_error,G_IO_ERROR,G_IO_ERROR_CANCELLED);
+  g_assert_cmpuint(contact.released,==,0);g_assert_cmpuint(contact.up_arms,==,0);
+  g_assert_cmpuint(cancellable_reads,==,reads+1);
+  g_assert_false(goodix_acquisition_release_pending(capture,NULL));
+  g_object_unref(original);contact_teardown();
+}
+
+static void
+contact_guard_outlives_public_acquisition_reference(void)
+{
+  contact_setup();options.hold_up_event=TRUE;options.free_on_complete=TRUE;
+  contact_start();g_assert_cmpuint(contact.done,==,1);g_assert_null(capture);
+  g_assert_cmpuint(contact.released,==,0);g_assert_nonnull(contact.up_wait.callback);
+  /* Only the independent event/guard owners keep the acquisition alive now. */
+  emit_up();assert_image_success();contact_teardown();
+}
+
+static void
+contact_buffered_up_during_image_callback_completes_once(void)
+{
+  for(guint drop=0;drop<2;drop++) {
+    contact_setup();options.up_in_image_callback=TRUE;options.free_on_complete=drop;
+    contact_start();assert_image_success();
+    g_assert_cmpuint(contact.done,==,1);g_assert_cmpuint(contact.released,==,1);
+    g_assert_null(contact.up_wait.callback);contact_teardown();
+  }
+}
+
+static void
+contact_up_timeout_after_image_is_release_error_only(void)
+{
+  contact_setup();options.hold_up_event=TRUE;contact_start();
+  g_assert_cmpuint(contact.done,==,1);g_assert_cmpuint(contact.released,==,0);
+  emit_event(&contact.up_wait,contact.up_reply,20,
+      g_error_new_literal(G_IO_ERROR,G_IO_ERROR_TIMED_OUT,"synthetic physical UP timeout"));
+  g_assert_cmpuint(contact.done,==,1);g_assert_no_error(result_error);
+  g_assert_cmpuint(contact.released,==,1);g_assert_error(release_error,G_IO_ERROR,G_IO_ERROR_TIMED_OUT);
+  g_assert_true(contact.image.valid);g_assert_cmpuint(contact.none_reports,==,0);
+  g_assert_false(goodix_acquisition_release_pending(capture,NULL));
+  assert_adc_context_cleared();assert_no_successor_contact();contact_teardown();
+}
+
+static void
+contact_explicit_cancel_after_image_is_release_error_only(void)
+{
+  contact_setup();options.hold_up_event=TRUE;contact_start();
+  g_assert_cmpuint(contact.done,==,1);g_assert_cmpuint(contact.released,==,0);
+  goodix_acquisition_cancel(capture);assert_adc_context_cleared();
+  emit_up();g_assert_cmpuint(contact.done,==,1);g_assert_no_error(result_error);
+  g_assert_cmpuint(contact.released,==,1);g_assert_error(release_error,G_IO_ERROR,G_IO_ERROR_CANCELLED);
+  g_assert_true(contact.image.valid);g_assert_cmpuint(contact.none_reports,==,0);
+  g_assert_false(goodix_acquisition_release_pending(capture,NULL));
+  assert_no_successor_contact();contact_teardown();
+}
+
+static void
+unexpected_successor_acquired(FpDevice *dev,const GxImage *image,
+                             GoodixAcquiredOutcome outcome,gpointer data,GError *error)
+{
+  (void)dev;(void)image;(void)outcome;(void)data;(void)error;
+  g_assert_not_reached();
+}
+
+static void
+contact_pending_release_rejects_new_capture(void)
+{
+  contact_setup();options.hold_up_event=TRUE;contact_start();
+  g_assert_cmpuint(contact.done,==,1);g_assert_cmpuint(contact.released,==,0);
+  guint64 generation=capture->generation;FpiSsm *guard=capture->ssm;
+  gsize trace_length=contact.trace->len;
+  g_test_expect_message("libfprint-goodix521d",G_LOG_LEVEL_CRITICAL,"*assertion*failed*");
+  goodix_acquisition_start(capture,FALSE,unexpected_successor_acquired,NULL);
+  g_test_assert_expected_messages();
+  g_assert_cmpuint(capture->generation,==,generation);g_assert_true(capture->ssm==guard);
+  g_assert_cmpuint(contact.trace->len,==,trace_length);g_assert_cmpuint(contact.done,==,1);
+  g_assert_true(goodix_acquisition_release_pending(capture,NULL));
+  emit_up();assert_image_success();contact_teardown();
+}
+
+static void
+contact_stale_release_owner_cannot_release_new_guard(void)
+{
+  contact_setup();options.hold_up_event=TRUE;contact_start();
+  g_assert_cmpuint(contact.done,==,1);g_assert_cmpuint(contact.released,==,0);
+  EventWait old=contact.up_wait;memset(&contact.up_wait,0,sizeof contact.up_wait);
+  fpi_ssm_mark_failed(capture->ssm,
+      g_error_new_literal(G_IO_ERROR,G_IO_ERROR_FAILED,"synthetic old release epoch loss"));
+  g_assert_cmpuint(contact.done,==,1);g_assert_cmpuint(contact.released,==,1);
+  g_assert_no_error(result_error);g_assert_error(release_error,G_IO_ERROR,G_IO_ERROR_FAILED);
+  assert_adc_context_cleared();
+  memset(&reference,0,sizeof reference);reference.fail_state=reference.reject_state=-1;
+  public_action_available=TRUE;g_clear_object(&action_cancellable);action_cancellable=g_cancellable_new();
+  reference_mode=TRUE;
+  goodix_acquisition_start(capture,TRUE,reference_acquired,NULL);
+  g_assert_no_error(result_error);g_assert_true(goodix_acquisition_commit_reference(capture));
+  reference_mode=FALSE;contact_reset(reference_seed);options.hold_up_event=TRUE;contact_start();
+  g_assert_cmpuint(contact.done,==,1);g_assert_cmpuint(contact.released,==,0);
+  guint64 generation=contact.release_generation;
+  GxExposureState exposure=capture->exposure;
+  old.callback(test_device,contact.up_reply,20,old.data,NULL);old.destroy(old.data);
+  g_assert_cmpuint(contact.done,==,1);g_assert_cmpuint(contact.released,==,0);
+  g_assert_cmpuint(contact.none_reports,==,0);g_assert_nonnull(contact.up_wait.callback);
+  g_assert_cmpmem(&capture->exposure,sizeof capture->exposure,&exposure,sizeof exposure);
+  g_assert_true(goodix_acquisition_release_pending(capture,NULL));
+  g_assert_cmpuint(capture->generation,==,generation);
+  emit_up();assert_image_success();contact_teardown();
+}
+
+static void
+cache_image_fixture(GxImage *image,guint usable,guint16 excluded)
+{
+  memset(image,0,sizeof *image);image->valid=1;image->generation=0x12345678;
+  image->marker=1;memcpy(image->prefix,"cache",5);
+  for(guint i=0;i<GX_PIXELS;i++) {image->pixels[2*i]=4095&255;image->pixels[2*i+1]=4095>>8;}
+  guint index=0;
+  for(guint y=2;y<62;y++) for(guint x=2;x<78;x++) {
+    guint16 value=index++<usable?1000:excluded;
+    guint pos=2*(y*80+x);image->pixels[pos]=value;image->pixels[pos+1]=value>>8;
+  }
+}
+
+static void
+assert_cache_image(const GxImage *actual,const GxImage *expected)
+{
+  const guint8 zero[5]={0};
+  g_assert_true(actual->valid);g_assert_cmpuint(actual->generation,==,0);
+  g_assert_cmpuint(actual->marker,==,0);g_assert_cmpmem(actual->prefix,5,zero,5);
+  g_assert_cmpmem(actual->pixels,sizeof actual->pixels,expected->pixels,sizeof expected->pixels);
+}
+
+static void
+cache_reference_stage_commit(void)
+{
+  reference_setup();
+  GxImage image,expected;
+  guint8 seed[16];memcpy(seed,reference_seed,16);cache_image_fixture(&image,4560,3800);expected=image;
+  guint resets=adc_reset_calls;guint64 generation=capture->generation;
+  g_assert_true(goodix_acquisition_stage_reference(capture,&image,seed));
+  g_assert_cmpuint(capture->generation,==,generation);
+  g_assert_false(capture->context_valid);g_assert_false(capture->reference_seed_valid);
+  g_assert_false(capture->exposure_valid);g_assert_true(capture->reference_pending);
+  g_assert_cmpuint(reference.commands,==,0);g_assert_cmpuint(adc_reset_calls,==,resets);
+  assert_cache_image(&capture->pending_reference_image,&expected);
+  g_assert_cmpmem(capture->pending_reference_seed,16,reference_seed,16);
+  /* Caller storage can be immediately reused after staging. */
+  memset(&image,0xa5,sizeof image);memset(seed,0xb6,sizeof seed);
+  assert_cache_image(&capture->pending_reference_image,&expected);
+  g_assert_true(goodix_acquisition_commit_reference(capture));
+  g_assert_true(capture->context_valid);g_assert_true(capture->exposure_valid);
+  g_assert_cmpuint(adc_reset_calls,==,resets+1);g_assert_cmpuint(reference.commands,==,0);
+  assert_cache_image(&capture->reference_image,&expected);
+  g_assert_cmpmem(capture->reference_seed,16,reference_seed,16);
+  g_assert_cmpmem(capture->down_seed,16,reference_seed,16);
+  const GxImage zero={0};g_assert_cmpmem(&capture->pending_reference_image,sizeof zero,&zero,sizeof zero);
+  reference_mode=FALSE;contact_reset(reference_seed);contact_start();assert_image_success();contact_teardown();
+}
+
+static void
+cache_copy_requires_committed_valid_reference(void)
+{
+  reference_setup();
+  GxImage output,before;guint8 seed[16],seed_before[16];
+  memset(&output,0xa5,sizeof output);before=output;memset(seed,0xb6,16);memcpy(seed_before,seed,16);
+  for(guint pending=0;pending<2;pending++) {
+    if(pending) goodix_acquisition_start(capture,TRUE,reference_acquired,NULL);
+    GoodixAcquisition state=*capture;
+    g_assert_false(goodix_acquisition_copy_reference(capture,&output,seed));
+    g_assert_cmpmem(&output,sizeof output,&before,sizeof before);g_assert_cmpmem(seed,16,seed_before,16);
+    g_assert_cmpmem(capture,sizeof *capture,&state,sizeof state);
+  }
+  g_assert_true(goodix_acquisition_commit_reference(capture));
+  g_assert_cmpuint(reference.accepted.generation,!=,0);
+  g_assert_true(goodix_acquisition_copy_reference(capture,&output,seed));
+  assert_cache_image(&output,&reference.accepted);g_assert_cmpmem(seed,16,reference_seed,16);
+  memset(&output,0xa5,sizeof output);memset(seed,0xb6,16);
+  g_assert_true(goodix_acquisition_copy_reference(capture,&output,seed));
+  assert_cache_image(&output,&reference.accepted);g_assert_cmpmem(seed,16,reference_seed,16);
+  goodix_acquisition_cancel(capture);before=output;memcpy(seed_before,seed,16);
+  g_assert_false(goodix_acquisition_copy_reference(capture,&output,seed));
+  g_assert_cmpmem(&output,sizeof output,&before,sizeof before);g_assert_cmpmem(seed,16,seed_before,16);
+  reference_teardown();
+}
+
+static void
+cache_copy_never_exports_contact_or_latest_up(void)
+{
+  const guint8 up_seed[16]={0,0,0,0,1,1,0xff,0xff,0,1,0xff,0x7e,0x91,0x91,2,4};
+  adc_fixture=TRUE;contact_setup();options.use_flat_pixel=TRUE;options.flat_pixel=3500;
+  options.hold_up_event=TRUE;contact_start();
+  GxImage output;guint8 seed[16];
+  g_assert_true(goodix_acquisition_release_pending(capture,NULL));
+  g_assert_true(goodix_acquisition_copy_reference(capture,&output,seed));
+  assert_cache_image(&output,&reference.accepted);g_assert_cmpmem(seed,16,reference_seed,16);
+  g_assert_cmpint(memcmp(output.pixels,contact.image.pixels,sizeof output.pixels),!=,0);
+  emit_up();assert_image_success();
+  g_assert_cmpmem(capture->down_seed,16,up_seed,16);
+  g_assert_true(goodix_acquisition_copy_reference(capture,&output,seed));
+  assert_cache_image(&output,&reference.accepted);g_assert_cmpmem(seed,16,reference_seed,16);
+  g_assert_cmpint(memcmp(seed,capture->down_seed,16),!=,0);
+  contact_teardown();
+}
+
+static void
+cache_restore_resets_factory_exposure_and_first_down_seed(void)
+{
+  const guint8 up_seed[16]={0,0,0,0,1,1,0xff,0xff,0,1,0xff,0x7e,0x91,0x91,2,4};
+  const guint16 factory[4]={161,164,170,175};
+  adc_fixture=TRUE;contact_setup();
+  for(guint i=0;i<3;i++) {
+    if(i)contact_reset(up_seed);
+    options.use_flat_pixel=TRUE;options.flat_pixel=3500;contact_start();assert_image_success();
+  }
+  g_assert_cmpuint(capture->exposure.dac,==,170);g_assert_cmpuint(capture->exposure.high_count,==,3);
+  GxImage cached;guint8 seed[16],factory_otp[64];memcpy(factory_otp,capture->otp,64);
+  g_assert_true(goodix_acquisition_copy_reference(capture,&cached,seed));
+  g_assert_cmpmem(seed,16,reference_seed,16);g_assert_cmpmem(capture->down_seed,16,up_seed,16);
+  /* Model a genuinely new acquisition owner after a clean logical close. No
+   * old detector generation, UP seed, or adaptive DAC state enters this object. */
+  goodix_acquisition_free(capture);capture=goodix_acquisition_new(test_device,factory_otp);
+  guint resets=adc_reset_calls;
+  g_assert_true(goodix_acquisition_stage_reference(capture,&cached,seed));
+  g_assert_false(capture->context_valid);g_assert_false(capture->exposure_valid);
+  g_assert_true(goodix_acquisition_commit_reference(capture));
+  g_assert_cmpuint(adc_reset_calls,==,resets+1);
+  g_assert_cmpuint(capture->exposure.initial_dac,==,161);g_assert_cmpuint(capture->exposure.dac,==,161);
+  g_assert_cmpuint(capture->exposure.integration,==,100);g_assert_cmpuint(capture->exposure.high_count,==,0);
+  g_assert_cmpuint(capture->exposure.low_count,==,0);g_assert_cmpuint(capture->exposure.steps,==,0);
+  g_assert_cmpmem(capture->live_image_dacs,sizeof factory,factory,sizeof factory);
+  g_assert_cmpmem(capture->reference_seed,16,reference_seed,16);
+  g_assert_cmpmem(capture->down_seed,16,reference_seed,16);assert_cache_image(&capture->reference_image,&cached);
+  contact_reset(reference_seed);options.use_flat_pixel=TRUE;options.flat_pixel=3500;
+  contact_start();assert_image_success();g_assert_cmpuint(capture->exposure.high_count,==,1);
+  contact_teardown();
+}
+
+static void
+cache_stage_rejects_malformed_image_transactionally(void)
+{
+  reference_setup();
+  for(guint kind=0;kind<6;kind++) {
+    GxImage image,before;cache_image_fixture(&image,4560,3800);
+    if(kind==0)image.valid=0;
+    if(kind==1){image.pixels[0]=0;image.pixels[1]=16;} /*4096 outside crop.*/
+    if(kind==2){guint pos=2*(2*80+2);image.pixels[pos]=255;image.pixels[pos+1]=255;}
+    if(kind==3)cache_image_fixture(&image,0,3800);
+    if(kind==4)cache_image_fixture(&image,0,100);
+    if(kind==5)cache_image_fixture(&image,0,4095);
+    before=image;GoodixAcquisition state=*capture;
+    g_assert_false(goodix_acquisition_stage_reference(capture,&image,reference_seed));
+    g_assert_cmpmem(capture,sizeof *capture,&state,sizeof state);
+    g_assert_cmpmem(&image,sizeof image,&before,sizeof before);
+  }
+  reference_teardown();
+}
+
+static void
+cache_stage_requires_strict_85_percent_interior(void)
+{
+  reference_setup();
+  const guint16 excluded[]={100,3800,4095};
+  for(guint i=0;i<G_N_ELEMENTS(excluded);i++) {
+    GxImage image;cache_image_fixture(&image,3876,excluded[i]);
+    GoodixAcquisition state=*capture;
+    g_assert_false(goodix_acquisition_stage_reference(capture,&image,reference_seed));
+    g_assert_cmpmem(capture,sizeof *capture,&state,sizeof state);
+    cache_image_fixture(&image,3877,excluded[i]);
+    g_assert_true(goodix_acquisition_stage_reference(capture,&image,reference_seed));
+    assert_cache_image(&capture->pending_reference_image,&image);
+    g_assert_false(capture->context_valid);g_assert_cmpuint(reference.commands,==,0);
+    goodix_acquisition_invalidate_context(capture);assert_adc_context_cleared();
+  }
+  reference_teardown();
+}
+
+static void
+cache_helpers_reject_null_and_alias_without_mutation(void)
+{
+  reference_setup();GxImage image;cache_image_fixture(&image,4560,3800);
+  for(guint kind=0;kind<6;kind++) {
+    if(kind==3)capture->contact=image;
+    GoodixAcquisition state=*capture;GxImage before=image;
+    gboolean accepted;
+    if(kind==0)accepted=goodix_acquisition_stage_reference(NULL,&image,reference_seed);
+    else if(kind==1)accepted=goodix_acquisition_stage_reference(capture,NULL,reference_seed);
+    else if(kind==2)accepted=goodix_acquisition_stage_reference(capture,&image,NULL);
+    else if(kind==3)accepted=goodix_acquisition_stage_reference(capture,&capture->contact,reference_seed);
+    else if(kind==4)accepted=goodix_acquisition_stage_reference(capture,&image,capture->reference_seed);
+    else accepted=goodix_acquisition_stage_reference(capture,&image,image.pixels);
+    g_assert_false(accepted);g_assert_cmpmem(capture,sizeof *capture,&state,sizeof state);
+    g_assert_cmpmem(&image,sizeof image,&before,sizeof before);
+    memset(&capture->contact,0,sizeof capture->contact);
+  }
+  g_assert_true(goodix_acquisition_stage_reference(capture,&image,reference_seed));
+  g_assert_true(goodix_acquisition_commit_reference(capture));
+  for(guint kind=0;kind<6;kind++) {
+    GxImage output,before;guint8 seed[16],seed_before[16];
+    memset(&output,0xa5,sizeof output);before=output;memset(seed,0xb6,16);memcpy(seed_before,seed,16);
+    GoodixAcquisition state=*capture;gboolean accepted;
+    if(kind==0)accepted=goodix_acquisition_copy_reference(NULL,&output,seed);
+    else if(kind==1)accepted=goodix_acquisition_copy_reference(capture,NULL,seed);
+    else if(kind==2)accepted=goodix_acquisition_copy_reference(capture,&output,NULL);
+    else if(kind==3)accepted=goodix_acquisition_copy_reference(capture,&capture->reference_image,seed);
+    else if(kind==4)accepted=goodix_acquisition_copy_reference(capture,&output,capture->down_seed);
+    else accepted=goodix_acquisition_copy_reference(capture,&output,output.pixels);
+    g_assert_false(accepted);g_assert_cmpmem(capture,sizeof *capture,&state,sizeof state);
+    g_assert_cmpmem(&output,sizeof output,&before,sizeof before);g_assert_cmpmem(seed,16,seed_before,16);
+  }
+  reference_teardown();
+}
+
+static void
+cache_stage_rejects_active_ready_and_pending_contexts(void)
+{
+  GxImage image;cache_image_fixture(&image,4560,3800);
+  reference_setup();
+  g_assert_true(goodix_acquisition_stage_reference(capture,&image,reference_seed));
+  GoodixAcquisition pending=*capture;
+  g_assert_false(goodix_acquisition_stage_reference(capture,&image,reference_seed));
+  g_assert_cmpmem(capture,sizeof *capture,&pending,sizeof pending);
+  g_assert_true(goodix_acquisition_commit_reference(capture));
+  GoodixAcquisition ready=*capture;
+  g_assert_false(goodix_acquisition_stage_reference(capture,&image,reference_seed));
+  g_assert_cmpmem(capture,sizeof *capture,&ready,sizeof ready);
+  reference_teardown();
+  /* An incomplete paired reference has no ready/pending cache yet; the live
+   * SSM alone must reject staging and continue its original reference work. */
+  reference_setup();reference.reject_state=PAIRED_REFERENCE_F2_PHASE1;reference.hold_final=TRUE;
+  goodix_acquisition_start(capture,TRUE,reference_acquired,NULL);
+  g_assert_nonnull(capture->ssm);g_assert_false(capture->context_valid);g_assert_false(capture->reference_pending);
+  GoodixAcquisition active=*capture;
+  g_assert_false(goodix_acquisition_stage_reference(capture,&image,reference_seed));
+  g_assert_cmpmem(capture,sizeof *capture,&active,sizeof active);
+  reference.held_callback(test_device,reference.held_reply,20,reference.held_data,NULL);
+  g_assert_cmpuint(reference.completions,==,1);g_assert_no_error(result_error);
+  reference_teardown();
+}
+
 int main(int argc, char **argv)
 {
   g_test_init(&argc,&argv,NULL);
@@ -1420,6 +1848,22 @@ int main(int argc, char **argv)
   g_test_add_func("/goodix521d/acquisition/adc-refresh-and-explicit-reset-clear-history",adc_refresh_and_explicit_reset_clear_history);
   g_test_add_func("/goodix521d/acquisition/adc-stale-image-owner-cannot-mutate-new-reference",adc_stale_image_owner_cannot_mutate_new_reference);
   g_test_add_func("/goodix521d/acquisition/adc-saturated-frame-preserves-raw-without-advancing-history",adc_saturated_frame_preserves_raw_without_advancing_history);
+  g_test_add_func("/goodix521d/acquisition/contact-release-survives-public-action-completion",contact_release_survives_public_action_completion);
+  g_test_add_func("/goodix521d/acquisition/contact-uses-original-cancellable-before-image",contact_uses_original_cancellable_before_image);
+  g_test_add_func("/goodix521d/acquisition/contact-guard-outlives-public-acquisition-reference",contact_guard_outlives_public_acquisition_reference);
+  g_test_add_func("/goodix521d/acquisition/contact-buffered-up-during-image-callback-completes-once",contact_buffered_up_during_image_callback_completes_once);
+  g_test_add_func("/goodix521d/acquisition/contact-up-timeout-after-image-is-release-error-only",contact_up_timeout_after_image_is_release_error_only);
+  g_test_add_func("/goodix521d/acquisition/contact-explicit-cancel-after-image-is-release-error-only",contact_explicit_cancel_after_image_is_release_error_only);
+  g_test_add_func("/goodix521d/acquisition/contact-pending-release-rejects-new-capture",contact_pending_release_rejects_new_capture);
+  g_test_add_func("/goodix521d/acquisition/contact-stale-release-owner-cannot-release-new-guard",contact_stale_release_owner_cannot_release_new_guard);
+  g_test_add_func("/goodix521d/acquisition/cache-reference-stage-commit",cache_reference_stage_commit);
+  g_test_add_func("/goodix521d/acquisition/cache-copy-requires-committed-valid-reference",cache_copy_requires_committed_valid_reference);
+  g_test_add_func("/goodix521d/acquisition/cache-copy-never-exports-contact-or-latest-up",cache_copy_never_exports_contact_or_latest_up);
+  g_test_add_func("/goodix521d/acquisition/cache-restore-resets-factory-exposure-and-first-down-seed",cache_restore_resets_factory_exposure_and_first_down_seed);
+  g_test_add_func("/goodix521d/acquisition/cache-stage-rejects-malformed-image-transactionally",cache_stage_rejects_malformed_image_transactionally);
+  g_test_add_func("/goodix521d/acquisition/cache-stage-requires-strict-85-percent-interior",cache_stage_requires_strict_85_percent_interior);
+  g_test_add_func("/goodix521d/acquisition/cache-helpers-reject-null-and-alias-without-mutation",cache_helpers_reject_null_and_alias_without_mutation);
+  g_test_add_func("/goodix521d/acquisition/cache-stage-rejects-active-ready-and-pending-contexts",cache_stage_rejects_active_ready_and_pending_contexts);
   int result=g_test_run();
   g_log_remove_handler("libfprint-goodix521d",log_handler);g_array_unref(timing_records);
   return result;

@@ -31,9 +31,9 @@ All file access is read-only. The original Windows volume and any saved calibrat
 
 ## Capture and matching contract
 
-Start with the reader clear. Opening obtains a fresh paired background: three FDT snapshots, two differently flagged background images, the original shifted-word FDT gates and strict cropped image MAD below 200. The free preprocessor additionally rejects an invalid reference range. A finger-covered reference is not an acceptable workaround.
+Start with the reader clear. Opening without an eligible RAM cache obtains a fresh paired background: three FDT snapshots, two differently flagged background images, the original shifted-word FDT gates and strict cropped image MAD below 200. The free preprocessor additionally rejects an invalid reference range. A finger-covered reference is not an acceptable workaround.
 
-A validated FDT or image stability rejection permits at most one reacquisition within that same initialized open. The second attempt uses the first FDT snapshot transformed as `uint16((raw >> 1) * 257)` for its seed; partial reference images are discarded. This is a bounded Linux recovery policy based on the Windows seed-update operation, not a Windows retry-count claim. Both attempts share the original action deadline (45 seconds during open) and unchanged acceptance gates. Transport, malformed-data, integrity, or cancellation failures do not trigger this retry. The seed is never saved or carried into another open. A journal `paired-reference-retry` line identifies this recovery attempt.
+A validated FDT or image stability rejection permits at most one reacquisition within that same initialized open. The second attempt uses the first FDT snapshot transformed as `uint16((raw >> 1) * 257)` for its seed; partial reference images are discarded. This is a bounded Linux recovery policy based on the Windows seed-update operation, not a Windows retry-count claim. Both attempts share the original action deadline (45 seconds during open) and unchanged acceptance gates. Transport, malformed-data, integrity, or cancellation failures do not trigger this retry. A rejected-attempt seed is never saved or carried into another open; the separately accepted reference cache is described below. A journal `paired-reference-retry` line identifies this recovery attempt.
 
 Normal contacts now follow the pinned GF5298 detector sequence within one
 healthy initialized hardware context. Accepted reference F1 initializes two
@@ -60,7 +60,10 @@ Windows caller and its single image submission. After integrity validation,
 exposure feedback updates the four DAC words for future requests without
 changing the captured pixels. An acknowledged volatile write then restores
 register `0x022c` to `0x020a` before the removal arm. A failed image or restore
-stops the contact; there is no hidden settling burst or quality-based recapture. The validated UP snapshot updates only
+stops the contact; there is no hidden settling burst or quality-based recapture.
+After both removal-arm ACKs, the owned image is delivered to preprocessing
+without waiting for physical removal. The independent release guard survives
+that result and blocks the next capture. The validated UP snapshot updates only
 the next DOWN seed, using `uint16((raw >> 1) * 257)`; it never replaces the
 reference/manual seed or a biometric template. UP arming still uses the distinct
 touch-adjusted translation of the current DOWN event. Contact images never pass
@@ -75,8 +78,8 @@ finger-needed clear while a fresh reference is requested, and never extends the
 action deadline. The reference seed is committed only after preprocessing
 initialization/rebase and main-thread ownership checks succeed.
 
-Cold public opens still request a clear reader and obtain a fresh paired
-reference. Consistency/range checks do not establish automatic finger absence,
+A first open without an eligible in-memory reference requests a clear reader
+and obtains a fresh paired reference. Consistency/range checks do not establish automatic finger absence,
 and unstable reference readings do not prove a finger was placed too early.
 After an unqualified transport failure, the next initialization likewise requests
 a clear reader; resetting the sensor is not reported as a validated removal.
@@ -129,7 +132,7 @@ fprintd-verify "$USER"
 Use `fprintd-enroll "$USER"` only when a new enrollment is actually needed; do not overwrite a working enrollment to test this change.
 
 Follow PLACE, HOLD and REMOVE in terminal 1. HOLD lasts through image acquisition and restoration; REMOVE is published only after the reader acknowledges its removal
-arm commands. The removal event owner starts before phase 0 because APP10034 can emit IRQ 0x0200 in that interval; success still requires both ordered phase ACKs and an exact checksummed current-owner 0x34 event. Pre-arm or wrong-generation events cannot complete the contact. A stage is not accepted until the separate removal event is validated.
+arm commands. The removal event owner starts before phase 0 because APP10034 can emit IRQ 0x0200 in that interval; release completion still requires both ordered phase ACKs and an exact checksummed current-owner 0x34 event. Pre-arm or wrong-generation events cannot clear the release guard. The captured image can be processed and its result reported before physical removal; another contact or enrollment stage cannot start until the separate removal event is validated.
 For enrollment, the initial contact is fprintd's duplicate check, before counted stages.
 The monitor exits after its bounded observation window or Ctrl+C; stopping it
 does not cancel the separate client command.
@@ -225,3 +228,64 @@ distributions, ineligible measurement redistribution, invalid inputs and state
 ownership. No DLL, personal factory record or captured fingerprint is included.
 Older ten-frame captures used different DOWN firmware setup and cannot establish
 the quality of the first image under this corrected sequence.
+
+## Result delivery and release ownership
+
+The pinned Windows path delivers its sample through67850/6da00/6a7a4 before
+arming UP at687c7. Its independent contact flag blocks another DOWN capture
+until UP. This implementation likewise separates sample processing from
+physical removal, while conservatively requiring the restore and both arm ACKs
+before delivering the image. Matching and enrollment quality checks are
+unchanged. Enrollment progress may appear before lift, but no next sample can
+be acquired from that held contact.
+
+The release guard has its own generation and original bounded arm deadline.
+It outlives a completed public verify/identify action without consulting that
+action's cancellable. A new action waits for this guard before arming DOWN.
+A release fault before result publication suppresses that result; a fault after
+completion invalidates the future context without issuing a second result.
+Close and cancellation stop and drain the guard rather than waiting for a
+physical lift. Core finger-status resets on public completion do not count as
+validated removal. Lift after the reported result: a subsequent same-open
+action may be waiting for that release and correctly issue no new PLACE cue. The narrow transport health exception allows only an
+acknowledged, current, unexpired UP guard, with all other health checks intact.
+
+Acquisition UP timing can therefore finish after the matching action's timing.
+A normal client close may cancel that leftover guard after the result; its
+UP-cancel timing record alone does not mean authentication failed.
+These overlapping phases must not be added together or interpreted as a result
+waiting for removal. The separate clean-close RAM reference policy below avoids reacquiring that
+baseline on every eligible subsequent public open.
+
+## Clean-close RAM reference reuse
+
+Only a successfully accepted FIRST reference image and its accepted F1 seed
+may survive a clean public close, in the same FpDevice object's memory. The
+entry is bound to exact factory bytes, generated configuration, and the current
+profile/processing identity. It contains no captured contact, template, pending
+event, previous UP seed, adaptive processing history or exposure-controller
+history. Nothing is saved to disk.
+
+Reopen still verifies firmware and the provisioned key, resets the sensor,
+restores the full known configuration, and authenticates a fresh TLS session.
+Only then may an identity-matched reference initialize fresh OpenChicago state.
+Its range is checked again; fresh detector seeds and factory exposure state are
+committed only after initialization and ownership checks succeed. The cached
+image is never submitted as a probe, and a new authenticated capture is always
+required for authentication. A journal cache-use line identifies this path.
+
+A real acquisition/transport fault, refresh-required transition, incompatible
+identity/configuration, malformed entry, failed initialization or failed close
+cleanup removes eligibility. Intentional cancellation of an outstanding UP
+guard during normal close is expected shutdown and does not itself invalidate
+an independently accepted reference. That old detector ownership is discarded.
+A later public session may authenticate a still-held finger only after full
+restoration and a new capture; successive contacts within one open session
+still require validated removal. Neither reset nor cache reuse claims absence.
+
+This policy follows the demonstrated Windows retention of accepted reference
+state through factory-configuration restoration, while keeping existing Linux
+reset/key/config/TLS checks. It does not assume an uninterrupted transport epoch
+or keep the USB interface leased after close. Device-object destruction clears
+the RAM entry, so a daemon restart or device replacement requires a fresh
+reference. Hardware behavior across restored sessions still needs validation.

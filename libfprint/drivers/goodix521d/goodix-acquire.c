@@ -29,6 +29,10 @@ struct _GoodixAcquisition {
   gboolean exposure_valid;
   GoodixAcquired callback;
   gpointer user_data;
+  GoodixReleased release_callback;
+  gpointer release_data;
+  GCancellable *action_cancel;
+  gboolean image_delivered;
   gboolean reference, cancelled;
   GxTiming timing;
   guint timing_contact;
@@ -75,8 +79,11 @@ acquisition_timing_complete (GoodixAcquisition *self, const GError *error)
 static gboolean
 acquisition_cancelled (GoodixAcquisition *self)
 {
-  GCancellable *cancel=fpi_device_get_cancellable(self->device);
-  return self->cancelled || (cancel && g_cancellable_is_cancelled(cancel));
+  /* After sample delivery the release guard outlives that public action.
+   * Explicit driver cancellation still invalidates it; never consult a new
+   * action's cancellable or an already completed action through FpDevice. */
+  return self->cancelled || (!self->image_delivered && self->action_cancel &&
+                             g_cancellable_is_cancelled(self->action_cancel));
 }
 static gboolean
 acquisition_continue (GoodixAcquisition *self, FpiSsm *ssm)
@@ -98,6 +105,10 @@ acquisition_complete (FpiSsm *ssm, FpDevice *device, GError *error)
   GoodixAcquisition *self = fpi_ssm_get_data (ssm);
   GoodixAcquired callback = self->callback;
   gpointer user_data = self->user_data;
+  gboolean delivered=self->image_delivered;
+  GoodixReleased release_callback=self->release_callback;
+  gpointer release_data=self->release_data;
+  guint64 generation=self->generation;
   GxImage image = self->reference ? self->paired_images[0] : self->contact;
   GoodixAcquiredOutcome outcome = self->refresh_required ? GOODIX_ACQUIRED_REFRESH_REQUIRED : GOODIX_ACQUIRED_IMAGE;
   if (!error && self->reference) {
@@ -115,7 +126,12 @@ acquisition_complete (FpiSsm *ssm, FpDevice *device, GError *error)
   self->callback = NULL;
   memset (self->paired_images, 0, sizeof self->paired_images);
   memset (&self->contact, 0, sizeof self->contact);
-  callback (device, error || outcome==GOODIX_ACQUIRED_REFRESH_REQUIRED ? NULL : &image, outcome, user_data, error);
+  if (delivered) {
+    if (release_callback) release_callback(device,generation,release_data,error);
+    else g_clear_error(&error);
+  } else if (callback)
+    callback (device, error || outcome==GOODIX_ACQUIRED_REFRESH_REQUIRED ? NULL : &image, outcome, user_data, error);
+  else g_clear_error(&error);
   memset (&image, 0, sizeof image);
 }
 
@@ -270,7 +286,21 @@ static void contact_up_ack(FpDevice *device,guint8 *data,guint16 length,gpointer
        * lift; PRESENT alone now means the contact can be removed. */
       FpiSsm *ssm=self->ssm;
       fpi_device_report_finger_status(device,FP_FINGER_STATUS_PRESENT);
-      (void)acquisition_continue(self,ssm);
+      if (acquisition_continue(self,ssm) && !self->refresh_required && !self->image_delivered) {
+        if (!self->contact.valid || !self->callback) {
+          fpi_ssm_mark_failed(ssm,fpi_device_error_new(FP_DEVICE_ERROR_PROTO));
+        } else {
+          /* Match this sample while the independently owned release guard
+           * waits. Another contact still cannot start until its genuine UP. */
+          GoodixAcquired callback=self->callback;
+          gpointer callback_data=self->user_data;
+          GxImage image=self->contact;
+          self->callback=NULL;self->image_delivered=TRUE;
+          memset(&self->contact,0,sizeof self->contact);
+          callback(device,&image,GOODIX_ACQUIRED_IMAGE,callback_data,NULL);
+          memset(&image,0,sizeof image);
+        }
+      }
     }
   } else g_clear_error(&error);
   up_owner_free(owner);
@@ -367,6 +397,7 @@ goodix_acquisition_free (GoodixAcquisition *self)
   g_return_if_fail (self->refs>0);
   if (--self->refs) return;
   g_return_if_fail (!self->ssm);
+  g_clear_object(&self->action_cancel);
   memset (self,0,sizeof *self);
   g_free (self);
 }
@@ -383,6 +414,8 @@ void
 goodix_acquisition_start (GoodixAcquisition *self, gboolean reference, GoodixAcquired callback, gpointer user_data)
 {
   g_return_if_fail (self && !self->ssm && callback);
+  g_set_object(&self->action_cancel,fpi_device_get_cancellable(self->device));
+  self->image_delivered=FALSE;
   self->reference=reference; self->frames=0;self->generation++;self->cancelled=FALSE;self->refresh_required=FALSE;
   gx_timing_begin (&self->timing, self->timing.action_id, g_get_monotonic_time ());
   self->timing_phase = reference ? "reference-acquire" : "contact-down";
@@ -398,6 +431,74 @@ goodix_acquisition_start (GoodixAcquisition *self, gboolean reference, GoodixAcq
                         reference?PAIRED_REFERENCE_NUM_STATES:CONTACT_STATES);
   fpi_ssm_set_data (self->ssm,self,NULL);
   fpi_ssm_start (self->ssm,acquisition_complete);
+}
+
+void
+goodix_acquisition_set_release_callback (GoodixAcquisition *self,
+                                        GoodixReleased callback, gpointer user_data)
+{
+  g_return_if_fail(self && !self->ssm);
+  self->release_callback=callback;self->release_data=user_data;
+}
+
+gboolean
+goodix_acquisition_release_pending (GoodixAcquisition *self, guint64 *generation)
+{
+  if (generation) *generation=0;
+  if (!self || !self->ssm || !self->image_delivered || self->reference) return FALSE;
+  if (generation) *generation=self->generation;
+  return TRUE;
+}
+
+static gboolean
+reference_ranges_overlap (const void *a, gsize na, const void *b, gsize nb)
+{
+  guintptr pa=(guintptr)a,pb=(guintptr)b;
+  return pa<=pb ? pb-pa<na : pa-pb<nb;
+}
+
+gboolean
+goodix_acquisition_copy_reference (GoodixAcquisition *self,
+                                   GxImage *image, guint8 seed[16])
+{
+  if (!self || !image || !seed || !self->context_valid ||
+      !self->reference_seed_valid || !self->reference_image.valid ||
+      !self->exposure_valid || self->reference_pending || self->cancelled ||
+      reference_ranges_overlap(image,sizeof *image,seed,16) ||
+      reference_ranges_overlap(self,sizeof *self,image,sizeof *image) ||
+      reference_ranges_overlap(self,sizeof *self,seed,16)) return FALSE;
+  /* A cache is accepted reference data, never a retained wire/event owner. */
+  GxImage copy={0};
+  memcpy(copy.pixels,self->reference_image.pixels,sizeof copy.pixels);copy.valid=1;
+  *image=copy;memcpy(seed,self->reference_seed,16);
+  return TRUE;
+}
+
+gboolean
+goodix_acquisition_stage_reference (GoodixAcquisition *self,
+                                    const GxImage *image, const guint8 seed[16])
+{
+  guint valid=0;
+  if (!self || !image || !seed || self->ssm || self->context_valid ||
+      self->reference_pending || self->cancelled || image->valid!=1 ||
+      reference_ranges_overlap(image,sizeof *image,seed,16) ||
+      reference_ranges_overlap(self,sizeof *self,image,sizeof *image) ||
+      reference_ranges_overlap(self,sizeof *self,seed,16)) return FALSE;
+  for (guint y=0;y<64;y++) for (guint x=0;x<80;x++) {
+    guint i=y*80+x;
+    guint16 value=image->pixels[2*i]|((guint16)image->pixels[2*i+1]<<8);
+    if (value>4095) return FALSE;
+    if (x>=2 && x<78 && y>=2 && y<62 && value>100 && value<3800) valid++;
+  }
+  /* Same strict initialization range predicate. Previous accepted paired/FDT
+   * provenance and exact restored identity/config binding belong to caller. */
+  if (100u*valid<=85u*4560u) return FALSE;
+  goodix_acquisition_invalidate_context(self);
+  memcpy(self->pending_reference_image.pixels,image->pixels,sizeof image->pixels);
+  self->pending_reference_image.valid=1;
+  memcpy(self->pending_reference_seed,seed,16);
+  self->reference_pending=TRUE;
+  return TRUE;
 }
 
 void

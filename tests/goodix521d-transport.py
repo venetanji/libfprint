@@ -88,7 +88,8 @@ def main():
                      '-I' + str(SOURCE), '-I' + str(build)]
         health = ''
         if 'gboolean goodix_transport_health(' in source:
-            health += segment(source, 'gboolean goodix_transport_health(', '/* End transport health */')
+            health += segment(source, 'static gboolean goodix_fdt_up_current(', 'static void goodix_fdt_up_maybe_complete')
+            health += segment(source, 'static gboolean goodix_transport_health_full(', '/* End transport health */')
             tls_source = (SOURCE / 'goodixtls.c').read_text()
             health = segment(tls_source, 'gboolean goodix_tls_server_health(', '/* End TLS health */') + health
             health += segment(source, 'void goodix_send_reset(', 'void goodix_send_firmware_version')

@@ -7,6 +7,7 @@ typedef struct {guint64 read_loop,tls,configuration;} GoodixTransportHealth;
 typedef struct {
  gboolean terminal_error,inited,read_pending,cancelling,configuration_missing,configuration_conflict;
  gboolean ack,reply;gpointer callback,fdt_up_callback,tls_ssm,tls_ready_callback,timeout;
+ guint8 fdt_event_opcode; gboolean fdt_up_started,fdt_up_acknowledged; guint fdt_up_phases_sent,fdt_up_acks; guint64 fdt_up_operation,fdt_up_read_loop,operation_generation; gint64 fdt_event_deadline; GSource *fdt_up_timeout;
  guint32 length;GCancellable *transfer_cancel_tkn;GoodixTlsServer *tls_hop;
  guint64 read_loop_generation,tls_generation,configuration_generation;
 } FpiDeviceGoodixTlsPrivate;
@@ -14,6 +15,7 @@ static FpiDeviceGoodixTlsPrivate state;
 #define FPI_DEVICE_GOODIXTLS(d) (d)
 static FpiDeviceGoodixTlsPrivate *fpi_device_goodixtls_get_instance_private(FpDevice *d){(void)d;return &state;}
 gboolean goodix_transport_health(FpDevice*,GoodixTransportHealth*,GError**) __attribute__((weak));
+gboolean goodix_transport_health_during_release(FpDevice*,GoodixTransportHealth*,GError**) __attribute__((weak));
 typedef void (*GoodixResetCallback)(void);
 void goodix_send_reset(FpDevice *,gboolean,guint8,GoodixResetCallback,gpointer) __attribute__((weak));
 typedef struct {GCallback callback;gpointer user_data;} GoodixCallbackInfo;
@@ -24,6 +26,7 @@ typedef struct {gboolean soft_reset_mcu,reset_sensor;guint8 sleep_time;} GoodixR
 static guint reset_sends;
 static void goodix_send_protocol(FpDevice *d,guint8 cmd,guint8 *p,gsize n,gpointer x,gboolean a,guint t,gboolean r,gpointer cb,gpointer u){(void)d;(void)p;(void)n;(void)x;(void)a;(void)t;(void)r;(void)cb;g_assert_cmpuint(cmd,==,GOODIX_CMD_RESET);reset_sends++;g_free(u);}
 #include "health.inc"
+static void release_denied(FpDevice *d){GoodixTransportHealth h={9,9,9};GError *e=NULL;g_assert_false(goodix_transport_health_during_release(d,&h,&e));g_assert_nonnull(e);g_clear_error(&e);g_assert_cmpuint(h.read_loop,==,0);g_assert_cmpuint(h.tls,==,0);g_assert_cmpuint(h.configuration,==,0);}
 static void denied(FpDevice *d){GoodixTransportHealth h={9,9,9};GError *e=NULL;g_assert_false(goodix_transport_health(d,&h,&e));g_assert_nonnull(e);g_clear_error(&e);g_assert_cmpuint(h.read_loop,==,0);g_assert_cmpuint(h.tls,==,0);g_assert_cmpuint(h.configuration,==,0);}
 int main(void){
  if(!goodix_transport_health){fputs("FAIL: transport health API missing\n",stderr);return 1;}
@@ -43,6 +46,22 @@ int main(void){
  tls.authenticated=FALSE;denied(d);tls.authenticated=TRUE;tls.first_error=g_error_new_literal(G_IO_ERROR,G_IO_ERROR_FAILED,"synthetic");denied(d);g_clear_error(&tls.first_error);
  g_mutex_lock(&tls.mutex);denied(d);g_mutex_unlock(&tls.mutex);
  state.read_loop_generation++;state.tls_generation++;state.configuration_generation++;g_assert_true(goodix_transport_health(d,&b,&e));g_assert_cmpuint(b.read_loop,==,a.read_loop+1);g_assert_cmpuint(b.tls,==,a.tls+1);g_assert_cmpuint(b.configuration,==,a.configuration+1);
+ if(!goodix_transport_health_during_release){fputs("FAIL: release health API missing\n",stderr);return 1;}
+ g_assert_true(goodix_transport_health_during_release(d,&a,&e));
+ state.fdt_up_callback=d;state.fdt_event_opcode=0x34;state.fdt_up_started=state.fdt_up_acknowledged=TRUE;
+ state.fdt_up_phases_sent=state.fdt_up_acks=2;state.fdt_up_read_loop=state.read_loop_generation;
+ state.fdt_up_operation=10;state.operation_generation=12;state.fdt_event_deadline=g_get_monotonic_time()+1000000;state.fdt_up_timeout=g_timeout_source_new(1000);
+ denied(d);g_assert_true(goodix_transport_health_during_release(d,&b,&e));g_assert_cmpmem(&a,sizeof a,&b,sizeof b);
+#define RELEASE_BAD(field,value) do{__typeof__(state.field) old=state.field;state.field=(value);release_denied(d);state.field=old;}while(0)
+ RELEASE_BAD(fdt_event_opcode,0x32);RELEASE_BAD(fdt_up_started,FALSE);RELEASE_BAD(fdt_up_acknowledged,FALSE);
+ RELEASE_BAD(fdt_up_phases_sent,1);RELEASE_BAD(fdt_up_acks,1);RELEASE_BAD(fdt_up_read_loop,0);RELEASE_BAD(operation_generation,13);
+ RELEASE_BAD(fdt_event_deadline,g_get_monotonic_time()-1);RELEASE_BAD(fdt_up_timeout,NULL);
+ RELEASE_BAD(terminal_error,TRUE);RELEASE_BAD(configuration_missing,TRUE);RELEASE_BAD(configuration_conflict,TRUE);RELEASE_BAD(inited,FALSE);RELEASE_BAD(cancelling,TRUE);
+ RELEASE_BAD(ack,TRUE);RELEASE_BAD(reply,TRUE);RELEASE_BAD(callback,d);RELEASE_BAD(timeout,d);RELEASE_BAD(length,1);RELEASE_BAD(tls_ssm,d);RELEASE_BAD(tls_ready_callback,d);
+ tls.authenticated=FALSE;release_denied(d);tls.authenticated=TRUE;
+ g_cancellable_cancel(state.transfer_cancel_tkn);release_denied(d);g_clear_object(&state.transfer_cancel_tkn);state.transfer_cancel_tkn=g_cancellable_new();
+ g_source_destroy(state.fdt_up_timeout);release_denied(d);
+ g_source_unref(state.fdt_up_timeout);state.fdt_up_timeout=NULL;state.fdt_up_callback=NULL;
  goodix_send_reset(d,TRUE,10,NULL,NULL);g_assert_cmpuint(reset_sends,==,1);g_assert_true(state.configuration_missing);g_assert_cmpuint(state.configuration_generation,==,b.configuration+1);denied(d);
  g_mutex_clear(&tls.mutex);g_clear_object(&state.transfer_cancel_tkn);g_object_unref(d);puts("PASS: transport health is fail-closed, nonblocking, generation-bound and read-only");return 0;
 }

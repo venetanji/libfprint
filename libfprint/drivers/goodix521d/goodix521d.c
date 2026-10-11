@@ -18,6 +18,13 @@ typedef enum { ACTION_NONE, ACTION_OPEN, ACTION_ENROLL, ACTION_VERIFY, ACTION_ID
 typedef enum { TIMING_NONE, TIMING_BOOTSTRAP, TIMING_TLS, TIMING_REFERENCE,
                TIMING_CAPTURE, TIMING_CLEANUP } TimingPhase;
 
+typedef struct {
+  GxImage image;
+  guint8 seed[16], factory[64], configuration[256];
+  guint32 backend_version, profile, preprocess_version;
+  gboolean valid, pending_close;
+} ReferenceCache;
+
 typedef struct _FpiDeviceGoodix521d {
   FpiDeviceGoodixTls parent;
   guint8 factory[64], configuration[256];
@@ -25,11 +32,16 @@ typedef struct _FpiDeviceGoodix521d {
   GxPrintIdentity identity;
   GoodixAcquisition *acquisition;
   OcSession *session;
+  ReferenceCache reference_cache;
   GoodixTransportHealth reference_health;
   gboolean reference_valid, initializing_reference, rebase_reference;
   guint refreshes, enroll_stage;
   gboolean cleanup_incomplete, close_pending;
   guint64 capture_generation;
+  /* Physical release outlives a public result, but never its hardware epoch. */
+  gboolean release_pending, contact_waiting, release_idle_queued;
+  guint64 release_generation, waiting_action_id, acquisition_epoch;
+  GError *release_error;
   FpiSsm *boot;
   Action action;
   GxTiming timing, phase_timing;
@@ -55,6 +67,7 @@ static void operation_error (FpDevice *device, GError *error);
 static void start_contact (FpDevice *device);
 static void start_hardware (FpDevice *device);
 static void rebuild_reference (FpDevice *device);
+static void released (FpDevice *device, guint64 generation, gpointer owner, GError *error);
 static void acquired (FpDevice *device, const GxImage *image, GoodixAcquiredOutcome outcome, gpointer owner, GError *error);
 
 /* Only fixed labels and monotonic scalar durations reach the journal. Error
@@ -121,9 +134,37 @@ clear_deadline (FpiDeviceGoodix521d *self)
   self->deadline_us=0;
 }
 
+/* RAM-only on this FpDevice. No detector event, exposure or OC state is cached. */
+static void
+invalidate_reference_cache (FpiDeviceGoodix521d *self)
+{
+  OPENSSL_cleanse(&self->reference_cache,sizeof self->reference_cache);
+}
+
+static gboolean
+reference_cache_matches (FpiDeviceGoodix521d *self)
+{
+  ReferenceCache *cache=&self->reference_cache;
+  return cache->valid &&
+         cache->backend_version==self->identity.backend_version &&
+         cache->profile==self->identity.profile &&
+         cache->preprocess_version==self->identity.preprocess_version &&
+         memcmp(cache->factory,self->factory,sizeof self->factory)==0 &&
+         memcmp(cache->configuration,self->configuration,sizeof self->configuration)==0;
+}
+
+static void
+clear_release_guard (FpiDeviceGoodix521d *self)
+{
+  self->release_pending=FALSE;self->release_generation=0;
+  self->contact_waiting=FALSE;self->waiting_action_id=0;
+  g_clear_error(&self->release_error);
+}
+
 static gboolean
 stop_transport (FpiDeviceGoodix521d *self, GError **error)
 {
+  clear_release_guard(self);
   goodix_acquisition_invalidate_context(self->acquisition);
   if (!self->transport_open) return TRUE;
   if (!goodix_dev_deinit (FP_DEVICE (self), error)) return FALSE;
@@ -135,11 +176,22 @@ static gboolean
 reference_health_matches (FpiDeviceGoodix521d *self, GError **error)
 {
   GoodixTransportHealth current;
+  if (self->release_error) {
+    g_propagate_error(error,g_error_copy(self->release_error));return FALSE;
+  }
   if (!self->transport_open) {
     g_set_error_literal(error,G_IO_ERROR,G_IO_ERROR_NOT_INITIALIZED,"Goodix transport is not initialized");
     return FALSE;
   }
-  if (!goodix_transport_health(FP_DEVICE(self),&current,error)) return FALSE;
+  if (self->release_pending) {
+    guint64 generation=0;
+    if (!goodix_acquisition_release_pending(self->acquisition,&generation) ||
+        generation!=self->release_generation) {
+      g_set_error_literal(error,G_IO_ERROR,G_IO_ERROR_FAILED,"Goodix release owner is no longer current");
+      return FALSE;
+    }
+    if (!goodix_transport_health_during_release(FP_DEVICE(self),&current,error)) return FALSE;
+  } else if (!goodix_transport_health(FP_DEVICE(self),&current,error)) return FALSE;
   if (current.read_loop!=self->reference_health.read_loop ||
       current.tls!=self->reference_health.tls ||
       current.configuration!=self->reference_health.configuration) {
@@ -147,6 +199,55 @@ reference_health_matches (FpiDeviceGoodix521d *self, GError **error)
     return FALSE;
   }
   return TRUE;
+}
+
+/* No action-cancellable query is permitted from the detached release callback.
+ * A worker retains its session until process_done observes release_error. */
+static gboolean
+release_idle (gpointer data)
+{
+  FpDevice *device=data;
+  FpiDeviceGoodix521d *self=SELF(device);
+  self->release_idle_queued=FALSE;
+  if (self->release_error) {
+    if (self->processing || self->finishing) return G_SOURCE_REMOVE;
+    if (self->action!=ACTION_NONE) {
+      operation_error(device,g_steal_pointer(&self->release_error));
+    } else {
+      GError *cleanup=NULL;
+      stop_transport(self,&cleanup);
+      g_clear_error(&cleanup);
+      self->reference_valid=FALSE;
+      g_clear_pointer(&self->session,oc_session_free);
+    }
+  } else if (!self->release_pending && self->contact_waiting &&
+             self->waiting_action_id==self->timing.action_id &&
+             self->action!=ACTION_NONE && !self->processing && !self->finishing) {
+    self->contact_waiting=FALSE;self->waiting_action_id=0;
+    start_contact(device);
+  }
+  return G_SOURCE_REMOVE;
+}
+
+static void
+released (FpDevice *device, guint64 generation, gpointer owner, GError *error)
+{
+  FpiDeviceGoodix521d *self=SELF(device);
+  if ((guint64)(guintptr)owner!=self->acquisition_epoch ||
+      !self->release_pending || self->release_generation!=generation) {
+    g_clear_error(&error);return;
+  }
+  self->release_pending=FALSE;
+  if (error) {
+    self->reference_valid=FALSE;
+    invalidate_reference_cache(self);
+    goodix_acquisition_invalidate_context(self->acquisition);
+    self->release_error=error;
+  }
+  if (!self->release_idle_queued) {
+    self->release_idle_queued=TRUE;
+    g_idle_add_full(G_PRIORITY_DEFAULT,release_idle,g_object_ref(device),g_object_unref);
+  }
 }
 
 static void
@@ -244,6 +345,7 @@ operation_error (FpDevice *device, GError *error)
 {
   FpiDeviceGoodix521d *self=SELF(device);
   if (self->action==ACTION_NONE || self->finishing) { g_clear_error(&error);return; }
+  invalidate_reference_cache(self);
   if (!self->deferred_error) self->deferred_error=error;
   else g_clear_error(&error);
   if (self->in_cancel) return;
@@ -257,6 +359,8 @@ cancel_operation (FpDevice *device)
 {
   FpiDeviceGoodix521d *self = SELF (device);
   self->cancelled = TRUE;
+  if (!self->close_pending) invalidate_reference_cache(self);
+  clear_release_guard(self);
   goodix_acquisition_invalidate_context(self->acquisition);
   goodix_acquisition_cancel(self->acquisition);
   /* Synchronous unwind is owned by the transport. A running CPU worker owns
@@ -285,6 +389,7 @@ begin_action (FpDevice *device, Action action, guint milliseconds)
   self->action=action; self->cancelled=FALSE; self->contacts=0;self->finishing=FALSE;
   self->initializing_reference=FALSE;self->rebase_reference=FALSE;
   self->refreshes=0;self->enroll_stage=0;self->capture_generation++;
+  self->contact_waiting=FALSE;self->waiting_action_id=0;
   gx_timing_begin(&self->timing,++self->next_action_id,g_get_monotonic_time());
   self->timing_phase=TIMING_NONE;self->timing_active=TRUE;
   g_clear_error (&self->abort_error);
@@ -390,7 +495,11 @@ process_thread (GTask *task, gpointer source_object, gpointer task_data, GCancel
       if (!oc_session_rebase(self->session,result->frame,&error) && !error)
         error=fpi_device_error_new_msg(FP_DEVICE_ERROR_GENERAL,"Goodix reference rebase failed");
     }
-    else result->new_session=oc_session_new_for_profile(result->frame,GOODIX_CHICAGO_PROFILE_GF5298,&error);
+    else {
+      result->new_session=oc_session_new_for_profile(result->frame,GOODIX_CHICAGO_PROFILE_GF5298,&error);
+      if (!result->new_session && !error)
+        error=fpi_device_error_new_msg(FP_DEVICE_ERROR_GENERAL,"Goodix reference initialization failed");
+    }
   } else if (self->action==ACTION_ENROLL) {
     if (oc_enroll_add(self->session,result->frame,&result->enrolled,&error) && result->enrolled.complete)
       result->completed_template=oc_enroll_finish_complete(self->session,&error);
@@ -513,6 +622,7 @@ refresh_required (FpDevice *device)
   FpiDeviceGoodix521d *self=SELF(device);
   Action action=self->action;
   GError *error=NULL;
+  invalidate_reference_cache(self);
   goodix_acquisition_invalidate_context(self->acquisition);
   self->reference_valid=FALSE;
   if (action==ACTION_ENROLL) {
@@ -608,6 +718,13 @@ acquired (FpDevice *device, const GxImage *image, GoodixAcquiredOutcome outcome,
   /* Consume the capture owner before queuing: a duplicate completion must not
    * tear down a session while the first completion's worker still owns it. */
   self->capture_generation++;
+  if (!error && outcome==GOODIX_ACQUIRED_IMAGE && !self->initializing_reference) {
+    /* Latch before queuing the image: buffered UP may call released() on this
+     * same transport stack immediately after acquired() returns. */
+    guint64 generation=0;
+    self->release_pending=goodix_acquisition_release_pending(self->acquisition,&generation);
+    self->release_generation=self->release_pending?generation:0;
+  }
   Captured *captured=g_new0(Captured,1);
   captured->action_id=self->timing.action_id;captured->generation=self->capture_generation;
   captured->outcome=outcome;
@@ -626,6 +743,21 @@ tls_ready (FpDevice *device, gpointer unused, GError *error)
   timing_phase_end(self,timing_status(error));
   if (error || cancelled(self)) { operation_error(device,error);return; }
   if (!goodix_transport_health(device,&self->reference_health,&error)) { operation_error(device,error);return; }
+  if (self->action==ACTION_OPEN && reference_cache_matches(self)) {
+    /* Hardware is freshly reset/authenticated/configured. Only the accepted
+     * reference pixels/seed cross close; OC and exposure are created anew. */
+    if (!goodix_acquisition_stage_reference(self->acquisition,&self->reference_cache.image,
+                                           self->reference_cache.seed)) {
+      operation_error(device,fpi_device_error_new_msg(FP_DEVICE_ERROR_DATA_INVALID,
+        "Goodix cached reference is invalid"));return;
+    }
+    g_message("goodix-reference-cache action_id=%" G_GUINT64_FORMAT " status=staged",self->timing.action_id);
+    timing_phase_begin(self,TIMING_REFERENCE);
+    self->capture_generation++;
+    acquired(device,&self->reference_cache.image,GOODIX_ACQUIRED_IMAGE,
+             (gpointer)(guintptr)self->capture_generation,NULL);
+    return;
+  }
   start_capture(device,TRUE);
 }
 static void
@@ -668,6 +800,11 @@ start_contact (FpDevice *device)
   GError *error=NULL;
   if (!self->reference_valid || !self->session) { operation_error(device,fpi_device_error_new(FP_DEVICE_ERROR_GENERAL));return; }
   if (!reference_health_matches(self,&error)) { operation_error(device,error);return; }
+  if (self->release_pending) {
+    self->contact_waiting=TRUE;self->waiting_action_id=self->timing.action_id;
+    return;
+  }
+  self->contact_waiting=FALSE;self->waiting_action_id=0;
   if (++self->contacts>64) { operation_error(device,fpi_device_error_new_msg(FP_DEVICE_ERROR_GENERAL,"Enrollment contact limit exceeded"));return; }
   fpi_device_report_finger_status(device,FP_FINGER_STATUS_NEEDED);
   start_capture(device,FALSE);
@@ -678,6 +815,7 @@ rebuild_reference (FpDevice *device)
 {
   FpiDeviceGoodix521d *self=SELF(device);
   GError *error=NULL;
+  invalidate_reference_cache(self);
   self->reference_valid=FALSE;self->initializing_reference=TRUE;
   if (!self->rebase_reference) g_clear_pointer(&self->session,oc_session_free);
   fpi_device_report_finger_status(device,FP_FINGER_STATUS_NONE);
@@ -696,6 +834,7 @@ rebuild_reference (FpDevice *device)
 static void
 clear_open_resources (FpiDeviceGoodix521d *self)
 {
+  clear_release_guard(self);
   goodix_acquisition_invalidate_context(self->acquisition);
   self->reference_valid=FALSE;self->initializing_reference=FALSE;self->rebase_reference=FALSE;
   self->capture_generation++;
@@ -719,6 +858,7 @@ finalize (GObject *object)
   /* Active GTasks/USB transfers retain the device; finalization is idle. */
   clear_deadline(self);
   clear_open_resources(self);
+  invalidate_reference_cache(self);
   G_OBJECT_CLASS(fpi_device_goodix521d_parent_class)->finalize(object);
 }
 
@@ -746,7 +886,11 @@ dev_open (FpDevice *device)
   g_checksum_update(hash,self->factory,64);g_checksum_get_digest(hash,digest,&length);
   memcpy(self->identity.sensor_id,digest,16);g_checksum_reset(hash);
   g_checksum_update(hash,self->configuration,256);length=32;g_checksum_get_digest(hash,self->identity.config_digest,&length);
+  if (self->reference_cache.valid && !reference_cache_matches(self)) invalidate_reference_cache(self);
   self->acquisition=goodix_acquisition_new(device,self->factory);
+  /* Acquisition-local generations restart on reopen; the driver epoch does not. */
+  goodix_acquisition_set_release_callback(self->acquisition,released,
+    (gpointer)(guintptr)++self->acquisition_epoch);
   self->seen_frames=g_hash_table_new_full(g_str_hash,g_str_equal,g_free,NULL);
   start_hardware(device);
 }
@@ -759,21 +903,46 @@ close_reads_idle (FpDevice *device, gpointer unused, GError *error)
   if (error) {
     /* Ordinary close_complete closes GUsb even with an error. Keep both the
      * handle and remaining owners until a later, successful close retry. */
+    invalidate_reference_cache(self);
     fpi_device_close_abort(device,error);
     return;
   }
+  self->reference_cache.valid=self->reference_cache.pending_close;
+  self->reference_cache.pending_close=FALSE;
   clear_open_resources(self);
   self->cleanup_incomplete=FALSE;
   fpi_device_close_complete(device,NULL);
 }
 
 static void
+snapshot_reference_for_close (FpiDeviceGoodix521d *self)
+{
+  g_autoptr(GError) error=NULL;
+  invalidate_reference_cache(self);
+  if (!self->reference_valid || !self->session ||
+      !reference_health_matches(self,&error) ||
+      !goodix_acquisition_copy_reference(self->acquisition,&self->reference_cache.image,
+                                        self->reference_cache.seed)) {
+    invalidate_reference_cache(self);return;
+  }
+  ReferenceCache *cache=&self->reference_cache;
+  memcpy(cache->factory,self->factory,sizeof self->factory);
+  memcpy(cache->configuration,self->configuration,sizeof self->configuration);
+  cache->backend_version=self->identity.backend_version;
+  cache->profile=self->identity.profile;
+  cache->preprocess_version=self->identity.preprocess_version;
+  cache->pending_close=TRUE;
+}
+
+static void
 dev_close (FpDevice *device)
 {
   FpiDeviceGoodix521d *self=SELF(device);GError *error=NULL;
+  snapshot_reference_for_close(self);
   self->cleanup_incomplete=TRUE;self->reference_valid=FALSE;self->close_pending=TRUE;
   clear_deadline(self);
   if (!stop_transport(self,&error)) {
+    invalidate_reference_cache(self);
     self->close_pending=FALSE;
     if (!error) error=fpi_device_error_new(FP_DEVICE_ERROR_GENERAL);
     fpi_device_close_abort(device,error);
@@ -817,6 +986,12 @@ start_match (FpDevice *device, Action action)
      * matcher report no match. Nonempty templates still require validation. */
     if (prints->len>100) { operation_error(device,fpi_device_error_new(FP_DEVICE_ERROR_DATA_INVALID));return; }
     for(guint i=0;i<prints->len;i++) if (!load_print(self,g_ptr_array_index(prints,i),&error)) { operation_error(device,error);return; }
+  }
+  if (self->release_error) {
+    operation_error(device,g_error_copy(self->release_error));return;
+  }
+  if (self->release_pending) {
+    start_contact(device);return;
   }
   if (self->reference_valid && self->session && reference_health_matches(self,&error))
     start_contact(device);
