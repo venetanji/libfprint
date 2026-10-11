@@ -24,17 +24,13 @@ typedef struct _FpiDeviceGoodix521d {
   GxPrintIdentity identity;
   GoodixAcquisition *acquisition;
   OcSession *session;
-  GoodixTransportHealth reference_health;
-  gboolean reference_valid, initializing_reference;
-  gboolean cleanup_incomplete, close_pending;
-  guint64 capture_generation;
   FpiSsm *boot;
   Action action;
   GxTiming timing, phase_timing;
   guint64 next_action_id;
   TimingPhase timing_phase;
-  gboolean timing_active;
-  gboolean transport_open, processing, cancelled, in_cancel, finishing;
+  gboolean timing_active, cleanup_incomplete, close_pending;
+  gboolean transport_open, processing, algorithm_started, cancelled, in_cancel, finishing;
   GError *deferred_error;
   guint contacts;
   GSource *deadline;
@@ -51,8 +47,6 @@ G_DEFINE_TYPE (FpiDeviceGoodix521d, fpi_device_goodix521d, FPI_TYPE_DEVICE_GOODI
 
 static void operation_error (FpDevice *device, GError *error);
 static void start_contact (FpDevice *device);
-static void start_hardware (FpDevice *device);
-static void acquired (FpDevice *device, const GxImage *image, gpointer owner, GError *error);
 
 /* Only fixed labels and monotonic scalar durations reach the journal. Error
  * text, biometric, identity, configuration, and template data are not logged. */
@@ -100,6 +94,8 @@ timing_terminal (FpiDeviceGoodix521d *self, const gchar *status)
   self->timing_active=FALSE;
 }
 
+
+
 static gboolean
 cancelled (FpiDeviceGoodix521d *self)
 {
@@ -127,37 +123,6 @@ stop_transport (FpiDeviceGoodix521d *self, GError **error)
   return TRUE;
 }
 
-static gboolean
-reference_health_matches (FpiDeviceGoodix521d *self, GError **error)
-{
-  GoodixTransportHealth current;
-  if (!self->transport_open) {
-    g_set_error_literal(error,G_IO_ERROR,G_IO_ERROR_NOT_INITIALIZED,"Goodix transport is not initialized");
-    return FALSE;
-  }
-  if (!goodix_transport_health(FP_DEVICE(self),&current,error)) return FALSE;
-  if (current.read_loop!=self->reference_health.read_loop ||
-      current.tls!=self->reference_health.tls ||
-      current.configuration!=self->reference_health.configuration) {
-    g_set_error_literal(error,G_IO_ERROR,G_IO_ERROR_FAILED,"Goodix reference generation is no longer current");
-    return FALSE;
-  }
-  return TRUE;
-}
-
-static void
-start_capture (FpDevice *device, gboolean reference)
-{
-  FpiDeviceGoodix521d *self=SELF(device);
-  if (cancelled(self)) { operation_error(device,NULL);return; }
-  timing_phase_begin(self,reference?TIMING_REFERENCE:TIMING_CAPTURE);
-  goodix_acquisition_set_timing_context(self->acquisition,self->timing.action_id,self->contacts);
-  /* Scalar ownership survives queued callbacks without owning a pointer into
-   * an acquisition that may already have been cancelled or replaced. */
-  self->capture_generation++;
-  goodix_acquisition_start(self->acquisition,reference,acquired,(gpointer)(guintptr)self->capture_generation);
-}
-
 static void
 operation_error_complete (FpDevice *device, GError *error)
 {
@@ -166,10 +131,12 @@ operation_error_complete (FpDevice *device, GError *error)
   timing_terminal(self,timing_status(error));
   clear_deadline (self);
   self->action = ACTION_NONE;self->finishing=FALSE;
-  /* References are valid only for their live transport generation. Any failed
-   * action tears it down; a later match action may build a fresh reference. */
-  self->reference_valid=FALSE;self->initializing_reference=FALSE;
-  g_clear_pointer (&self->session,oc_session_free);
+  /* A failed capture leaves the public device open. Preserve an untouched
+   * matching context so the next attempt can capture again, but never reuse
+   * state after interrupted computation or incomplete transport teardown. */
+  if ((action != ACTION_VERIFY && action != ACTION_IDENTIFY) ||
+      self->algorithm_started || self->transport_open)
+    g_clear_pointer (&self->session,oc_session_free);
   g_clear_pointer (&self->templates,g_ptr_array_unref);
   fpi_device_report_finger_status (device,FP_FINGER_STATUS_NONE);
   switch (action) {
@@ -278,7 +245,7 @@ begin_action (FpDevice *device, Action action, guint milliseconds)
 {
   FpiDeviceGoodix521d *self = SELF (device);
   self->action=action; self->cancelled=FALSE; self->contacts=0;self->finishing=FALSE;
-  self->initializing_reference=FALSE;self->capture_generation++;
+  self->algorithm_started=FALSE;
   gx_timing_begin(&self->timing,++self->next_action_id,g_get_monotonic_time());
   self->timing_phase=TIMING_NONE;self->timing_active=TRUE;
   g_clear_error (&self->abort_error);
@@ -287,9 +254,9 @@ begin_action (FpDevice *device, Action action, guint milliseconds)
   g_source_set_ready_time (self->deadline,self->deadline_us);
 }
 
-/* Open and failed-context recovery create an authenticated generation. The
- * accepted reference and host session may serve later contacts only while its
- * read-loop, TLS and configuration generations remain healthy and unchanged. */
+/* Every acquisition starts a fresh authenticated hardware context, matching
+ * the established isolated capture flow. The free algorithm session remains
+ * in memory across ordinary contacts within the public open. */
 enum { BOOT_NOP, BOOT_ENABLE, BOOT_NOP2, BOOT_FIRMWARE, BOOT_KEY,
        BOOT_RESET, BOOT_IDLE, BOOT_CONFIGURATION, BOOT_STATES };
 
@@ -358,11 +325,9 @@ typedef struct {
   gint match_index;
   GBytes *completed_template;
   OcSession *new_session;
-  /* Sequential GTask ownership: main initializes, worker writes, completion
-   * reads only after return. These measure elapsed time, not CPU consumption. */
+  /* Sequential GTask ownership; durations measure elapsed wall time. */
   GxTiming worker_timing;
   gint64 queue_us, algorithm_us;
-  gboolean reference;
 } ProcessResult;
 static void
 process_free (ProcessResult *result)
@@ -379,7 +344,7 @@ process_thread (GTask *task, gpointer source_object, gpointer task_data, GCancel
   GError *error=NULL;
   (void)cancellable;
   result->queue_us=gx_timing_mark(&result->worker_timing,g_get_monotonic_time());
-  if (result->reference) {
+  if (self->action==ACTION_OPEN) {
     result->new_session=oc_session_new_for_profile(result->frame,GOODIX_CHICAGO_PROFILE_GF5298,&error);
   } else if (self->action==ACTION_ENROLL) {
     if (oc_enroll_add(self->session,result->frame,&result->enrolled,&error) && result->enrolled.complete)
@@ -418,19 +383,11 @@ process_done (GObject *source_object, GAsyncResult *async_result, gpointer unuse
   if (!success || interrupted) {
     operation_error(device,g_steal_pointer(&error));return;
   }
-  if (!reference_health_matches(self,&error)) {
-    operation_error(device,g_steal_pointer(&error));return;
-  }
-  if (result->reference) {
-    g_clear_pointer(&self->session,oc_session_free);
+  if (self->action==ACTION_OPEN) {
     self->session=g_steal_pointer(&result->new_session);
-    self->reference_valid=TRUE;self->initializing_reference=FALSE;
-    if (self->action==ACTION_OPEN) {
-      timing_terminal(self,"ok");
-      clear_deadline(self);self->action=ACTION_NONE;
-      fpi_device_open_complete(device,NULL);
-    } else start_contact(device);
-    return;
+    timing_terminal(self,"ok");
+    clear_deadline(self);self->action=ACTION_NONE;
+    fpi_device_open_complete(device,NULL);return;
   }
   if (self->action==ACTION_ENROLL) {
     if (result->enrolled.complete) {
@@ -438,7 +395,6 @@ process_done (GObject *source_object, GAsyncResult *async_result, gpointer unuse
       g_autoptr(GVariant) envelope=gx_print_envelope_export(&self->identity,TRUE,result->completed_template,&error);
       if (!envelope) { operation_error(device,g_steal_pointer(&error));return; }
       if (cancelled(self)) { operation_error(device,NULL);return; }
-      if (!reference_health_matches(self,&error)) { operation_error(device,g_steal_pointer(&error));return; }
       fpi_device_get_enroll_data(device,&print);
       fpi_print_set_type(print,FPI_PRINT_RAW);
       g_object_set(print,"fpi-data",envelope,NULL);
@@ -456,6 +412,10 @@ process_done (GObject *source_object, GAsyncResult *async_result, gpointer unuse
   }
   Action action=self->action;
   if (cancelled(self)) { operation_error(device,NULL);return; }
+  if (action==ACTION_VERIFY || action==ACTION_IDENTIFY)
+    g_message("goodix-processing action_id=%" G_GUINT64_FORMAT " action=%s contact=%u preprocess_status=0x%08x reject=%s",
+              self->timing.action_id,action==ACTION_VERIFY?"verify":"identify",self->contacts,
+              (guint)result->verified.status,oc_reject_to_string(result->verified.reject));
   if (result->verified.reject!=OC_REJECT_NONE) {
     GError *retry=fpi_device_retry_new_msg(FP_DEVICE_RETRY_GENERAL,"%s",oc_reject_to_string(result->verified.reject));
     if (action==ACTION_VERIFY) fpi_device_verify_report(device,FPI_MATCH_ERROR,NULL,retry);
@@ -480,11 +440,14 @@ static void
 acquired_process (FpDevice *device, const GxImage *image, GError *error)
 {
   FpiDeviceGoodix521d *self=SELF(device);
+  GError *cleanup=NULL;
   if (self->action==ACTION_NONE || self->finishing) {g_clear_error(&error);return;}
+  stop_transport(self,&cleanup);
+  timing_phase_end(self,timing_status(cleanup));
+  if (!error) error=cleanup; else g_clear_error(&cleanup);
   if (error || cancelled(self)) { operation_error(device,error);return; }
-  if (!reference_health_matches(self,&error)) { operation_error(device,error);return; }
   if (!image || !image->valid) { operation_error(device,fpi_device_error_new(FP_DEVICE_ERROR_PROTO));return; }
-  if (!self->initializing_reference) {
+  if (self->action!=ACTION_OPEN) {
     g_autofree char *digest=g_compute_checksum_for_data(G_CHECKSUM_SHA256,image->pixels,sizeof image->pixels);
     if (g_hash_table_contains(self->seen_frames,digest)) {
       operation_error(device,fpi_device_error_new_msg(FP_DEVICE_ERROR_PROTO,"Repeated sensor frame rejected"));return;
@@ -492,7 +455,6 @@ acquired_process (FpDevice *device, const GxImage *image, GError *error)
     g_hash_table_add(self->seen_frames,g_steal_pointer(&digest));
   }
   ProcessResult *result=g_new0(ProcessResult,1);result->match_index=-1;
-  result->reference=self->initializing_reference;
   for(guint i=0;i<OC_FRAME_PIXELS;i++) result->frame[i]=image->pixels[2*i]|((guint16)image->pixels[2*i+1]<<8);
   g_autoptr(GTask) task=g_task_new(device,fpi_device_get_cancellable(device),process_done,NULL);
   g_task_set_task_data(task,result,(GDestroyNotify)process_free);
@@ -500,18 +462,16 @@ acquired_process (FpDevice *device, const GxImage *image, GError *error)
    * cancelled. No result is committed after cancellation. */
   g_task_set_return_on_cancel(task,FALSE);
   self->processing=TRUE;
+  self->algorithm_started=TRUE;
   gx_timing_begin(&result->worker_timing,self->timing.action_id,g_get_monotonic_time());
   g_task_run_in_thread(task,process_thread);
 }
 
-typedef struct { FpDevice *device; GxImage image; GError *error; guint64 action_id, generation; } Captured;
+typedef struct { FpDevice *device; GxImage image; GError *error; } Captured;
 static gboolean
 acquired_idle (gpointer data)
 {
   Captured *captured=data;
-  FpiDeviceGoodix521d *self=SELF(captured->device);
-  if (self->timing.action_id!=captured->action_id || self->capture_generation!=captured->generation)
-    return G_SOURCE_REMOVE;
   acquired_process(captured->device,&captured->image,g_steal_pointer(&captured->error));
   return G_SOURCE_REMOVE;
 }
@@ -523,14 +483,13 @@ captured_free (gpointer data)
   memset(captured,0,sizeof *captured);g_free(captured);
 }
 static void
-acquired (FpDevice *device, const GxImage *image, gpointer owner, GError *error)
+acquired (FpDevice *device, const GxImage *image, gpointer unused, GError *error)
 {
+  Captured *captured=g_new0(Captured,1);(void)unused;
   FpiDeviceGoodix521d *self=SELF(device);
-  if ((guint64)(guintptr)owner!=self->capture_generation) { g_clear_error(&error);return; }
-  Captured *captured=g_new0(Captured,1);
-  captured->action_id=self->timing.action_id;captured->generation=self->capture_generation;
   if (self->action!=ACTION_NONE && !self->finishing) {
     timing_phase_end(self,timing_status(error));
+    timing_phase_begin(self,TIMING_CLEANUP);
   }
   captured->device=g_object_ref(device);captured->error=error;
   if(image)captured->image=*image;
@@ -543,8 +502,9 @@ tls_ready (FpDevice *device, gpointer unused, GError *error)
   FpiDeviceGoodix521d *self=SELF(device);(void)unused;
   timing_phase_end(self,timing_status(error));
   if (error || cancelled(self)) { operation_error(device,error);return; }
-  if (!goodix_transport_health(device,&self->reference_health,&error)) { operation_error(device,error);return; }
-  start_capture(device,TRUE);
+  timing_phase_begin(self,self->action==ACTION_OPEN?TIMING_REFERENCE:TIMING_CAPTURE);
+  goodix_acquisition_set_timing_context(self->acquisition,self->timing.action_id,self->contacts);
+  goodix_acquisition_start(self->acquisition,self->action==ACTION_OPEN,acquired,NULL);
 }
 static void
 boot_complete (FpiSsm *ssm, FpDevice *device, GError *error)
@@ -556,65 +516,40 @@ boot_complete (FpiSsm *ssm, FpDevice *device, GError *error)
   goodix_tls(device,tls_ready,NULL);
 }
 static void
-start_hardware (FpDevice *device)
+hardware_reads_idle (FpDevice *device, gpointer owner, GError *error)
 {
-  FpiDeviceGoodix521d *self=SELF(device);GError *error=NULL;
-  timing_phase_begin(self,TIMING_BOOTSTRAP);
-  if (cancelled(self)) { operation_error(device,NULL);return; }
-  if (self->transport_open) { operation_error(device,fpi_device_error_new_msg(FP_DEVICE_ERROR_BUSY,"Prior Goodix transport cleanup incomplete"));return; }
+  FpiDeviceGoodix521d *self=SELF(device);
+  if (self->action==ACTION_NONE || self->finishing ||
+      self->timing.action_id!=(guint64)(guintptr)owner) { g_clear_error(&error);return; }
+  if (error || cancelled(self)) { operation_error(device,error);return; }
   if (!goodix_dev_init(device,&error)) { operation_error(device,error);return; }
   self->transport_open=TRUE;
   self->boot=fpi_ssm_new(device,boot_run,BOOT_STATES);
   fpi_ssm_start(self->boot,boot_complete);
 }
 static void
+start_hardware (FpDevice *device)
+{
+  FpiDeviceGoodix521d *self=SELF(device);
+  timing_phase_begin(self,TIMING_BOOTSTRAP);
+  if (cancelled(self)) { operation_error(device,NULL);return; }
+  if (self->transport_open) { operation_error(device,fpi_device_error_new_msg(FP_DEVICE_ERROR_BUSY,"Prior Goodix transport cleanup incomplete"));return; }
+  /* Cancellation invalidates an old read, but only its completion prevents
+   * it consuming the next bootstrap reply. Keep the existing action deadline. */
+  goodix_wait_read_idle(device,2000,hardware_reads_idle,(gpointer)(guintptr)self->timing.action_id);
+}
+static void
 start_contact (FpDevice *device)
 {
   FpiDeviceGoodix521d *self=SELF(device);
-  GError *error=NULL;
-  if (!self->reference_valid || !self->session) { operation_error(device,fpi_device_error_new(FP_DEVICE_ERROR_GENERAL));return; }
-  if (!reference_health_matches(self,&error)) { operation_error(device,error);return; }
   if (++self->contacts>64) { operation_error(device,fpi_device_error_new_msg(FP_DEVICE_ERROR_GENERAL,"Enrollment contact limit exceeded"));return; }
   fpi_device_report_finger_status(device,FP_FINGER_STATUS_NEEDED);
-  start_capture(device,FALSE);
-}
-
-static void
-reference_reads_idle (FpDevice *device, gpointer owner, GError *error)
-{
-  FpiDeviceGoodix521d *self=SELF(device);
-  if (self->action==ACTION_NONE || self->finishing ||
-      self->timing.action_id!=(guint64)(guintptr)owner) { g_clear_error(&error);return; }
-  if (error || cancelled(self)) { operation_error(device,error);return; }
   start_hardware(device);
-}
-
-static void
-rebuild_reference (FpDevice *device)
-{
-  FpiDeviceGoodix521d *self=SELF(device);
-  GError *error=NULL;
-  self->reference_valid=FALSE;self->initializing_reference=TRUE;
-  g_clear_pointer(&self->session,oc_session_free);
-  fpi_device_report_finger_status(device,FP_FINGER_STATUS_NONE);
-  if (self->transport_open) {
-    timing_phase_begin(self,TIMING_CLEANUP);
-    gboolean stopped=stop_transport(self,&error);
-    timing_phase_end(self,timing_status(error));
-    if (!stopped) { operation_error(device,error);return; }
-  }
-  /* A cancelled old read must finish before a new generation can submit NOP:
-   * generation rejection alone cannot stop that read consuming a new reply.
-   * Do not begin a new action or reset its cancellation/deadline here. */
-  goodix_wait_read_idle(device,2000,reference_reads_idle,(gpointer)(guintptr)self->timing.action_id);
 }
 
 static void
 clear_open_resources (FpiDeviceGoodix521d *self)
 {
-  self->reference_valid=FALSE;self->initializing_reference=FALSE;
-  self->capture_generation++;
-  memset(&self->reference_health,0,sizeof self->reference_health);
   g_clear_pointer(&self->session,oc_session_free);
   g_clear_pointer(&self->acquisition,goodix_acquisition_free);
   g_clear_pointer(&self->seen_frames,g_hash_table_unref);
@@ -645,7 +580,6 @@ dev_open (FpDevice *device)
   if (self->transport_open || self->cleanup_incomplete) { fpi_device_open_complete(device,fpi_device_error_new_msg(FP_DEVICE_ERROR_BUSY,"Prior Goodix cleanup incomplete"));return; }
   clear_open_resources(self);
   begin_action(device,ACTION_OPEN,45000);
-  self->initializing_reference=TRUE;
   self->input_dir=g_strdup(override?override:"/var/lib/libfprint/goodix521d");
   self->key_path=g_build_filename(self->input_dir,"psk.bin",NULL);
   g_autofree gchar *factory_path=g_build_filename(self->input_dir,"factory.bin",NULL);
@@ -686,7 +620,7 @@ static void
 dev_close (FpDevice *device)
 {
   FpiDeviceGoodix521d *self=SELF(device);GError *error=NULL;
-  self->cleanup_incomplete=TRUE;self->reference_valid=FALSE;self->close_pending=TRUE;
+  self->cleanup_incomplete=TRUE;self->close_pending=TRUE;
   clear_deadline(self);
   if (!stop_transport(self,&error)) {
     self->close_pending=FALSE;
@@ -721,6 +655,7 @@ start_match (FpDevice *device, Action action)
   FpiDeviceGoodix521d *self=SELF(device);GError *error=NULL;
   begin_action(device,action,60000);
   if (self->cleanup_incomplete) { operation_error(device,fpi_device_error_new_msg(FP_DEVICE_ERROR_BUSY,"Goodix close cleanup must be retried"));return; }
+  if (!self->session) { operation_error(device,fpi_device_error_new(FP_DEVICE_ERROR_GENERAL));return; }
   self->templates=g_ptr_array_new_with_free_func((GDestroyNotify)g_bytes_unref);
   if (action==ACTION_VERIFY) {
     FpPrint *print=NULL;fpi_device_get_verify_data(device,&print);
@@ -733,12 +668,7 @@ start_match (FpDevice *device, Action action)
     if (prints->len>100) { operation_error(device,fpi_device_error_new(FP_DEVICE_ERROR_DATA_INVALID));return; }
     for(guint i=0;i<prints->len;i++) if (!load_print(self,g_ptr_array_index(prints,i),&error)) { operation_error(device,error);return; }
   }
-  if (self->reference_valid && self->session && reference_health_matches(self,&error))
-    start_contact(device);
-  else {
-    g_clear_error(&error);
-    rebuild_reference(device);
-  }
+  start_contact(device);
 }
 static void dev_verify(FpDevice *device) { start_match(device,ACTION_VERIFY); }
 static void dev_identify(FpDevice *device) { start_match(device,ACTION_IDENTIFY); }

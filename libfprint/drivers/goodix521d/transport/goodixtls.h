@@ -76,7 +76,3 @@ int goodix_tls_server_receive(GoodixTlsServer *self, guint8 *data,
  * On a 2-second cleanup timeout returns FALSE with resources retained:
  * the owner MUST NOT free self and may retry cleanup later. */
 gboolean goodix_tls_server_deinit(GoodixTlsServer *self, GError **error);
-
-/* Nonblocking, mutex-protected observation only; busy is unhealthy. The owner
- * must serialize this call with initialization/destruction of the server. */
-gboolean goodix_tls_server_health(GoodixTlsServer *self, GError **error);

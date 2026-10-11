@@ -19,9 +19,17 @@ typedef struct {
  GCancellable *transfer_cancel_tkn;
  guint8 cmd,*data;guint32 length;GSource *timeout;
  GoodixCmdCallback callback;gpointer user_data;
- gboolean terminal_error;
 } FpiDeviceGoodixTlsPrivate;
 static FpiDeviceGoodixTlsPrivate state;
+static guint cancel_log_count;
+static gchar *cancel_log;
+static void capture_cancel_log(const gchar *domain,GLogLevelFlags level,const gchar *message,gpointer data)
+{
+ (void)domain;(void)level;(void)data;
+ if(!g_str_has_prefix(message,"goodix-up-cancel "))return;
+ cancel_log_count++;g_free(cancel_log);cancel_log=g_strdup(message);
+}
+
 static guint commands,tls_callbacks,transitions,failed_ssms,send_calls,event_calls,event_destroys;
 static gint command_error,tls_error;
 static gboolean cancel_in_send, fail_send, reenter_cancel;
@@ -51,10 +59,11 @@ static void handshake_command_done(FpDevice *d,guint8 *b,guint16 n,gpointer p,GE
 static void tls_done(FpDevice *d,gpointer p,GError *e){(void)p;tls_callbacks++;tls_error=e?e->code:0;g_clear_error(&e);if(reenter_cancel)goodix_cancel(d);}
 static void event_done(FpDevice *dev,guint8 *b,guint16 n,gpointer p,GError *e){(void)b;g_assert_true(p==dev);g_assert_cmpuint(n,==,0);g_assert_error(e,G_IO_ERROR,G_IO_ERROR_CANCELLED);g_clear_error(&e);event_calls++;goodix_cancel(dev);}
 static void event_destroy(gpointer p){event_destroys++;g_assert_cmpuint(event_destroys,==,event_calls);g_object_unref(p);}
-static void reset(FpDevice *dev){g_assert_null(state.tls_ready_callback);g_assert_null(state.tls_ssm);goodix_reset_state(dev);g_clear_object(&state.transfer_cancel_tkn);memset(&state,0,sizeof state);state.transfer_cancel_tkn=g_cancellable_new();state.inited=state.read_pending=TRUE;commands=tls_callbacks=transitions=failed_ssms=send_calls=0;command_error=tls_error=0;cancel_in_send=fail_send=reenter_cancel=FALSE;}
+static void reset(FpDevice *dev){g_assert_null(state.tls_ready_callback);g_assert_null(state.tls_ssm);goodix_reset_state(dev);g_clear_object(&state.transfer_cancel_tkn);memset(&state,0,sizeof state);state.transfer_cancel_tkn=g_cancellable_new();state.inited=state.read_pending=TRUE;commands=tls_callbacks=transitions=failed_ssms=send_calls=event_calls=event_destroys=0;command_error=tls_error=0;cancel_in_send=fail_send=reenter_cancel=FALSE;}
 static void pending_tls(FpDevice *dev,gint stage){state.tls_ready_callback=g_new0(GoodixCallbackInfo,1);state.tls_ready_callback->callback=G_CALLBACK(tls_done);state.tls_ssm=g_new0(FpiSsm,1);state.tls_ssm->dev=dev;state.tls_ssm->stage=stage;state.tls_generation++;}
 int main(void){
  if(!goodix_cancel){fputs("FAIL: explicit cancellation API is missing\n",stderr);return 1;}
+ guint log_handler=g_log_set_handler(NULL,G_LOG_LEVEL_MESSAGE,capture_cancel_log,NULL);
  FpDevice *dev=g_object_new(G_TYPE_OBJECT,NULL);reset(dev);state.ack=TRUE;state.callback=command_done;reenter_cancel=TRUE;
  goodix_cancel(dev);g_assert_cmpuint(commands,==,1);g_assert_cmpint(command_error,==,G_IO_ERROR_CANCELLED);g_assert_false(state.cancelling);g_assert_false(state.inited);g_assert_false(state.read_pending);g_assert_true(g_cancellable_is_cancelled(state.transfer_cancel_tkn));g_assert_cmpuint(state.operation_generation,==,1);goodix_cancel(dev);g_assert_cmpuint(commands,==,1);
  puts("PASS: cancellation invalidates read owner and completes command once, including reentrant cancel");
@@ -70,4 +79,27 @@ int main(void){
  puts("PASS: pending readiness without an active command still completes once");
  reset(dev);goodix_wait_fdt_up(dev,5000,event_done,g_object_ref(dev),event_destroy);goodix_cancel(dev);g_assert_cmpuint(event_calls,==,1);g_assert_cmpuint(event_destroys,==,1);g_assert_null(state.fdt_up_callback);g_assert_null(state.fdt_up_timeout);goodix_cancel(dev);g_assert_cmpuint(event_calls,==,1);
  puts("PASS: cancel dispatches owned FDT context once, then destroys it after callback");
- reset(dev);g_clear_object(&state.transfer_cancel_tkn);g_object_unref(dev);return 0;}
+
+ reset(dev);cancel_log_count=0;
+ goodix_wait_fdt_up(dev,5000,event_done,g_object_ref(dev),event_destroy);
+ state.fdt_up_started=TRUE;state.fdt_up_phases_sent=2;state.fdt_up_acks=2;
+ state.fdt_up_acknowledged=TRUE;state.operation_generation=state.fdt_up_operation+2;
+ goodix_cancel(dev);
+ g_assert_cmpuint(cancel_log_count,==,1);
+ g_assert_cmpstr(cancel_log,==,"goodix-up-cancel phases-sent=2 ack-mask=0x3 event-seen=0 owner-current-before-cancel=1");
+ g_assert_cmpuint(event_calls,==,1);g_assert_cmpuint(event_destroys,==,1);
+ goodix_cancel(dev);g_assert_cmpuint(cancel_log_count,==,1);
+ puts("PASS: cancellation logs pre-invalidation UP state exactly once without accepting removal");
+ reset(dev);cancel_log_count=0;
+ goodix_wait_fdt_up(dev,5000,event_done,g_object_ref(dev),event_destroy);
+ state.fdt_up_started=TRUE;state.fdt_up_phases_sent=1;state.fdt_up_acks=1;
+ state.fdt_up_received=TRUE;state.operation_generation=state.fdt_up_operation+1;
+ state.read_loop_generation++;
+ goodix_cancel(dev);
+ g_assert_cmpuint(cancel_log_count,==,1);
+ g_assert_cmpstr(cancel_log,==,"goodix-up-cancel phases-sent=1 ack-mask=0x1 event-seen=1 owner-current-before-cancel=0");
+ g_assert_cmpuint(event_calls,==,1);
+ puts("PASS: cancellation snapshot distinguishes stale ownership and buffered event without publishing it");
+
+ reset(dev);g_clear_object(&state.transfer_cancel_tkn);g_object_unref(dev);
+ g_log_remove_handler(NULL,log_handler);g_clear_pointer(&cancel_log,g_free);return 0;}

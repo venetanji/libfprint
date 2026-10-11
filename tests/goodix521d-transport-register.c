@@ -32,7 +32,6 @@ typedef struct {
   gpointer user_data;
   GoodixCmdCallback callback;
   FpiSsm *tls_ssm;
- gboolean terminal_error;
 } FpiDeviceGoodixTlsPrivate;
 
 static FpiDeviceGoodixTlsPrivate state;

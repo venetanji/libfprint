@@ -130,7 +130,6 @@ static void authenticated(void) {
  short_sends=TRUE; atomic_store(&send_calls,0);
  assert(handshake(&s,&p,16384)); assert(atomic_load(&send_calls)>3); short_sends=FALSE;
  GError *e=NULL; assert(goodix_tls_server_wait_authenticated(&s,&e)); assert(!e);
- assert(goodix_tls_server_health(&s,&e)); assert(!e);
  assert(SSL_CIPHER_get_protocol_id(SSL_get_current_cipher(s.ssl_layer))==0x00ae);
  assert(SSL_CTX_get_options(s.ssl_ctx)&SSL_OP_NO_TICKET);
  assert(atomic_load(&callbacks)==1 && atomic_load(&callback_errors)==0);
@@ -216,7 +215,6 @@ static void tampered_plaintext(void) {
  cipher[n-1]^=1;
  assert(goodix_tls_client_send(&s,cipher,n)==n);
  assert(goodix_tls_server_receive(&s,out,sizeof out,&e)==-1 && e);
- g_clear_error(&e); assert(!goodix_tls_server_health(&s,&e)); assert(e);
  g_clear_error(&e); release(&s); peer_free(&p);
 }
 static void recv_timeout(void) {

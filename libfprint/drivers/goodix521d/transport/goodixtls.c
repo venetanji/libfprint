@@ -429,25 +429,3 @@ gboolean goodix_tls_server_deinit(GoodixTlsServer *self, GError **error)
     self->primitives_initialized = FALSE;
     return TRUE;
 }
-
-gboolean goodix_tls_server_health(GoodixTlsServer *self, GError **error)
-{
-    if (!self || !self->primitives_initialized) {
-        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_INITIALIZED,
-                            "TLS session unavailable");
-        return FALSE;
-    }
-    if (!g_mutex_trylock(&self->mutex)) {
-        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_BUSY, "TLS session busy");
-        return FALSE;
-    }
-    gboolean healthy = self->initialized && self->handshake_done &&
-        self->authenticated && !self->serve_thread_started &&
-        !self->closing && !self->first_error;
-    g_mutex_unlock(&self->mutex);
-    if (!healthy)
-        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_CLOSED,
-                            "TLS session is not authenticated and idle");
-    return healthy;
-}
-/* End TLS health */

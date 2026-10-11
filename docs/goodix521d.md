@@ -33,24 +33,21 @@ All file access is read-only. The original Windows volume and any saved calibrat
 
 Start with the reader clear. Opening obtains a fresh paired background: three FDT snapshots, two differently flagged background images, the original shifted-word FDT gates and strict cropped image MAD below 200. The free preprocessor additionally rejects an invalid reference range. A finger-covered reference is not an acceptable workaround.
 
-A validated FDT or image stability rejection permits at most one reacquisition within that same initialized open. The second attempt uses the first FDT snapshot transformed as `uint16((raw >> 1) * 257)` for its seed; partial reference images are discarded. This is a bounded Linux recovery policy based on the Windows seed-update operation, not a Windows retry-count claim. Both attempts share the existing action deadline (45 seconds for public open, 60 seconds for verification/identification recovery) and unchanged acceptance gates. Transport, malformed-data, integrity, or cancellation failures do not trigger this retry. The seed is never saved or carried into another open. A journal `paired-reference-retry` line identifies this recovery attempt.
+A validated FDT or image stability rejection permits at most one reacquisition within that same initialized open. The second attempt uses the first FDT snapshot transformed as `uint16((raw >> 1) * 257)` for its seed; partial reference images are discarded. This is a bounded Linux recovery policy based on the Windows seed-update operation, not a Windows retry-count claim. Both attempts share the original 45-second open deadline and unchanged acceptance gates. Transport, malformed-data, integrity, or cancellation failures do not trigger this retry. The seed is never saved or carried into another open. A journal `paired-reference-retry` line identifies this recovery attempt.
 
-After a successful reference, contacts reuse its authenticated hardware context
-within the same public open. The driver checks healthy RX, TLS and configuration
-generations before acquisition and before publishing algorithm results. This
-avoids repeating reset/configuration/TLS for every contact. Public close still
-discards the reference and session; there is no disk cache or cross-close reuse.
+The driver restores the earlier per-contact hardware transaction boundary:
+reset, volatile configuration and authenticated TLS are established for each
+capture, then transport is torn down before algorithm processing. The validated
+OpenChicago reference/session remains in memory across ordinary contacts as in
+that earlier lifecycle. This rolls back the reported regression from retaining
+hardware context; it does not prove which undocumented sensor state caused it.
 
-A transport error, configuration loss, cancellation or teardown invalidates the
-reference. A later verification/identification action can rebuild bootstrap,
-paired reference and OpenChicago before its requested contact, under that action's
-original deadline. It keeps the reader guidance at KEEP EMPTY until initialization
-succeeds. Failed initialization terminates that action; it never accepts a rejected
-background or silently attaches an old reference to a new hardware generation.
-The stored enrollment is unchanged. These guards do not constitute an automatic
-finger-absence detector, and there is no promised hardware speedup until measured.
+Cold public opens still obtain a new paired reference. This rollback does not
+solve repeated cold-open baseline failures, and those failures do not establish
+that a finger was present or placed too early. No matching threshold, template
+format, image request recipe, or frame count is changed.
 
-Each contact retains the established ten-frame settled capture recipe and the
+Each contact uses the established ten-frame settled capture recipe and the
 final integrity-checked native 80×64 frame. After the final validated frame, an acknowledged volatile write restores sensor register `0x022c` to `0x020a` before either removal-arm phase. This restores the Windows image-success-to-FDT transition while leaving the ten-frame burst unchanged; a failed restore aborts the contact. A current FDT-down event supplies the translated base for a separately armed, checksummed FDT-up event. ACK alone cannot satisfy finger removal. Contact images never pass through the old min/max/resize/invert preview path.
 
 Before enrollment, fprintd performs a duplicate-identification capture even when
@@ -108,7 +105,7 @@ monitor never determines acceptance or changes capture state.
 
 If REMOVE is displayed, fully lift the finger. If removal still times out,
 stop rather than repeating the test and preserve the precise error plus the
-last displayed guidance. Removal timeout errors include phases sent, ACK mask, event-seen and owner-current scalars; no FDT sample values are logged. This distinguishes a missing prompt from an unproven
+last displayed guidance. Removal timeout errors include phases sent, ACK mask, event-seen and owner-current scalars; no FDT sample values are logged. A `goodix-up-cancel` line snapshots those fields before cancellation invalidates the read owner. It does not identify who requested cancellation or claim that the 30-second removal deadline expired. This distinguishes a missing prompt from an unproven
 hardware removal path. A paired-reference stability failure now includes the
 failing snapshot pair, maximum shifted-word difference and factory threshold;
 it does not permit a finger-covered reference or relax that threshold.
@@ -124,7 +121,7 @@ still using the handle. Other drivers retain their existing close semantics.
 fprintd clears its claim bookkeeping after a failed Release; its next Claim can
 therefore report ALREADY_OPEN for this retained handle. A service restart may be
 required in that exceptional state. Direct libfprint callers can retry close.
-Fresh initialization after recovery likewise waits for old RX ownership to drain.
+A new hardware transaction must not race a cancelled read from its predecessor.
 
 ## Responsiveness timing
 
@@ -145,8 +142,13 @@ phase context; no successful matching result is inferred from timing alone.
 Timing messages contain phase/status labels, counters, and durations only. They
 do not export images, feature vectors, templates, keys, or factory values.
 Logging itself has a small runtime cost. Timing instrumentation does not change capture counts, timeouts, matching
-thresholds, or stored enrollment. Healthy-context reuse is limited to the
-lifetime described above; a teardown/reset cannot silently preserve validity.
+thresholds, or stored enrollment. `goodix-processing` records the existing
+preprocessing status code and an allowlisted rejection reason for completed
+verification/identification computation. It does not report a match decision.
+For example, `0x000029aa` with `bad-input` means the raw input range gate
+rejected the frame before enhancement/features/matching; it does not identify
+the physical reason for that rejection. Cancelled or failed computations do not
+publish this result diagnostic.
 
 ## Required local qualification
 

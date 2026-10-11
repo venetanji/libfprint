@@ -12,7 +12,6 @@ typedef struct {
  guint8 *data,tls_psk[32];guint32 length;
  guint64 operation_generation,read_loop_generation;
  GCancellable *transfer_cancel_tkn;
- gboolean terminal_error,configuration_missing,configuration_conflict;guint64 configuration_generation;
 } FpiDeviceGoodixTlsPrivate;
 static FpiDeviceGoodixTlsPrivate state;
 static FpiDeviceGoodixTlsClass cls;
@@ -29,8 +28,8 @@ static gboolean goodix_shutdown_tls(FpDevice *d,GError **e){(void)d;shutdowns++;
 int main(void){FpDevice *dev=g_object_new(G_TYPE_OBJECT,NULL);GError *e=NULL;
  claim_ok=FALSE;g_assert_false(goodix_dev_init(dev,&e));g_assert_nonnull(e);g_clear_error(&e);g_assert_null(state.transfer_cancel_tkn);g_assert_cmpuint(claims,==,1);
  puts("PASS: interface claim failure releases its cancellation token");
- state.terminal_error=TRUE;claim_ok=TRUE;g_assert_true(goodix_dev_init(dev,&e));g_assert_null(e);g_assert_nonnull(state.transfer_cancel_tkn);GCancellable *token=state.transfer_cancel_tkn;g_assert_false(state.terminal_error);g_assert_true(state.configuration_missing);guint64 generation=state.configuration_generation;state.terminal_error=TRUE;
- g_assert_false(goodix_dev_init(dev,&e));g_assert_error(e,G_IO_ERROR,G_IO_ERROR_BUSY);g_clear_error(&e);g_assert_true(token==state.transfer_cancel_tkn);g_assert_cmpuint(claims,==,2);g_assert_true(state.terminal_error);g_assert_cmpuint(state.configuration_generation,==,generation);
+ claim_ok=TRUE;g_assert_true(goodix_dev_init(dev,&e));g_assert_null(e);g_assert_nonnull(state.transfer_cancel_tkn);GCancellable *token=state.transfer_cancel_tkn;
+ g_assert_false(goodix_dev_init(dev,&e));g_assert_error(e,G_IO_ERROR,G_IO_ERROR_BUSY);g_clear_error(&e);g_assert_true(token==state.transfer_cancel_tkn);g_assert_cmpuint(claims,==,2);
  puts("PASS: reopening an active transport cannot replace owned state");
  state.inited=TRUE;state.tls_psk_set=TRUE;memset(state.tls_psk,0xa5,32);shutdown_ok=FALSE;
  g_assert_false(goodix_dev_deinit(dev,&e));g_assert_error(e,G_IO_ERROR,G_IO_ERROR_TIMED_OUT);g_clear_error(&e);g_assert_cmpuint(releases,==,0);g_assert_true(token==state.transfer_cancel_tkn);g_assert_true(state.tls_psk_set);g_assert_true(g_cancellable_is_cancelled(token));
