@@ -4,6 +4,7 @@
 #define FP_COMPONENT "goodix521d"
 #include "goodix-acquire.h"
 #include "goodix-timing.h"
+#include "goodix-exposure.h"
 #include "transport/goodix.h"
 #include <string.h>
 
@@ -22,6 +23,10 @@ struct _GoodixAcquisition {
   guint8 reference_seed[16], down_seed[16];
   gboolean context_valid, reference_seed_valid, refresh_required, reference_pending;
   guint8 pending_reference_seed[16];
+  GxImage pending_reference_image, reference_image;
+  GxExposureState exposure;
+  guint16 live_image_dacs[4];
+  gboolean exposure_valid;
   GoodixAcquired callback;
   gpointer user_data;
   gboolean reference, cancelled;
@@ -99,6 +104,7 @@ acquisition_complete (FpiSsm *ssm, FpDevice *device, GError *error)
     if (!self->paired_f1_valid || gx_fdt_seed(self->paired_fdt[0],16,self->pending_reference_seed)!=GX_OK)
       error=fpi_device_error_new(FP_DEVICE_ERROR_PROTO);
     else {
+      self->pending_reference_image=image;
       self->reference_pending=TRUE;
       self->context_valid=FALSE;
     }
@@ -150,29 +156,9 @@ contact_register (FpDevice *device, gpointer user_data, GError *error)
   (void)device;
   if (error) { fpi_ssm_mark_failed(ssm,error);return; }
   if (!acquisition_continue(self,ssm)) return;
-  if (fpi_ssm_get_cur_state(ssm)==CONTACT_RESTORE) {
-    if (self->frames<10) fpi_ssm_jump_to_state(ssm,CONTACT_REGISTER);
-    else {
-      acquisition_timing_transition(self,"contact-up");
-      fpi_ssm_next_state(ssm);
-    }
-  } else fpi_ssm_next_state(ssm);
-}
-
-static void
-contact_image (FpDevice *device, guint8 *data, guint16 length, gpointer user_data, GError *error)
-{
-  FpiSsm *ssm = user_data;
-  GoodixAcquisition *self = fpi_ssm_get_data (ssm);
-  const guint8 prefix[5] = {0};
-  guint64 generation = (guint64)(guintptr)ssm;
-  (void)device;
-  if (error) { fpi_ssm_mark_failed (ssm, error); return; }
-  if (gx_image_blob (data, length, prefix, generation, generation, &self->contact) != GX_OK)
-    { fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO)); return; }
-  self->frames++;
-  if (self->frames==10) acquisition_timing_transition(self,"contact-restore");
-  fpi_ssm_jump_to_state(ssm,CONTACT_RESTORE);
+  if (fpi_ssm_get_cur_state(ssm)==CONTACT_RESTORE)
+    acquisition_timing_transition(self,"contact-up");
+  fpi_ssm_next_state(ssm);
 }
 
 typedef struct { GoodixAcquisition *self; FpDevice *device; guint64 generation; } UpOwner;
@@ -182,6 +168,46 @@ static UpOwner *up_owner_new(GoodixAcquisition *self) {
 }
 static void up_owner_free(gpointer data) {
   UpOwner *owner=data;goodix_acquisition_free(owner->self);g_object_unref(owner->device);g_free(owner);
+}
+
+static void
+contact_image (FpDevice *device, guint8 *data, guint16 length, gpointer user_data, GError *error)
+{
+  UpOwner *owner=user_data;
+  GoodixAcquisition *self=owner->self;
+  if (!self->ssm || self->generation!=owner->generation) {
+    g_clear_error(&error);up_owner_free(owner);return;
+  }
+  FpiSsm *ssm=self->ssm;
+  const guint8 prefix[5] = {0};
+  guint64 generation = owner->generation;
+  (void)device;
+  if (error) { fpi_ssm_mark_failed (ssm, error); goto out; }
+  if (!acquisition_continue(self,ssm)) goto out;
+  if (fpi_ssm_get_cur_state(ssm)!=CONTACT_IMAGE || !self->exposure_valid || !self->reference_image.valid) {
+    fpi_ssm_mark_failed(ssm,fpi_device_error_new(FP_DEVICE_ERROR_PROTO));goto out;
+  }
+  if (gx_image_blob (data, length, prefix, generation, generation, &self->contact) != GX_OK)
+    { fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO)); goto out; }
+  /* Feedback uses the unmodified native ADC planes. Its result applies only
+   * to the next request; this capture keeps its original exposure and pixels. */
+  guint16 background[GX_PIXELS],frame[GX_PIXELS];
+  GxExposureMeasurement measurement;
+  for (guint i=0;i<GX_PIXELS;i++) {
+    background[i]=self->reference_image.pixels[2*i]|((guint16)self->reference_image.pixels[2*i+1]<<8);
+    frame[i]=self->contact.pixels[2*i]|((guint16)self->contact.pixels[2*i+1]<<8);
+  }
+  GxExposureResult feedback=gx_exposure_update(&self->exposure,background,GX_PIXELS,
+                                              frame,GX_PIXELS,self->live_image_dacs,&measurement);
+  memset(background,0,sizeof background);memset(frame,0,sizeof frame);
+  if (feedback!=GX_EXPOSURE_OK) {
+    fpi_ssm_mark_failed(ssm,fpi_device_error_new_msg(FP_DEVICE_ERROR_PROTO,"Exposure feedback input or context is invalid"));goto out;
+  }
+  self->frames++;
+  acquisition_timing_transition(self,"contact-restore");
+  fpi_ssm_jump_to_state(ssm,CONTACT_RESTORE);
+out:
+  up_owner_free(owner);
 }
 static void contact_removed(FpDevice *device,guint8 *data,guint16 length,gpointer user_data,GError *error) {
   UpOwner *owner=user_data;GoodixAcquisition *self=owner->self;
@@ -265,7 +291,8 @@ contact_run (FpiSsm *ssm, FpDevice *device)
     case CONTACT_DOWN1: {
       guint phase=fpi_ssm_get_cur_state(ssm)==CONTACT_DOWN1;
       guint8 payload[40];
-      if(!self->context_valid || gx_down_request(self->otp,self->down_seed,16,phase,payload)!=GX_OK) {
+      if(!self->context_valid || !self->exposure_valid ||
+         gx_down_request_with_dacs(self->otp,self->down_seed,16,phase,self->live_image_dacs,payload)!=GX_OK) {
         fpi_ssm_mark_failed(ssm,fpi_device_error_new_msg(FP_DEVICE_ERROR_PROTO,"Detector context is not ready"));return;
       }
       if(!phase) {
@@ -290,8 +317,8 @@ contact_run (FpiSsm *ssm, FpDevice *device)
       goodix_send_write_sensor_register (device,0x022c,(self->otp[23]&0x80)?0x0305:0x030a,contact_register,ssm);
       break;
     case CONTACT_RESTORE:
-      /* Every successful Windows image wrapper restores before its caller
-       * proceeds (RVA5a2bc/5a2f7), including between burst images. */
+      /* The successful Windows image wrapper restores before its caller
+       * proceeds to removal arming (RVA5a2bc/5a2f7). */
       goodix_send_write_sensor_register(device,0x022c,0x020a,contact_register,ssm);
       break;
     case CONTACT_UP0:
@@ -316,8 +343,10 @@ contact_run (FpiSsm *ssm, FpDevice *device)
       break;
     }
     case CONTACT_IMAGE:
-      for (guint i=0;i<4;i++) { request[2+i*2]=fields.image[i]&255; request[3+i*2]=fields.image[i]>>8; }
-      goodix_tls_read_image (device,request,sizeof request,contact_image,ssm);
+      if (!self->exposure_valid || gx_contact_image_request(self->live_image_dacs,request)!=GX_OK) {
+        fpi_ssm_mark_failed(ssm,fpi_device_error_new(FP_DEVICE_ERROR_PROTO));return;
+      }
+      goodix_tls_read_image (device,request,sizeof request,contact_image,up_owner_new(self));
       break;
     }
 }
@@ -384,12 +413,28 @@ goodix_acquisition_invalidate_context (GoodixAcquisition *self)
   self->context_valid=FALSE;self->reference_seed_valid=FALSE;self->reference_pending=FALSE;
   memset(self->pending_reference_seed,0,16);
   memset(self->reference_seed,0,16);memset(self->down_seed,0,16);
+  memset(&self->pending_reference_image,0,sizeof self->pending_reference_image);
+  memset(&self->reference_image,0,sizeof self->reference_image);
+  memset(self->live_image_dacs,0,sizeof self->live_image_dacs);
+  gx_exposure_clear(&self->exposure);self->exposure_valid=FALSE;
 }
 
 gboolean
 goodix_acquisition_commit_reference (GoodixAcquisition *self)
 {
   if (!self || self->ssm || !self->reference_pending || acquisition_cancelled(self)) return FALSE;
+  GxFields fields;GxExposureState exposure;
+  if (!self->pending_reference_image.valid || gx_fields(self->otp,64,&fields)!=GX_OK ||
+      gx_exposure_reset(&exposure,fields.integration,fields.initial_image_dac)!=GX_EXPOSURE_OK) {
+    goodix_acquisition_invalidate_context(self);return FALSE;
+  }
+  for (guint i=0;i<4;i++) if(fields.image[i]>511) {
+    goodix_acquisition_invalidate_context(self);return FALSE;
+  }
+  self->reference_image=self->pending_reference_image;
+  memset(&self->pending_reference_image,0,sizeof self->pending_reference_image);
+  self->exposure=exposure;memcpy(self->live_image_dacs,fields.image,sizeof self->live_image_dacs);
+  self->exposure_valid=TRUE;
   memcpy(self->reference_seed,self->pending_reference_seed,16);
   memcpy(self->down_seed,self->pending_reference_seed,16);
   memset(self->pending_reference_seed,0,16);

@@ -57,7 +57,13 @@ GxResult gx_up_request (const guint8 factory[64], const guint8 *down,
 GxResult gx_fdt_seed (const guint8 *raw, gsize length, guint8 seed[16]);
 GxResult gx_down_request (const guint8 factory[64], const guint8 *seed,
                          gsize length, guint phase, guint8 request[40]);
+GxResult gx_down_request_with_dacs (const guint8 factory[64], const guint8 *seed,
+                                    gsize length, guint phase,
+                                    const guint16 image_dacs[4], guint8 request[40]);
+GxResult gx_contact_image_request (const guint16 image_dacs[4], guint8 request[10]);
 GxResult gx_contact_manual_request (const guint8 factory[64], const guint8 *seed,
                                    gsize length, guint phase, guint8 request[27]);
 GxResult gx_preburst_fdt_equal (const guint8 down[16], const guint8 manual[16],
                                guint16 threshold, gboolean *equal);
+/* Scalar diagnostics only: <=100, strictly100..3800, >=3800 in the2px crop. */
+GxResult gx_raw_range_counts (const guint16 frame[GX_PIXELS], guint counts[3]);

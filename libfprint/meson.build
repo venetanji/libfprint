@@ -142,6 +142,7 @@ driver_sources = {
         'drivers/goodix521d/chicago/goodix-gf5298.c',
         'drivers/goodix521d/chicago/openchicago.c',
         'drivers/goodix521d/goodix-acquire.c',
+        'drivers/goodix521d/goodix-exposure.c',
         'drivers/goodix521d/goodix-input.c',
         'drivers/goodix521d/goodix-profile.c',
         'drivers/goodix521d/goodix521d.c',

@@ -379,13 +379,39 @@ gx_down_request (const guint8 factory[64], const guint8 *seed,
   GxFields fields;
   if (!request) return GX_PROFILE;
   memset(request,0,40);
+  if (!factory || gx_fields(factory,64,&fields)!=GX_OK) return GX_PROFILE;
+  return gx_down_request_with_dacs(factory,seed,length,phase,fields.image,request);
+}
+
+GxResult
+gx_contact_image_request (const guint16 image_dacs[4], guint8 request[10])
+{
+  if (!request) return GX_PROFILE;
+  memset(request,0,10);
+  if (!image_dacs) return GX_PROFILE;
+  for (guint i=0;i<4;i++) if (image_dacs[i]>511) return GX_PROFILE;
+  request[0]=0x45;request[1]=3;
+  for (guint i=0;i<4;i++) put16(request+2+2*i,image_dacs[i]);
+  return GX_OK;
+}
+
+GxResult
+gx_down_request_with_dacs (const guint8 factory[64], const guint8 *seed,
+                           gsize length, guint phase,
+                           const guint16 image_dacs[4], guint8 request[40])
+{
+  GxFields fields;
+  if (!request) return GX_PROFILE;
+  memset(request,0,40);
   if (!seed || length!=16) return GX_LENGTH;
   if (!factory || phase>1 || gx_fields(factory,64,&fields)!=GX_OK) return GX_PROFILE;
+  if (!image_dacs) return GX_PROFILE;
+  for (guint i=0;i<4;i++) if (image_dacs[i]>511) return GX_PROFILE;
   request[0]=0x9c;request[1]=1;request[26]=phase;
   memcpy(request+10,seed,16);
   request[28]=fields.capture_mode?5:10;request[29]=3;request[38]=3;
   for(guint i=0;i<4;i++) {
-    put16(request+2+2*i,fields.fdt[i]);put16(request+30+2*i,fields.image[i]);
+    put16(request+2+2*i,fields.fdt[i]);put16(request+30+2*i,image_dacs[i]);
   }
   return GX_OK;
 }
@@ -416,5 +442,18 @@ gx_preburst_fdt_equal (const guint8 down[16], const guint8 manual[16],
     if(ABS((gint)(le16(down+2*i)>>1)-(gint)(le16(manual+2*i)>>1))>threshold)
       return GX_OK;
   *equal=TRUE;
+  return GX_OK;
+}
+
+GxResult
+gx_raw_range_counts (const guint16 frame[GX_PIXELS], guint counts[3])
+{
+  if (!counts) return GX_PROFILE;
+  memset(counts,0,3*sizeof *counts);
+  if (!frame) return GX_PROFILE;
+  for(guint y=2;y<62;y++) for(guint x=2;x<78;x++) {
+    guint value=frame[y*80+x];
+    counts[value<=100?0:value>=3800?2:1]++;
+  }
   return GX_OK;
 }

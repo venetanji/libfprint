@@ -38,16 +38,18 @@ those IRQ bits alone in a manual snapshot do not invalidate the context.
    eight shifted-word absolute deltas are at most the factory timing threshold,
    Windows selects its reference-refresh branch (684b7–684c6). Otherwise capture
    proceeds. Neither result is a machine-verifiable finger-absence predicate.
-4. Capture policy retains ten images and selects the final validated image.
-   Each image wrapper writes022c capture mode, receives authenticated image20,
-   then restores022c=020a with acknowledged opcode80 payload `00 2c 02 0a 02`
-   before the next image/UP (5a0e0,5a2bc/5a2f7,68606–68655).
+4. Capture exactly one image:6864e–68653 compares the count against literal1;
+   wrapper5a0e0 makes one5a990 call, which submits image20 once at5ab67.
+   The wrapper writes022c capture mode, receives the authenticated image,
+   updates future image DACs via59bc8/58888, then restores022c=020a with
+   acknowledged opcode80 payload `00 2c 02 0a 02` before UP (5a2bc/5a2f7).
+   Current image pixels remain unchanged; no quality-selection loop is used.
 5. Opcode34: both ordered UP ACKs and a current20-byte IRQ0200 event. Only then
    publish removal, update the DOWN seed, and hand a contact to preprocessing.
 
 DOWN builder5ae3c–5af1a uses a zeroed40-byte payload: byte0=9c for the qualified
 initial globals;1=1;2..9=factory FDT DAC LE16;10..25=DOWN seed;26=phase;27=0;
-28=OTP23 highbit?5:10;29=3;30..37=factory image DAC LE16;38=3;39=0.
+28=OTP23 highbit?5:10;29=3;30..37=current live image DAC LE16;38=3;39=0.
 The fixed runtime-global defaults are part of this bounded profile, not a claim
 that every Windows runtime configuration uses them.
 
@@ -60,7 +62,7 @@ The old reference is not replaced until a qualified UP event and full candidate
 acceptance. A new touch after UP is still possible. All reference gates
 and main-thread ownership/deadline checks still apply to the new candidate.
 
-The ten-frame selection, one in-action enrollment refresh limit, existing
+The one in-action enrollment refresh limit, fresh-epoch exposure-history reset, existing
 bounded paired-reference reacquisition and conservative reverse-event
 invalidation are Linux policies. They are not recovered Windows retry counts or
 universal absence detectors. Existing template format and matching policy stay
@@ -75,3 +77,25 @@ image restore, event/ACK orderings, stale/coalesced replies, cancellation and
 bounded deadlines. No raw captured images or personalized configuration bytes
 are needed by those fixtures. These tests establish source contracts, not
 physical reliability or authentication error rates.
+
+## Exposure startup and feedback
+
+Factory decoder550d8 initializes live image DACs at context90, then550dd–550e7
+snapshots word0 into immutable contexta0. Getter55430 and caller66dac–66db4
+initialize the controller through42a84 with mode29,80×64,integration,initialDAC,1.
+Paired-reference descriptors697da–697e2 disable post-image feedback; they use
+FDT DACs. The first normal image therefore uses factory image DACs.
+
+Post-image5a295–5a2b1 invokes59bc8 before restore. Inner57b0c uses the persistent
+controller DAC, not literal151;58888 distributes the result around the minimum
+of all four live words. This distribution still runs for an ineligible exposure
+measurement. Updated words apply to future images and DOWN setup, not the raw
+image just returned. Public synthetic oracle tests preserve exact float32 and
+uint16 history semantics.
+
+APP10034 also performs internal image/setup work before emitting DOWN:
+5c20→61ba consumes the request's image DACs and byte38. The qualified byte38=3
+differs from older Linux39-byte requests ending in0. This is a real firmware
+setup difference; it is not labeled a recovered settling count or a DAC offset.
+Consequently old saturated first-frame bursts do not prove current first-frame
+behavior. Physical first-capture quality remains a hardware validation item.

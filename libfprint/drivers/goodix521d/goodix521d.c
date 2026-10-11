@@ -10,6 +10,7 @@
 #include "goodix-timing.h"
 #include "gx-print-envelope.h"
 #include "chicago/openchicago.h"
+#include "chicago/goodix-chicago-preprocess.h"
 #include <openssl/crypto.h>
 #include <string.h>
 
@@ -475,6 +476,15 @@ process_done (GObject *source_object, GAsyncResult *async_result, gpointer unuse
     g_message("goodix-processing action_id=%" G_GUINT64_FORMAT " action=%s contact=%u preprocess_status=0x%08x reject=%s",
               self->timing.action_id,action==ACTION_VERIFY?"verify":"identify",self->contacts,
               (guint)result->verified.status,oc_reject_to_string(result->verified.reject));
+  if ((action==ACTION_VERIFY || action==ACTION_IDENTIFY) &&
+      result->verified.status==GOODIX_CHICAGO_PREPROCESS_STATUS_BAD_INPUT &&
+      result->verified.reject==OC_REJECT_BAD_INPUT) {
+    guint counts[3];
+    if (gx_raw_range_counts(result->frame,counts)==GX_OK)
+      g_message("goodix-input-range action_id=%" G_GUINT64_FORMAT " action=%s contact=%u low=%u in-range=%u high=%u total=4560",
+                self->timing.action_id,action==ACTION_VERIFY?"verify":"identify",self->contacts,
+                counts[0],counts[1],counts[2]);
+  }
   if (result->verified.reject!=OC_REJECT_NONE) {
     GError *retry=fpi_device_retry_new_msg(FP_DEVICE_RETRY_GENERAL,"%s",oc_reject_to_string(result->verified.reject));
     if (action==ACTION_VERIFY) fpi_device_verify_report(device,FPI_MATCH_ERROR,NULL,retry);

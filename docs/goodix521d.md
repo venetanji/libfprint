@@ -38,7 +38,7 @@ A validated FDT or image stability rejection permits at most one reacquisition w
 Normal contacts now follow the pinned GF5298 detector sequence within one
 healthy initialized hardware context. Accepted reference F1 initializes two
 separate in-memory seeds. The full 40-byte DOWN request uses factory-derived
-FDT and image DACs, settings, and the current detector seed. Both ordered arm
+FDT DACs, current image DACs, settings, and the current detector seed. Both ordered arm
 ACKs and a separate checksummed current DOWN event are required. One two-phase
 manual FDT transaction then compares the current DOWN snapshot with its new
 snapshot, using the separate reference/manual seed. These are vendor-derived
@@ -55,11 +55,12 @@ reference still passes every paired-image, FDT and preprocessing range check.
 A second enrollment refresh or a failed refresh terminates the action. This
 lift-before-refresh ordering is an explicit safety adaptation of Windows.
 
-Each normal contact retains the existing ten-frame/final-frame selection policy
-and native 80×64 input. Every successful image is followed by an acknowledged
-volatile write restoring register `0x022c` to `0x020a`, before another image or
-removal arm. A failed image or restore stops the contact. There is no repeated
-manual FDT transaction between images. The validated UP snapshot updates only
+Each normal contact captures one native 80×64 image, matching the pinned
+Windows caller and its single image submission. After integrity validation,
+exposure feedback updates the four DAC words for future requests without
+changing the captured pixels. An acknowledged volatile write then restores
+register `0x022c` to `0x020a` before the removal arm. A failed image or restore
+stops the contact; there is no hidden settling burst or quality-based recapture. The validated UP snapshot updates only
 the next DOWN seed, using `uint16((raw >> 1) * 257)`; it never replaces the
 reference/manual seed or a biometric template. UP arming still uses the distinct
 touch-adjusted translation of the current DOWN event. Contact images never pass
@@ -79,8 +80,9 @@ reference. Consistency/range checks do not establish automatic finger absence,
 and unstable reference readings do not prove a finger was placed too early.
 After an unqualified transport failure, the next initialization likewise requests
 a clear reader; resetting the sensor is not reported as a validated removal.
-Matching thresholds, preprocessing profile, frame count and template format are
-unchanged. Physical speed and reliability require qualification on this build.
+Matching thresholds, preprocessing profile and template format are unchanged.
+The image count and exposure feedback are the functional changes; physical
+speed and reliability require qualification on this build.
 
 Before enrollment, fprintd performs a duplicate-identification capture even when
 no prints are stored. An empty gallery still uses the ordinary capture and
@@ -126,8 +128,7 @@ fprintd-verify "$USER"
 
 Use `fprintd-enroll "$USER"` only when a new enrollment is actually needed; do not overwrite a working enrollment to test this change.
 
-Follow PLACE, HOLD and REMOVE in terminal 1. HOLD lasts through the ten-frame
-capture; REMOVE is published only after the reader acknowledges its removal
+Follow PLACE, HOLD and REMOVE in terminal 1. HOLD lasts through image acquisition and restoration; REMOVE is published only after the reader acknowledges its removal
 arm commands. The removal event owner starts before phase 0 because APP10034 can emit IRQ 0x0200 in that interval; success still requires both ordered phase ACKs and an exact checksummed current-owner 0x34 event. Pre-arm or wrong-generation events cannot complete the contact. A stage is not accepted until the separate removal event is validated.
 For enrollment, the initial contact is fprintd's duplicate check, before counted stages.
 The monitor exits after its bounded observation window or Ctrl+C; stopping it
@@ -162,8 +163,9 @@ microseconds. Correlate them by process, `action_id`, and `contact`; action IDs
 are local to a device object and are not persistent identifiers. Driver records
 separate bootstrap, TLS, reference/capture, cleanup when performed, worker queue, algorithm,
 callback delivery, and overall action duration. Acquisition records break the
-contact into DOWN wait, pre-burst FDT check, ten-frame burst (including its
-intermediate restores), final register restore, and UP wait.
+contact into DOWN wait, pre-burst FDT check, image acquisition/feedback,
+register restore, and UP wait. The historical `contact-burst` label now measures
+the single-image acquisition/feedback interval, for log comparison.
 
 These intervals overlap: capture includes the acquisition subphases, and the
 overall duration includes all stages. Do not sum all records together. Algorithm
@@ -181,7 +183,10 @@ verification/identification computation. It does not report a match decision.
 For example, `0x000029aa` with `bad-input` means the raw input range gate
 rejected the frame before enhancement/features/matching; it does not identify
 the physical reason for that rejection. Cancelled or failed computations do not
-publish this result diagnostic.
+publish this result diagnostic. On `bad-input` only, `goodix-input-range` reports
+three scalar counts in the existing 4,560-pixel interior: `low` is at most100,
+`in-range` is101–3799, and `high` is at least3800. This distinguishes raw-range
+failure classes without exporting pixels or changing the preprocessing gate.
 
 ## Required local qualification
 
@@ -195,3 +200,28 @@ Before authentication use, test with libfprint examples and then the existing fp
 6. Test unplug/replug and deliberate malformed/incompatible-template rejection.
 
 Do not interpret compilation, a synthetic USB fixture, partial-gallery diagnostics or a few successful comparisons as an authentication error-rate measurement. Physical free-driver and Arch package results must be recorded separately from offline tests.
+
+## Exposure feedback
+
+The free controller follows the pinned GF5298 mode29/mode1 arithmetic: factory
+integration and immutable initial DAC, selected native-ADC mean, float32 ratio
+and step calculations, directional hysteresis, and minimum-of-four DAC
+distribution. Its literal151 call argument is logging metadata, not the starting
+DAC or a brightness target. The accepted FIRST paired reference is deep-copied
+for feedback only after preprocessing initialization/rebase succeeds.
+
+Controller history and live request words persist across healthy contacts.
+Both the next DOWN request and next image request use those same four words.
+Even an ineligible measurement can redistribute the words when their minimum
+differs from the controller target. Feedback never rescues the current image
+retroactively: its unchanged preprocessing range/quality gates may return a
+retry. Transport, restore, removal or cancellation failure invalidates the
+controller and raw-reference copy together. A fresh hardware epoch starts with
+factory DACs and cleared history; this explicit Linux lifetime policy differs
+from the vendor global initializer, which preserves some history.
+
+Public synthetic fixtures cover75 stateful vendor-oracle updates, four DAC
+distributions, ineligible measurement redistribution, invalid inputs and state
+ownership. No DLL, personal factory record or captured fingerprint is included.
+Older ten-frame captures used different DOWN firmware setup and cannot establish
+the quality of the first image under this corrected sequence.

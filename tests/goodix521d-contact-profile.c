@@ -28,11 +28,33 @@ int main(void) {
   g_assert_cmpuint(manual[26],==,phase);
  }
  gboolean equal=FALSE; b[0]=17;
+ const guint16 live[4]={172,161,176,511};guint8 image_request[10];
+ g_assert_cmpint(gx_down_request_with_dacs(otp,seed,16,1,live,out),==,GX_OK);
+ g_assert_cmpint(gx_contact_image_request(live,image_request),==,GX_OK);
+ g_assert_cmpuint(image_request[0],==,0x45);g_assert_cmpuint(image_request[1],==,3);
+ for(guint i=0;i<4;i++) {
+  g_assert_cmpuint(out[30+2*i]|out[31+2*i]<<8,==,live[i]);
+  g_assert_cmpuint(image_request[2+2*i]|image_request[3+2*i]<<8,==,live[i]);
+ }
+ guint16 invalid_dacs[4]={172,161,176,512};
+ g_assert_cmpint(gx_down_request_with_dacs(otp,seed,16,0,invalid_dacs,out),==,GX_PROFILE);
+ for(guint i=0;i<40;i++)g_assert_cmpuint(out[i],==,0);
+ g_assert_cmpint(gx_contact_image_request(invalid_dacs,image_request),==,GX_PROFILE);
+ for(guint i=0;i<10;i++)g_assert_cmpuint(image_request[i],==,0);
  g_assert_cmpint(gx_preburst_fdt_equal(a,b,8,&equal),==,GX_OK);g_assert_true(equal);
  b[0]=18;g_assert_cmpint(gx_preburst_fdt_equal(a,b,8,&equal),==,GX_OK);g_assert_false(equal);
  g_assert_cmpint(gx_down_request(otp,seed,15,0,out),==,GX_LENGTH);
  for(guint i=0;i<40;i++)g_assert_cmpuint(out[i],==,0);
  g_assert_cmpint(gx_down_request(otp,seed,16,2,out),==,GX_PROFILE);
  g_assert_cmpint(gx_fdt_seed(raw,15,seed),==,GX_LENGTH);
+ guint16 frame[GX_PIXELS];for(guint i=0;i<GX_PIXELS;i++)frame[i]=4095;
+ for(guint y=2;y<62;y++)for(guint x=2;x<78;x++)frame[y*80+x]=1000;
+ frame[2*80+2]=0;frame[2*80+3]=100;frame[2*80+4]=101;
+ frame[2*80+5]=3799;frame[2*80+6]=3800;frame[2*80+7]=4095;
+ guint counts[3]={99,99,99};
+ g_assert_cmpint(gx_raw_range_counts(frame,counts),==,GX_OK);
+ g_assert_cmpuint(counts[0],==,2);g_assert_cmpuint(counts[1],==,4556);g_assert_cmpuint(counts[2],==,2);
+ g_assert_cmpint(gx_raw_range_counts(NULL,counts),==,GX_PROFILE);
+ for(guint i=0;i<3;i++)g_assert_cmpuint(counts[i],==,0);
  return 0;
 }

@@ -2026,7 +2026,7 @@ test_timing_terminal_once (gconstpointer data)
   timing_test_end (handler);
 }
 
-static GPtrArray *processing_records;
+static GPtrArray *processing_records, *range_records;
 static GThread *processing_main_thread;
 
 static void
@@ -2034,6 +2034,10 @@ capture_processing_log (const gchar *domain, GLogLevelFlags level,
                         const gchar *message, gpointer unused)
 {
   (void)domain; (void)level; (void)unused;
+  if (g_str_has_prefix(message,"goodix-input-range ")) {
+    g_assert_true(g_thread_self()==processing_main_thread);
+    g_ptr_array_add(range_records,g_strdup(message));return;
+  }
   if (!g_str_has_prefix(message,"goodix-processing ")) return;
   g_assert_true(g_thread_self()==processing_main_thread);
   g_ptr_array_add(processing_records,g_strdup(message));
@@ -2043,6 +2047,7 @@ static guint
 processing_test_begin (void)
 {
   processing_records=g_ptr_array_new_with_free_func(g_free);
+  range_records=g_ptr_array_new_with_free_func(g_free);
   processing_main_thread=g_thread_self();
   return g_log_set_handler("libfprint-goodix521d",G_LOG_LEVEL_MESSAGE,capture_processing_log,NULL);
 }
@@ -2052,6 +2057,7 @@ processing_test_end (guint handler)
 {
   g_log_remove_handler("libfprint-goodix521d",handler);
   g_clear_pointer(&processing_records,g_ptr_array_unref);
+  g_clear_pointer(&range_records,g_ptr_array_unref);
 }
 
 static void
@@ -2075,6 +2081,11 @@ test_processing_result_line (gconstpointer data)
     action==ACTION_VERIFY?"verify":"identify",bad_input?"0x000029aa":"0x00000000",
     bad_input?"bad-input":"no-features");
   g_assert_cmpstr(g_ptr_array_index(processing_records,0),==,expected);
+  g_assert_cmpuint(range_records->len,==,bad_input?1:0);
+  if (bad_input) {
+    g_autofree gchar *range=g_strdup_printf("goodix-input-range action_id=1 action=%s contact=3 low=4560 in-range=0 high=0 total=4560",action==ACTION_VERIFY?"verify":"identify");
+    g_assert_cmpstr(g_ptr_array_index(range_records,0),==,range);
+  }
   g_assert_cmpuint(state.reports,==,1);
   g_assert_true(state.report_retry);
   operation_error(device,g_error_new_literal(G_IO_ERROR,G_IO_ERROR_FAILED,"late error"));
@@ -2108,6 +2119,7 @@ test_processing_discarded_result_silent (gconstpointer data)
   g_assert_nonnull(state.error);
   g_assert_cmpuint(state.reports,==,0);
   g_assert_cmpuint(processing_records->len,==,0);
+  g_assert_cmpuint(range_records->len,==,0);
   finish_state(device);
   processing_test_end(handler);
 }
@@ -2118,6 +2130,7 @@ test_processing_reference_silent (void)
   guint handler=processing_test_begin();
   test_success_once(GINT_TO_POINTER(ACTION_OPEN));
   g_assert_cmpuint(processing_records->len,==,0);
+  g_assert_cmpuint(range_records->len,==,0);
   processing_test_end(handler);
 }
 

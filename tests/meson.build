@@ -490,6 +490,14 @@ if 'goodix521d' in drivers
     endforeach
 endif
 if 'goodix521d' in drivers
+    gx_exposure_library = shared_library('goodix521d-exposure-test',
+        '../libfprint/drivers/goodix521d/goodix-exposure.c',
+        install: false)
+    test('goodix521d-exposure', python3,
+        args: files('goodix521d-exposure.py'),
+        env: {'GOODIX_EXPOSURE_LIBRARY': gx_exposure_library.full_path()},
+        depends: gx_exposure_library,
+        suite: ['goodix521d', 'unit-tests'])
     gx_acquisition_test = executable('goodix521d-acquisition', 'goodix521d-acquisition.c',
         include_directories: goodix521d_inc,
         dependencies: libfprint_private_dep,
