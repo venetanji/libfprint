@@ -53,3 +53,11 @@ GxResult gx_background_gates (const guint8 a[16], const guint8 b[16],
 /* Translate the current checksummed DOWN event into a two-phase UP request. */
 GxResult gx_up_request (const guint8 factory[64], const guint8 *down,
                         gsize length, guint phase, guint8 request[40]);
+/* Qualified pinned fresh-mode detector builders; no live device I/O. */
+GxResult gx_fdt_seed (const guint8 *raw, gsize length, guint8 seed[16]);
+GxResult gx_down_request (const guint8 factory[64], const guint8 *seed,
+                         gsize length, guint phase, guint8 request[40]);
+GxResult gx_contact_manual_request (const guint8 factory[64], const guint8 *seed,
+                                   gsize length, guint phase, guint8 request[27]);
+GxResult gx_preburst_fdt_equal (const guint8 down[16], const guint8 manual[16],
+                               guint16 threshold, gboolean *equal);

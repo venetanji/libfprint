@@ -33,22 +33,54 @@ All file access is read-only. The original Windows volume and any saved calibrat
 
 Start with the reader clear. Opening obtains a fresh paired background: three FDT snapshots, two differently flagged background images, the original shifted-word FDT gates and strict cropped image MAD below 200. The free preprocessor additionally rejects an invalid reference range. A finger-covered reference is not an acceptable workaround.
 
-A validated FDT or image stability rejection permits at most one reacquisition within that same initialized open. The second attempt uses the first FDT snapshot transformed as `uint16((raw >> 1) * 257)` for its seed; partial reference images are discarded. This is a bounded Linux recovery policy based on the Windows seed-update operation, not a Windows retry-count claim. Both attempts share the original 45-second open deadline and unchanged acceptance gates. Transport, malformed-data, integrity, or cancellation failures do not trigger this retry. The seed is never saved or carried into another open. A journal `paired-reference-retry` line identifies this recovery attempt.
+A validated FDT or image stability rejection permits at most one reacquisition within that same initialized open. The second attempt uses the first FDT snapshot transformed as `uint16((raw >> 1) * 257)` for its seed; partial reference images are discarded. This is a bounded Linux recovery policy based on the Windows seed-update operation, not a Windows retry-count claim. Both attempts share the original action deadline (45 seconds during open) and unchanged acceptance gates. Transport, malformed-data, integrity, or cancellation failures do not trigger this retry. The seed is never saved or carried into another open. A journal `paired-reference-retry` line identifies this recovery attempt.
 
-The driver restores the earlier per-contact hardware transaction boundary:
-reset, volatile configuration and authenticated TLS are established for each
-capture, then transport is torn down before algorithm processing. The validated
-OpenChicago reference/session remains in memory across ordinary contacts as in
-that earlier lifecycle. This rolls back the reported regression from retaining
-hardware context; it does not prove which undocumented sensor state caused it.
+Normal contacts now follow the pinned GF5298 detector sequence within one
+healthy initialized hardware context. Accepted reference F1 initializes two
+separate in-memory seeds. The full 40-byte DOWN request uses factory-derived
+FDT and image DACs, settings, and the current detector seed. Both ordered arm
+ACKs and a separate checksummed current DOWN event are required. One two-phase
+manual FDT transaction then compares the current DOWN snapshot with its new
+snapshot, using the separate reference/manual seed. These are vendor-derived
+state transitions; snapshot similarity is not a finger-absence determination.
 
-Cold public opens still obtain a new paired reference. This rollback does not
-solve repeated cold-open baseline failures, and those failures do not establish
-that a finger was present or placed too early. No matching threshold, template
-format, image request recipe, or frame count is changed.
+When the pre-burst snapshots are equal within the factory threshold, Windows
+requests reference refresh. This implementation conservatively waits for a
+qualified current-contact UP first, without collecting contact images or
+writing an unnecessary image restore. Verification/identification reports a
+retry and rebuilds the reference for the next action. Enrollment permits one
+bounded refresh in the existing action: its accepted stages are preserved by
+preprocessor rebase, and the original deadline remains in force. The refresh
+reference still passes every paired-image, FDT and preprocessing range check.
+A second enrollment refresh or a failed refresh terminates the action. This
+lift-before-refresh ordering is an explicit safety adaptation of Windows.
 
-Each contact uses the established ten-frame settled capture recipe and the
-final integrity-checked native 80×64 frame. After the final validated frame, an acknowledged volatile write restores sensor register `0x022c` to `0x020a` before either removal-arm phase. This restores the Windows image-success-to-FDT transition while leaving the ten-frame burst unchanged; a failed restore aborts the contact. A current FDT-down event supplies the translated base for a separately armed, checksummed FDT-up event. ACK alone cannot satisfy finger removal. Contact images never pass through the old min/max/resize/invert preview path.
+Each normal contact retains the existing ten-frame/final-frame selection policy
+and native 80×64 input. Every successful image is followed by an acknowledged
+volatile write restoring register `0x022c` to `0x020a`, before another image or
+removal arm. A failed image or restore stops the contact. There is no repeated
+manual FDT transaction between images. The validated UP snapshot updates only
+the next DOWN seed, using `uint16((raw >> 1) * 257)`; it never replaces the
+reference/manual seed or a biometric template. UP arming still uses the distinct
+touch-adjusted translation of the current DOWN event. Contact images never pass
+through the old min/max/resize/invert preview path.
+
+Reference and detector state are bound to the healthy read-loop, TLS and
+configuration generations. Successful contacts retain that context. Reset,
+configuration loss, transport/protocol failure, cancellation or a classified
+reverse-detector event invalidates it; no state is carried blindly into a fresh
+bootstrap. Recovery drains old receive ownership before reinitializing, keeps
+finger-needed clear while a fresh reference is requested, and never extends the
+action deadline. The reference seed is committed only after preprocessing
+initialization/rebase and main-thread ownership checks succeed.
+
+Cold public opens still request a clear reader and obtain a fresh paired
+reference. Consistency/range checks do not establish automatic finger absence,
+and unstable reference readings do not prove a finger was placed too early.
+After an unqualified transport failure, the next initialization likewise requests
+a clear reader; resetting the sensor is not reported as a validated removal.
+Matching thresholds, preprocessing profile, frame count and template format are
+unchanged. Physical speed and reliability require qualification on this build.
 
 Before enrollment, fprintd performs a duplicate-identification capture even when
 no prints are stored. An empty gallery still uses the ordinary capture and
@@ -130,7 +162,8 @@ microseconds. Correlate them by process, `action_id`, and `contact`; action IDs
 are local to a device object and are not persistent identifiers. Driver records
 separate bootstrap, TLS, reference/capture, cleanup when performed, worker queue, algorithm,
 callback delivery, and overall action duration. Acquisition records break the
-contact into DOWN wait, ten-frame burst, register restore, and UP wait.
+contact into DOWN wait, pre-burst FDT check, ten-frame burst (including its
+intermediate restores), final register restore, and UP wait.
 
 These intervals overlap: capture includes the acquisition subphases, and the
 overall duration includes all stages. Do not sum all records together. Algorithm

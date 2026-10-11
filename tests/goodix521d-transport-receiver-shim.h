@@ -11,7 +11,10 @@ typedef void (*GDestroyNotify)(void *);typedef struct {int code;} GError;
 typedef int FpiSsm;typedef int FpDevice;typedef FpDevice FpiDeviceGoodixTls;
 typedef void (*GoodixCmdCallback)(FpDevice*,guint8*,guint16,gpointer,GError*);
 typedef GoodixCmdCallback GoodixDefaultCallback;
-typedef struct {gboolean cancelling;GoodixDefaultCallback fdt_up_callback;gpointer fdt_up_user_data;GDestroyNotify fdt_up_destroy;void *fdt_up_timeout;guint64 fdt_up_generation,fdt_up_operation,fdt_up_read_loop;gboolean fdt_up_acknowledged,fdt_up_received,fdt_up_started;guint fdt_up_phases_sent,fdt_up_acks;guint8 fdt_up_event[20];guint8 cmd;gboolean ack,reply,checksum_bypass,ack_additive,command_received,configuration_missing,configuration_conflict;guint64 operation_generation,configuration_generation,tls_generation,read_loop_generation;guint8 ack_echo,ack_flags,ack_checksum;guint8 *data;guint32 length;void *timeout;GDestroyNotify callback_data_destroy;gpointer user_data;GoodixCmdCallback callback;FpiSsm *tls_ssm;} FpiDeviceGoodixTlsPrivate;
+typedef struct {gboolean cancelling;GoodixDefaultCallback fdt_up_callback;gpointer fdt_up_user_data;GDestroyNotify fdt_up_destroy;void *fdt_up_timeout;guint64 fdt_up_generation,fdt_up_operation,fdt_up_read_loop;gboolean fdt_up_acknowledged,fdt_up_received,fdt_up_started;guint fdt_up_phases_sent,fdt_up_acks;guint8 fdt_up_event[20];guint8 cmd;gboolean ack,reply,checksum_bypass,ack_additive,command_received,configuration_missing,configuration_conflict;guint64 operation_generation,configuration_generation,tls_generation,read_loop_generation;guint8 ack_echo,ack_flags,ack_checksum;guint8 *data;guint32 length;void *timeout;GDestroyNotify callback_data_destroy;gpointer user_data;GoodixCmdCallback callback;FpiSsm *tls_ssm; gint64 fdt_event_deadline;
+ guint8 fdt_event_opcode;
+ gboolean terminal_error;
+} FpiDeviceGoodixTlsPrivate;
 static FpiDeviceGoodixTlsPrivate private_state;
 #define FPI_DEVICE_GOODIXTLS(x) (x)
 static FpiDeviceGoodixTlsPrivate *fpi_device_goodixtls_get_instance_private(void *x){return &private_state;}

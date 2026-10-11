@@ -52,6 +52,8 @@ typedef struct {
     gboolean fdt_up_acknowledged, fdt_up_received, fdt_up_started;
     guint fdt_up_phases_sent, fdt_up_acks;
     guint8 fdt_up_event[20];
+    gint64 fdt_event_deadline;
+    guint8 fdt_event_opcode; /* One mutually exclusive UP or DOWN owner. */
 
     GSource* timeout;
 
@@ -66,6 +68,7 @@ typedef struct {
     gboolean checksum_bypass, ack_additive, command_received, configuration_missing, configuration_conflict;
     guint8 ack_echo, ack_flags, ack_checksum;
     gboolean first_error_logged;
+    gboolean terminal_error;
     gint rx_endpoint;
     gssize rx_requested,rx_actual;
 
@@ -149,7 +152,8 @@ static void candidate_diagnostic(FpDevice *dev,GError *error,const char *site,Fp
         transfer?transfer->endpoint:priv->rx_endpoint,transfer?transfer->length:priv->rx_requested,transfer?transfer->actual_length:priv->rx_actual);
 }
 
-/* A narrow asynchronous 0x34 waiter. It is never a catch-all command reply. */
+/* One narrow two-phase FDT owner, qualified by its UP/DOWN opcode.
+ * Historical fdt_up_ fields also hold DOWN; neither is a catch-all reply. */
 static void goodix_fdt_up_done(FpDevice *dev, GError *error)
 {
     FpiDeviceGoodixTlsPrivate *priv =
@@ -188,6 +192,13 @@ static void goodix_fdt_up_maybe_complete(FpDevice *dev)
     FpiDeviceGoodixTlsPrivate *priv =
         fpi_device_goodixtls_get_instance_private(FPI_DEVICE_GOODIXTLS(dev));
     if (!goodix_fdt_up_current(priv)) return;
+    /* A ready timeout source may not have dispatched yet. Never publish a
+     * late event just because its USB callback ran first. */
+    if (g_get_monotonic_time() >= priv->fdt_event_deadline) {
+        goodix_fdt_up_done(dev, g_error_new_literal(G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
+                                                   "FDT event deadline expired"));
+        return;
+    }
     if (priv->configuration_missing)
         goodix_fdt_up_done(dev, g_error_new_literal(G_IO_ERROR, G_IO_ERROR_NOT_INITIALIZED,
                                                    "Acquisition configuration unavailable"));
@@ -200,13 +211,13 @@ static void goodix_fdt_up_timeout_cb(FpDevice *dev, gpointer user_data)
     FpiDeviceGoodixTlsPrivate *priv =
         fpi_device_goodixtls_get_instance_private(FPI_DEVICE_GOODIXTLS(dev));
     goodix_fdt_up_done(dev, g_error_new(G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
-        "Finger removal event timed out: phases-sent=%u ack-mask=0x%x event-seen=%u owner-current=%u",
-        priv->fdt_up_phases_sent, (1u << priv->fdt_up_acks) - 1,
+        "Finger %s event timed out: phases-sent=%u ack-mask=0x%x event-seen=%u owner-current=%u",
+        priv->fdt_event_opcode == 0x34 ? "removal" : "placement", priv->fdt_up_phases_sent, (1u << priv->fdt_up_acks) - 1,
         (guint)priv->fdt_up_received, (guint)goodix_fdt_up_current(priv)));
 }
 
-void goodix_wait_fdt_up(FpDevice *dev, guint timeout_ms, GoodixDefaultCallback callback,
-                       gpointer user_data, GDestroyNotify destroy)
+static void goodix_wait_fdt(FpDevice *dev, guint8 opcode, guint timeout_ms, GoodixDefaultCallback callback,
+                            gpointer user_data, GDestroyNotify destroy)
 {
     FpiDeviceGoodixTlsPrivate *priv =
         fpi_device_goodixtls_get_instance_private(FPI_DEVICE_GOODIXTLS(dev));
@@ -219,12 +230,13 @@ void goodix_wait_fdt_up(FpDevice *dev, guint timeout_ms, GoodixDefaultCallback c
     else if (priv->configuration_missing)
         error = g_error_new_literal(G_IO_ERROR, G_IO_ERROR_NOT_INITIALIZED, "Acquisition configuration unavailable");
     else if (!timeout_ms || timeout_ms > 30000)
-        error = g_error_new_literal(G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "Invalid finger removal deadline");
+        error = g_error_new_literal(G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "Invalid FDT event deadline");
     if (error) {
         callback(dev, NULL, 0, user_data, error);
         if (destroy) destroy(user_data);
         return;
     }
+    priv->fdt_event_opcode = opcode;
     priv->fdt_up_callback = callback;
     priv->fdt_up_user_data = user_data;
     priv->fdt_up_destroy = destroy;
@@ -234,16 +246,30 @@ void goodix_wait_fdt_up(FpDevice *dev, guint timeout_ms, GoodixDefaultCallback c
     priv->fdt_up_acknowledged = priv->fdt_up_received = priv->fdt_up_started = FALSE;
     priv->fdt_up_phases_sent = priv->fdt_up_acks = 0;
     memset(priv->fdt_up_event, 0, sizeof(priv->fdt_up_event));
+    priv->fdt_event_deadline = g_get_monotonic_time() + (gint64) timeout_ms * 1000;
     priv->fdt_up_timeout = fpi_device_add_timeout(dev, timeout_ms,
                                                  goodix_fdt_up_timeout_cb, NULL, NULL);
-    g_source_set_ready_time(priv->fdt_up_timeout,
-                            g_get_monotonic_time() + (gint64) timeout_ms * 1000);
+    g_source_set_ready_time(priv->fdt_up_timeout, priv->fdt_event_deadline);
+}
+
+void goodix_wait_fdt_up(FpDevice *dev, guint timeout_ms, GoodixDefaultCallback callback,
+                       gpointer user_data, GDestroyNotify destroy)
+{
+    goodix_wait_fdt(dev, 0x34, timeout_ms, callback, user_data, destroy);
+}
+
+void goodix_wait_fdt_down(FpDevice *dev, guint timeout_ms, GoodixDefaultCallback callback,
+                         gpointer user_data, GDestroyNotify destroy)
+{
+    goodix_wait_fdt(dev, 0x32, timeout_ms, callback, user_data, destroy);
 }
 
 void goodix_receive_done(FpDevice *dev, guint8 *data, guint16 length,
                          GError *error) {
   FpiDeviceGoodixTls *self = FPI_DEVICE_GOODIXTLS(dev);
   FpiDeviceGoodixTlsPrivate *priv = fpi_device_goodixtls_get_instance_private(self);
+  /* Preserve idle errors too: no command callback does not imply health. */
+  if (error) priv->terminal_error = TRUE;
   GoodixCmdCallback callback = priv->callback;
   gpointer user_data = priv->user_data;
   if (!(priv->ack || priv->reply)) {
@@ -251,8 +277,12 @@ void goodix_receive_done(FpDevice *dev, guint8 *data, guint16 length,
     else g_clear_error(&error);
     return;
   }
-  gboolean fdt_owner = goodix_fdt_up_current(priv) && priv->cmd == 0x34 &&
+  gboolean fdt_owner = goodix_fdt_up_current(priv) && priv->cmd == priv->fdt_event_opcode &&
                        priv->ack && !priv->reply;
+  if (fdt_owner && !error && g_get_monotonic_time() >= priv->fdt_event_deadline) {
+    error = g_error_new_literal(G_IO_ERROR, G_IO_ERROR_TIMED_OUT, "FDT event deadline expired");
+    priv->terminal_error = TRUE;
+  }
   guint64 fdt_generation = priv->fdt_up_generation;
   GError *fdt_error = fdt_owner && error ? g_error_copy(error) : NULL;
   if (fdt_owner && !error) {
@@ -277,14 +307,30 @@ static gboolean goodix_fdt_up_record(FpDevice *dev, guint8 *payload, guint16 len
     FpiDeviceGoodixTlsPrivate *priv =
         fpi_device_goodixtls_get_instance_private(FPI_DEVICE_GOODIXTLS(dev));
     if (!goodix_fdt_up_current(priv)) return FALSE;
-    if (length != 20 || payload[0] != 0 || payload[1] != 2) {
+    if (length != 20 || payload[0] != (priv->fdt_event_opcode == 0x32 ? 2 : 0) ||
+        payload[1] != (priv->fdt_event_opcode == 0x34 ? 2 : 0)) {
         goodix_receive_done(dev, NULL, 0, g_error_new_literal(G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                                                            "Invalid finger removal event"));
+                                                            priv->fdt_event_opcode == 0x34 ? "Invalid finger removal event" : "Invalid finger placement event"));
         return TRUE;
     }
     memcpy(priv->fdt_up_event, payload, 20);
     priv->fdt_up_received = TRUE;
     return FALSE;
+}
+
+/* A reverse event invalidates acquisition continuity even if emitted under an
+ * earlier DOWN/UP opcode. Manual36 is always a snapshot: its raw IRQ does
+ * not classify a reverse event. No wire transaction ID proves freshness. Call only
+ * after complete additive-checksummed protocol decoding; never on image/TLS. */
+static gboolean goodix_fdt_reverse_record(FpDevice *dev, guint8 cmd,
+                                          const guint8 *payload, guint16 length)
+{
+    if ((cmd != 0x32 && cmd != 0x34) || length != 20 ||
+        payload[1] != 0 || (payload[0] != 0x80 && payload[0] != 0x82))
+        return FALSE;
+    goodix_receive_done(dev, NULL, 0, g_error_new_literal(G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                                                        "FDT reverse event invalidated acquisition"));
+    return TRUE;
 }
 
 void goodix_receive_none(FpDevice *dev, guint8 *data, guint16 length,
@@ -519,6 +565,7 @@ static void goodix_receive_protocol_full(FpDevice *dev, guint8 *data,
     return;
   }
   priv->checksum_bypass = !valid_checksum && valid_null_checksum;
+  if (valid_checksum && goodix_fdt_reverse_record(dev, cmd, payload, payload_len)) return;
 
   if (cmd == GOODIX_CMD_ACK) {
       fp_dbg("got ack");
@@ -526,7 +573,7 @@ static void goodix_receive_protocol_full(FpDevice *dev, guint8 *data,
       return;
   }
 
-  if (cmd == 0x34 && goodix_fdt_up_current(priv)) {
+  if (cmd == priv->fdt_event_opcode && goodix_fdt_up_current(priv)) {
     if (goodix_fdt_up_record(dev, payload, payload_len)) return;
     goodix_fdt_up_maybe_complete(dev);
     return;
@@ -566,6 +613,7 @@ static void goodix_receive_protocol_full(FpDevice *dev, guint8 *data,
       return;
     }
     priv->configuration_missing=FALSE;
+    priv->configuration_generation++;
   }
   goodix_receive_done(dev, payload, payload_len, NULL);
 }
@@ -625,7 +673,8 @@ static gboolean goodix_batch_configuration(FpDevice *dev, const guint8 *data,
         }
         return FALSE;
       }
-      if (cmd == 0x34 && additive && goodix_fdt_up_current(priv)) {
+      if (additive && goodix_fdt_reverse_record(dev, cmd, body, body_len)) return TRUE;
+      if (cmd == priv->fdt_event_opcode && additive && goodix_fdt_up_current(priv)) {
         if (goodix_fdt_up_record(dev, body, body_len)) return TRUE;
       }
       if (cmd == GOODIX_CMD_ACK && additive && body_len == 2 &&
@@ -1001,7 +1050,7 @@ void goodix_send_protocol(
           g_error_new_literal(G_IO_ERROR, G_IO_ERROR_CANCELLED, "Goodix transport is cancelling"));
       return;
     }
-    if (priv->fdt_up_callback && (cmd != 0x34 ||
+    if (priv->fdt_up_callback && (cmd != priv->fdt_event_opcode ||
         !payload || length != 40 || priv->fdt_up_phases_sent >= 2 ||
         payload[26] != priv->fdt_up_phases_sent || reply ||
         priv->fdt_up_acks != priv->fdt_up_phases_sent ||
@@ -1009,7 +1058,19 @@ void goodix_send_protocol(
         priv->fdt_up_read_loop != priv->read_loop_generation)) {
       if (free_func) free_func(payload);
       if (callback) callback(dev, NULL, 0, user_data,
-          g_error_new_literal(G_IO_ERROR, G_IO_ERROR_BUSY, "Finger removal owns the transport"));
+          g_error_new_literal(G_IO_ERROR, G_IO_ERROR_BUSY, "FDT event owns the transport"));
+      return;
+    }
+    if (priv->fdt_up_callback && g_get_monotonic_time() >= priv->fdt_event_deadline) {
+      guint64 event_generation = priv->fdt_up_generation;
+      if (free_func) free_func(payload);
+      error = g_error_new_literal(G_IO_ERROR, G_IO_ERROR_TIMED_OUT, "FDT event deadline expired");
+      priv->terminal_error = TRUE;
+      if (callback) callback(dev, NULL, 0, user_data, g_error_copy(error));
+      /* A callback may cancel or replace its owner. Do not finish a successor. */
+      if (event_generation == priv->fdt_up_generation && priv->fdt_up_callback)
+        goodix_fdt_up_done(dev, error);
+      else g_clear_error(&error);
       return;
     }
     if (priv->configuration_missing && (cmd == 0x20 || cmd == 0x32 || cmd == 0x34 || cmd == 0x36)) {
@@ -1350,6 +1411,12 @@ void goodix_send_enable_chip(FpDevice *dev, gboolean enable,
 
 void goodix_send_reset(FpDevice *dev, gboolean reset_sensor, guint8 sleep_time,
                        GoodixResetCallback callback, gpointer user_data) {
+  /* An attempted reset invalidates any previously measured reference even
+   * if submission fails. Only a new acknowledged configuration restores it. */
+  FpiDeviceGoodixTlsPrivate *priv =
+      fpi_device_goodixtls_get_instance_private(FPI_DEVICE_GOODIXTLS(dev));
+  priv->configuration_missing = TRUE;
+  priv->configuration_generation++;
   // Only support reset sensor
 
   GoodixReset payload = {.soft_reset_mcu = FALSE,
@@ -1511,6 +1578,10 @@ gboolean goodix_dev_init(FpDevice *dev, GError **error) {
     g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_BUSY, "Goodix transport already initialized");
     return FALSE;
   }
+  priv->terminal_error=FALSE;
+  priv->configuration_missing=TRUE;
+  priv->configuration_conflict=FALSE;
+  priv->configuration_generation++;
   priv->first_error_logged=FALSE;
   priv->rx_endpoint=-1;priv->rx_requested=priv->rx_actual=-1;
   priv->timeout = NULL;
@@ -1891,8 +1962,8 @@ void goodix_cancel(FpDevice *dev)
     g_object_ref(dev);
     priv->cancelling = TRUE;
     if (priv->fdt_up_callback)
-        g_message("goodix-up-cancel phases-sent=%u ack-mask=0x%x event-seen=%u owner-current-before-cancel=%u",
-                  priv->fdt_up_phases_sent, (1u << priv->fdt_up_acks) - 1,
+        g_message("goodix-%s-cancel phases-sent=%u ack-mask=0x%x event-seen=%u owner-current-before-cancel=%u",
+                  priv->fdt_event_opcode == 0x32 ? "down" : "up", priv->fdt_up_phases_sent, (1u << priv->fdt_up_acks) - 1,
                   (guint)priv->fdt_up_received, (guint)goodix_fdt_up_current(priv));
     goodix_stop_read_loop(dev);
     if (priv->ack || priv->reply)
@@ -1905,7 +1976,7 @@ void goodix_cancel(FpDevice *dev)
             g_error_new_literal(G_IO_ERROR, G_IO_ERROR_CANCELLED, "Goodix TLS cancelled"));
     if (priv->fdt_up_callback)
         goodix_fdt_up_done(dev,
-            g_error_new_literal(G_IO_ERROR, G_IO_ERROR_CANCELLED, "Finger removal cancelled"));
+            g_error_new_literal(G_IO_ERROR, G_IO_ERROR_CANCELLED, priv->fdt_event_opcode == 0x32 ? "Finger placement cancelled" : "Finger removal cancelled"));
     if (priv->tls_ready_callback)
         candidate_tls_finish(dev,
             g_error_new_literal(G_IO_ERROR, G_IO_ERROR_CANCELLED, "Goodix TLS cancelled"));
@@ -1918,3 +1989,37 @@ void goodix_cancel(FpDevice *dev)
 static void fpi_device_goodixtls_init(FpiDeviceGoodixTls *self) {}
 
 static void fpi_device_goodixtls_class_init(FpiDeviceGoodixTlsClass *class) {}
+
+gboolean goodix_transport_health(FpDevice *dev, GoodixTransportHealth *snapshot,
+                                  GError **error)
+{
+    FpiDeviceGoodixTlsPrivate *priv =
+        fpi_device_goodixtls_get_instance_private(FPI_DEVICE_GOODIXTLS(dev));
+    g_return_val_if_fail(snapshot != NULL, FALSE);
+    *snapshot = (GoodixTransportHealth) {0};
+    if (priv->terminal_error || !priv->inited ||
+        priv->cancelling || !priv->transfer_cancel_tkn ||
+        g_cancellable_is_cancelled(priv->transfer_cancel_tkn)) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_CLOSED,
+                            "Goodix receive transport is not healthy");
+        return FALSE;
+    }
+    if (priv->configuration_missing || priv->configuration_conflict) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_INITIALIZED,
+                            "Acquisition configuration unavailable");
+        return FALSE;
+    }
+    if (priv->ack || priv->reply || priv->callback || priv->fdt_up_callback ||
+        priv->tls_ssm || priv->tls_ready_callback || priv->timeout || priv->length) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_BUSY,
+                            "Goodix transport has an unfinished operation");
+        return FALSE;
+    }
+    if (!goodix_tls_server_health(priv->tls_hop, error)) return FALSE;
+    *snapshot = (GoodixTransportHealth) {
+        priv->read_loop_generation, priv->tls_generation,
+        priv->configuration_generation
+    };
+    return TRUE;
+}
+/* End transport health */

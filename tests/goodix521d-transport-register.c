@@ -32,6 +32,9 @@ typedef struct {
   gpointer user_data;
   GoodixCmdCallback callback;
   FpiSsm *tls_ssm;
+ gint64 fdt_event_deadline;
+ guint8 fdt_event_opcode;
+ gboolean terminal_error;
 } FpiDeviceGoodixTlsPrivate;
 
 static FpiDeviceGoodixTlsPrivate state;
@@ -176,13 +179,15 @@ static void expire(void)
 }
 
 
+void goodix_wait_fdt_down(FpDevice *,guint,GoodixDefaultCallback,gpointer,GDestroyNotify) __attribute__((weak));
+static guint8 event_opcode=0x34;
 static guint up_commands, up_events;
 static GError *up_error;
-static gboolean up_fail_second,up_cancel_after_first;
+static gboolean up_fail_second,up_cancel_after_first,up_expire_second;
 static void up_event(FpDevice *d,guint8 *data,guint16 length,gpointer user,GError *error)
 {
   up_events++;g_assert_null(up_error);up_error=error;
-  if (!error) {g_assert_cmpuint(length,==,20);g_assert_cmpuint(data[1],==,2);}
+  if (!error) {g_assert_cmpuint(length,==,20);g_assert_cmpuint(data[1],==,event_opcode==0x34?2:0);}
 }
 static void up_phase(FpDevice *d,guint8 *data,guint16 length,gpointer user,GError *error)
 {
@@ -192,20 +197,22 @@ static void up_phase(FpDevice *d,guint8 *data,guint16 length,gpointer user,GErro
     if(up_cancel_after_first) {
       goodix_fdt_up_done(d,g_error_new_literal(G_IO_ERROR,G_IO_ERROR_CANCELLED,"synthetic between-phase cancellation"));return;
     }
+    if(up_expire_second)state.fdt_event_deadline=g_get_monotonic_time()-1;
     if(up_fail_second)write_error=g_error_new_literal(G_IO_ERROR,G_IO_ERROR_BROKEN_PIPE,"synthetic phase1 write failure");
     guint8 payload[40]={0x8e,1};payload[26]=1;
-    goodix_send_protocol(d,0x34,payload,40,NULL,TRUE,1000,FALSE,up_phase,GUINT_TO_POINTER(1));
+    goodix_send_protocol(d,event_opcode,payload,40,NULL,TRUE,1000,FALSE,up_phase,GUINT_TO_POINTER(1));
   }
 }
 static void up_prepare(void)
 {
-  reset();up_commands=up_events=0;up_fail_second=up_cancel_after_first=FALSE;g_clear_error(&up_error);
-  goodix_wait_fdt_up(device,30000,up_event,NULL,NULL);
+  reset();up_commands=up_events=0;up_fail_second=up_cancel_after_first=up_expire_second=FALSE;g_clear_error(&up_error);
+  if(event_opcode==0x34) goodix_wait_fdt_up(device,30000,up_event,NULL,NULL);
+  else {g_assert_nonnull(goodix_wait_fdt_down);goodix_wait_fdt_down(device,30000,up_event,NULL,NULL);}
 }
 static void up_start(void)
 {
   guint8 payload[40]={0x8e,1};
-  goodix_send_protocol(device,0x34,payload,40,NULL,TRUE,1000,FALSE,up_phase,NULL);
+  goodix_send_protocol(device,event_opcode,payload,40,NULL,TRUE,1000,FALSE,up_phase,NULL);
 }
 static guint packet(guint8 *out,guint8 cmd,const guint8 *body,guint n)
 {
@@ -215,71 +222,135 @@ static guint packet(guint8 *out,guint8 cmd,const guint8 *body,guint n)
 }
 static void up_early_test(void)
 {
-  const guint8 event[20]={0,2},receipt[2]={0x34,1};
+  const guint8 event[20]={event_opcode==0x32?2:0,event_opcode==0x34?2:0},receipt[2]={event_opcode,1};
   for(guint order=0;order<5;order++) {
     up_prepare();up_start();g_assert_cmpuint(writes,==,1);g_assert_cmpuint(up_commands,==,0);
-    if(order==0) {receive(0x34,event,20);ack(0x34,1);}
+    if(order==0) {receive(event_opcode,event,20);ack(event_opcode,1);}
     else if(order<3) {
-      guint8 joined[38];guint n=packet(joined,order==1?0x34:0xb0,order==1?event:receipt,order==1?20:2);
-      n+=packet(joined+n,order==1?0xb0:0x34,order==1?receipt:event,order==1?2:20);
+      guint8 joined[38];guint n=packet(joined,order==1?event_opcode:0xb0,order==1?event:receipt,order==1?20:2);
+      n+=packet(joined+n,order==1?0xb0:event_opcode,order==1?receipt:event,order==1?2:20);
       goodix_receive_pack(device,joined,n);
-    } else {ack(0x34,1);if(order==3)receive(0x34,event,20);}
+    } else {ack(event_opcode,1);if(order==3)receive(event_opcode,event,20);}
     g_assert_cmpuint(writes,==,2);g_assert_cmpuint(up_events,==,0);
-    ack(0x34,1);if(order==4) {g_assert_cmpuint(up_events,==,0);receive(0x34,event,20);}
+    ack(event_opcode,1);if(order==4) {g_assert_cmpuint(up_events,==,0);receive(event_opcode,event,20);}
     g_assert_cmpuint(up_commands,==,2);g_assert_cmpuint(up_events,==,1);g_assert_no_error(up_error);
-    ack(0x34,1);receive(0x34,event,20);g_assert_cmpuint(up_events,==,1);
+    ack(event_opcode,1);receive(event_opcode,event,20);g_assert_cmpuint(up_events,==,1);
   }
   puts("PASS: phase0/phase1 events and either coalesced order require both ordered ACKs exactly once");
 
   up_prepare();guint8 skipped_phase[40]={0x8e,1};skipped_phase[26]=1;
-  goodix_send_protocol(device,0x34,skipped_phase,40,NULL,TRUE,1000,FALSE,command_completed,&state);
+  goodix_send_protocol(device,event_opcode,skipped_phase,40,NULL,TRUE,1000,FALSE,command_completed,&state);
   g_assert_cmpuint(writes,==,0);g_assert_error(completion_error,G_IO_ERROR,G_IO_ERROR_BUSY);
   g_assert_false(state.fdt_up_started);g_assert_cmpuint(up_events,==,0);
   goodix_fdt_up_done(device,g_error_new_literal(G_IO_ERROR,G_IO_ERROR_CANCELLED,"test cleanup"));
   puts("PASS: phase1 cannot skip phase0 or transmit under an unstarted owner");
 
-  up_prepare();receive(0x34,event,20);g_assert_false(state.fdt_up_received);up_start();ack(0x34,1);ack(0x34,1);
+  up_prepare();receive(event_opcode,event,20);g_assert_false(state.fdt_up_received);up_start();ack(event_opcode,1);ack(event_opcode,1);
   g_assert_cmpuint(up_events,==,0);goodix_fdt_up_timeout_cb(device,NULL);
   g_assert_error(up_error,G_IO_ERROR,G_IO_ERROR_TIMED_OUT);
   g_assert_nonnull(strstr(up_error->message,"phases-sent=2 ack-mask=0x3 event-seen=0 owner-current=1"));
   puts("PASS: pre-arm event cannot release and timeout retains bounded scalar diagnosis");
 
   up_prepare();up_start();guint8 joined[48];guint n=packet(joined,0xb0,receipt,2);
-  n+=packet(joined+n,0xb0,receipt,2);n+=packet(joined+n,0x34,event,20);goodix_receive_pack(device,joined,n);
+  n+=packet(joined+n,0xb0,receipt,2);n+=packet(joined+n,event_opcode,event,20);goodix_receive_pack(device,joined,n);
   g_assert_cmpuint(up_commands,==,1);g_assert_cmpuint(up_events,==,0);g_assert_cmpuint(state.fdt_up_acks,==,1);
-  ack(0x34,1);g_assert_cmpuint(up_events,==,1);g_assert_no_error(up_error);
+  ack(event_opcode,1);g_assert_cmpuint(up_events,==,1);g_assert_no_error(up_error);
   puts("PASS: extra phase0-batch ACK cannot acknowledge successor phase1");
 
   for(guint phase=0;phase<2;phase++) {
-    up_prepare();up_start();if(phase)ack(0x34,1);receive(0x34,event,20);ack(0x34,3);
+    up_prepare();up_start();if(phase)ack(event_opcode,1);receive(event_opcode,event,20);ack(event_opcode,3);
     g_assert_cmpuint(up_events,==,1);g_assert_nonnull(up_error);g_assert_true(state.configuration_missing);
   }
   puts("PASS: configuration loss in either phase invalidates even a buffered UP");
 
-  up_prepare();up_fail_second=TRUE;up_start();receive(0x34,event,20);ack(0x34,1);
+  up_prepare();up_fail_second=TRUE;up_start();receive(event_opcode,event,20);ack(event_opcode,1);
   g_assert_cmpuint(up_events,==,1);g_assert_error(up_error,G_IO_ERROR,G_IO_ERROR_BROKEN_PIPE);
   g_assert_cmpuint(writes,==,2);puts("PASS: phase1 write failure cannot publish buffered UP");
 
-  up_prepare();up_cancel_after_first=TRUE;up_start();receive(0x34,event,20);ack(0x34,1);
+  up_prepare();up_cancel_after_first=TRUE;up_start();receive(event_opcode,event,20);ack(event_opcode,1);
   g_assert_cmpuint(writes,==,1);g_assert_cmpuint(up_events,==,1);g_assert_error(up_error,G_IO_ERROR,G_IO_ERROR_CANCELLED);
   puts("PASS: between-phase cancellation prevents phase1 and buffered release");
 
   for(guint kind=0;kind<4;kind++) {
     up_prepare();up_start();
-    if(kind==0)receive_full(0x34,event,20,TRUE);
-    else if(kind==1) {guint8 down[20]={2,0};receive(0x34,down,20);}
-    else if(kind==2)receive(0x34,event,19);
+    if(kind==0)receive_full(event_opcode,event,20,TRUE);
+    else if(kind==1) {guint8 down[20]={event_opcode==0x34?2:0,event_opcode==0x32?2:0};receive(event_opcode,down,20);}
+    else if(kind==2)receive(event_opcode,event,19);
     else goodix_receive_timeout_cb(device,NULL);
     g_assert_cmpuint(up_events,==,1);g_assert_nonnull(up_error);g_assert_cmpuint(writes,==,1);
   }
   puts("PASS: phase0 bad checksum/IRQ/length/ACK-timeout never advance or release");
 
-  up_prepare();up_start();receive(0x36,event,20);g_assert_false(state.fdt_up_received);
-  ack(0x34,1);ack(0x34,1);state.read_loop_generation++;receive(0x34,event,20);
+  up_prepare();up_start();receive(0x36,event,20);
+  receive(event_opcode==0x32?0x34:0x32,event,20);g_assert_false(state.fdt_up_received);
+  ack(event_opcode,1);ack(event_opcode,1);state.read_loop_generation++;receive(event_opcode,event,20);
   g_assert_cmpuint(up_events,==,0);goodix_fdt_up_timeout_cb(device,NULL);
   g_assert_nonnull(strstr(up_error->message,"owner-current=0"));
   puts("PASS: wrong opcode and stale read generation cannot satisfy the two-phase owner");
   g_clear_error(&up_error);
+  up_prepare();up_start();ack(event_opcode,1);ack(event_opcode,1);
+  state.fdt_event_deadline=g_get_monotonic_time()-1;
+  receive(event_opcode,event,20);
+  g_assert_cmpuint(up_events,==,1);g_assert_error(up_error,G_IO_ERROR,G_IO_ERROR_TIMED_OUT);
+  puts("PASS: expired event deadline rejects completion even before timer dispatch");
+  g_clear_error(&up_error);
+  up_prepare();up_start();receive(event_opcode,event,20);
+  state.fdt_event_deadline=g_get_monotonic_time()-1;
+  ack(event_opcode,1);
+  g_assert_cmpuint(up_events,==,1);g_assert_error(up_error,G_IO_ERROR,G_IO_ERROR_TIMED_OUT);
+  g_assert_cmpuint(writes,==,1);g_assert_false(state.ack || state.reply);
+  puts("PASS: late phase0 ACK cannot start phase1 or publish buffered event");
+  g_clear_error(&up_error);
+  up_prepare();state.fdt_event_deadline=g_get_monotonic_time()-1;up_start();
+  g_assert_cmpuint(writes,==,0);g_assert_cmpuint(up_events,==,1);g_assert_error(up_error,G_IO_ERROR,G_IO_ERROR_TIMED_OUT);
+  g_clear_error(&up_error);
+  up_prepare();up_expire_second=TRUE;up_start();ack(event_opcode,1);
+  g_assert_cmpuint(writes,==,1);g_assert_cmpuint(up_events,==,1);g_assert_error(up_error,G_IO_ERROR,G_IO_ERROR_TIMED_OUT);
+  g_clear_error(&up_error);
+  puts("PASS: expired owner sends neither initial phase nor delayed successor phase");
+}
+
+static void reverse_fault_test(void)
+{
+  const guint8 opcodes[]={0x32,0x34};
+  const guint8 active[]={0,0x20,0x36};
+  for(guint i=0;i<2;i++)for(guint j=0;j<3;j++)for(guint r=0;r<2;r++) {
+    reset();state.cmd=active[j];state.ack=state.reply=active[j]!=0;state.callback=command_completed;state.user_data=&state;
+    guint8 event[20]={r?0x82:0x80,0};receive(opcodes[i],event,20);
+    g_assert_true(state.terminal_error);g_assert_cmpuint(completions,==,active[j]?1:0);
+    if(active[j])g_assert_nonnull(completion_error);
+    g_assert_false(state.ack || state.reply);
+  }
+  reset();guint8 ordinary[20]={2,0};receive(0x32,ordinary,20);g_assert_false(state.terminal_error);
+  guint8 opaque[20]={0x80,0};receive(0x20,opaque,20);g_assert_false(state.terminal_error);
+  reset();state.cmd=0x20;state.ack=state.reply=TRUE;state.callback=command_completed;state.user_data=&state;
+  receive(0x32,ordinary,20);g_assert_false(state.terminal_error);g_assert_cmpuint(completions,==,0);
+  goodix_receive_done(device,NULL,0,g_error_new_literal(G_IO_ERROR,G_IO_ERROR_CANCELLED,"test cleanup"));
+  reset();receive(0x32,opaque,19);g_assert_false(state.terminal_error);
+  for(guint r=0;r<2;r++)for(guint joined_mode=0;joined_mode<2;joined_mode++) {
+    guint8 manual[20]={r?0x82:0x80,0},receipt[2]={0x36,1},joined[38];
+    reset();state.cmd=0x36;state.ack=state.reply=TRUE;state.callback=command_completed;state.user_data=&state;
+    if(joined_mode) {
+      guint n=packet(joined,0xb0,receipt,2);n+=packet(joined+n,0x36,manual,20);
+      goodix_receive_pack(device,joined,n);
+    } else {ack(0x36,1);receive(0x36,manual,20);}
+    g_assert_cmpuint(completions,==,1);g_assert_no_error(completion_error);g_assert_false(state.terminal_error);
+    reset();receive(0x36,manual,20);g_assert_false(state.terminal_error);
+  }
+  puts("PASS: owned and unsolicited manual36 IRQ0080/0082 remain snapshots, not reverse events");
+  guint8 saved_opcode=event_opcode;
+  for(guint i=0;i<2;i++) {
+    event_opcode=i?0x34:0x32;up_prepare();up_start();ack(event_opcode,1);
+    guint8 event[20]={i?0:2,i?2:0},receipt[2]={event_opcode,1},joined[66];
+    guint n=packet(joined,event_opcode,event,20);
+    n+=packet(joined+n,0xb0,receipt,2);n+=packet(joined+n,i?0x32:0x34,opaque,20);
+    goodix_receive_pack(device,joined,n);
+    g_assert_true(state.terminal_error);g_assert_cmpuint(up_events,==,1);g_assert_nonnull(up_error);
+    g_assert_cmpuint(up_commands,==,2);g_clear_error(&up_error);
+  }
+  event_opcode=saved_opcode;
+  puts("PASS: reverse after apparent event/ACK success aborts the whole owned batch before publication");
+  puts("PASS: only exact qualified FDT reverse events invalidate active or idle transport");
 }
 
 int main(void)
@@ -353,6 +424,9 @@ int main(void)
   g_assert_error(completion_error, G_IO_ERROR, G_IO_ERROR_NOT_INITIALIZED);
   puts("PASS: ACK80/03 records configuration loss and blocks the following UP command before any write");
 
+  reverse_fault_test();
   up_early_test();
+  event_opcode=0x32;up_early_test();
+  puts("PASS: complete two-phase safety matrix also holds for DOWN opcode32/IRQ0002");
   reset(); g_object_unref(device); return 0;
 }

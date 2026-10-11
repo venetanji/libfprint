@@ -19,7 +19,9 @@ struct _GoodixAcquisition {
   guint frames, refs;
   guint64 generation;
   guint8 last_down[20];
-  guint8 down[39];
+  guint8 reference_seed[16], down_seed[16];
+  gboolean context_valid, reference_seed_valid, refresh_required, reference_pending;
+  guint8 pending_reference_seed[16];
   GoodixAcquired callback;
   gpointer user_data;
   gboolean reference, cancelled;
@@ -82,7 +84,7 @@ acquisition_continue (GoodixAcquisition *self, FpiSsm *ssm)
 
 #include "goodix-paired-reference.h"
 
-enum { CONTACT_DOWN0, CONTACT_DOWN1, CONTACT_MODE, CONTACT_REGISTER,
+enum { CONTACT_DOWN0, CONTACT_DOWN1, CONTACT_MANUAL0, CONTACT_MANUAL1, CONTACT_REGISTER,
        CONTACT_IMAGE, CONTACT_RESTORE, CONTACT_UP0, CONTACT_UP1, CONTACT_STATES };
 
 static void
@@ -92,44 +94,69 @@ acquisition_complete (FpiSsm *ssm, FpDevice *device, GError *error)
   GoodixAcquired callback = self->callback;
   gpointer user_data = self->user_data;
   GxImage image = self->reference ? self->paired_images[0] : self->contact;
+  GoodixAcquiredOutcome outcome = self->refresh_required ? GOODIX_ACQUIRED_REFRESH_REQUIRED : GOODIX_ACQUIRED_IMAGE;
+  if (!error && self->reference) {
+    if (!self->paired_f1_valid || gx_fdt_seed(self->paired_fdt[0],16,self->pending_reference_seed)!=GX_OK)
+      error=fpi_device_error_new(FP_DEVICE_ERROR_PROTO);
+    else {
+      self->reference_pending=TRUE;
+      self->context_valid=FALSE;
+    }
+  }
+  if (error || outcome==GOODIX_ACQUIRED_REFRESH_REQUIRED) goodix_acquisition_invalidate_context(self);
   acquisition_timing_complete (self, error);
   self->ssm = NULL;
   self->callback = NULL;
   memset (self->paired_images, 0, sizeof self->paired_images);
   memset (&self->contact, 0, sizeof self->contact);
-  callback (device, error ? NULL : &image, user_data, error);
+  callback (device, error || outcome==GOODIX_ACQUIRED_REFRESH_REQUIRED ? NULL : &image, outcome, user_data, error);
   memset (&image, 0, sizeof image);
 }
 
 static void
-contact_command (FpDevice *device, guint8 *data, guint16 length, gpointer user_data, GError *error)
+contact_manual (FpDevice *device, guint8 *data, guint16 length, gpointer user_data, GError *error)
 {
   FpiSsm *ssm=user_data;
   GoodixAcquisition *self=fpi_ssm_get_data(ssm);
-  if (!error && fpi_ssm_get_cur_state(ssm)==CONTACT_DOWN1) {
-    if (!data || length!=20 || data[0]!=2 || data[1]!=0)
-      error=fpi_device_error_new_msg(FP_DEVICE_ERROR_PROTO,"Invalid current Goodix DOWN event");
-    else {
-      memcpy(self->last_down,data,20);
-      acquisition_timing_transition (self, "contact-burst");
-      fpi_device_report_finger_status(device,FP_FINGER_STATUS_NEEDED | FP_FINGER_STATUS_PRESENT);
-      if (!acquisition_continue(self,ssm)) return;
-    }
+  (void)device;
+  if (error) { fpi_ssm_mark_failed(ssm,error);return; }
+  if (!acquisition_continue(self,ssm)) return;
+  if (fpi_ssm_get_cur_state(ssm)==CONTACT_MANUAL0) {
+    fpi_ssm_next_state(ssm);return;
   }
-  if (error) fpi_ssm_mark_failed (user_data, error);
-  else fpi_ssm_next_state (user_data);
+  GxFields fields;gboolean equal;
+  if (fpi_ssm_get_cur_state(ssm)!=CONTACT_MANUAL1 || !data || length!=20 ||
+      gx_fields(self->otp,64,&fields)!=GX_OK ||
+      gx_preburst_fdt_equal(self->last_down+4,data+4,fields.timing,&equal)!=GX_OK) {
+    fpi_ssm_mark_failed(ssm,fpi_device_error_new(FP_DEVICE_ERROR_PROTO));return;
+  }
+  if (equal) {
+    /* Windows requests reference refresh here. Conservatively obtain a real
+     * current-contact UP first; similarity alone never proves reader absence. */
+    self->refresh_required=TRUE;self->context_valid=FALSE;
+    acquisition_timing_transition(self,"contact-up");
+    fpi_ssm_jump_to_state(ssm,CONTACT_UP0);
+  } else {
+    acquisition_timing_transition(self,"contact-burst");
+    fpi_ssm_next_state(ssm);
+  }
 }
 
 static void
 contact_register (FpDevice *device, gpointer user_data, GError *error)
 {
+  FpiSsm *ssm=user_data;
+  GoodixAcquisition *self=fpi_ssm_get_data(ssm);
   (void)device;
-  if (error) fpi_ssm_mark_failed (user_data, error);
-  else {
-    if (fpi_ssm_get_cur_state (user_data) == CONTACT_RESTORE)
-      acquisition_timing_transition (fpi_ssm_get_data (user_data), "contact-up");
-    fpi_ssm_next_state (user_data);
-  }
+  if (error) { fpi_ssm_mark_failed(ssm,error);return; }
+  if (!acquisition_continue(self,ssm)) return;
+  if (fpi_ssm_get_cur_state(ssm)==CONTACT_RESTORE) {
+    if (self->frames<10) fpi_ssm_jump_to_state(ssm,CONTACT_REGISTER);
+    else {
+      acquisition_timing_transition(self,"contact-up");
+      fpi_ssm_next_state(ssm);
+    }
+  } else fpi_ssm_next_state(ssm);
 }
 
 static void
@@ -143,12 +170,9 @@ contact_image (FpDevice *device, guint8 *data, guint16 length, gpointer user_dat
   if (error) { fpi_ssm_mark_failed (ssm, error); return; }
   if (gx_image_blob (data, length, prefix, generation, generation, &self->contact) != GX_OK)
     { fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO)); return; }
-  if (++self->frames < 10)
-    fpi_ssm_jump_to_state (ssm, CONTACT_MODE);
-  else {
-    acquisition_timing_transition (self, "contact-restore");
-    fpi_ssm_jump_to_state (ssm, CONTACT_RESTORE);
-  }
+  self->frames++;
+  if (self->frames==10) acquisition_timing_transition(self,"contact-restore");
+  fpi_ssm_jump_to_state(ssm,CONTACT_RESTORE);
 }
 
 typedef struct { GoodixAcquisition *self; FpDevice *device; guint64 generation; } UpOwner;
@@ -166,9 +190,38 @@ static void contact_removed(FpDevice *device,guint8 *data,guint16 length,gpointe
   if (error) fpi_ssm_mark_failed(self->ssm,error);
   else {
     FpiSsm *ssm=self->ssm;
+    if (!acquisition_continue(self,ssm)) return;
+    if (fpi_ssm_get_cur_state(ssm)!=CONTACT_UP1 || gx_fdt_seed(data+4,16,self->down_seed)!=GX_OK) {
+      fpi_ssm_mark_failed(ssm,fpi_device_error_new(FP_DEVICE_ERROR_PROTO));return;
+    }
     fpi_device_report_finger_status(device,FP_FINGER_STATUS_NONE);
     if (acquisition_continue(self,ssm)) fpi_ssm_mark_completed(ssm);
   }
+}
+static void contact_down(FpDevice *device,guint8 *data,guint16 length,gpointer user_data,GError *error) {
+  UpOwner *owner=user_data;GoodixAcquisition *self=owner->self;
+  if (!self->ssm || self->generation!=owner->generation) {g_clear_error(&error);return;}
+  FpiSsm *ssm=self->ssm;
+  if (error) {fpi_ssm_mark_failed(ssm,error);return;}
+  if (!acquisition_continue(self,ssm)) return;
+  if(fpi_ssm_get_cur_state(ssm)!=CONTACT_DOWN1 || !data || length!=20 || data[0]!=2 || data[1]!=0) {
+    fpi_ssm_mark_failed(ssm,fpi_device_error_new(FP_DEVICE_ERROR_PROTO));return;
+  }
+  memcpy(self->last_down,data,20);
+  acquisition_timing_transition(self,"contact-preburst");
+  fpi_device_report_finger_status(device,FP_FINGER_STATUS_NEEDED|FP_FINGER_STATUS_PRESENT);
+  if(acquisition_continue(self,ssm)) fpi_ssm_next_state(ssm);
+}
+static void contact_down_ack(FpDevice *device,guint8 *data,guint16 length,gpointer user_data,GError *error) {
+  UpOwner *owner=user_data;GoodixAcquisition *self=owner->self;
+  (void)device;(void)data;(void)length;
+  if(self->ssm && self->generation==owner->generation) {
+    FpiSsm *ssm=self->ssm;
+    if(error) fpi_ssm_mark_failed(ssm,error);
+    else if(acquisition_continue(self,ssm) && fpi_ssm_get_cur_state(ssm)==CONTACT_DOWN0)
+      fpi_ssm_next_state(ssm);
+  } else g_clear_error(&error);
+  up_owner_free(owner);
 }
 static void contact_up_phase0_ack(FpDevice *device,guint8 *data,guint16 length,gpointer user_data,GError *error) {
   UpOwner *owner=user_data;GoodixAcquisition *self=owner->self;
@@ -202,12 +255,6 @@ contact_run (FpiSsm *ssm, FpDevice *device)
 {
   GoodixAcquisition *self = fpi_ssm_get_data (ssm);
   if (!acquisition_continue(self,ssm)) return;
-  /* This is the v3 settled contact recipe. Its static mode table is retained;
-   * image requests use all four factory-decoded DAC words. */
-  static const guint8 mode[27] = {
-    0x0d,0x01,0x27,0x01,0x21,0x01,0x27,0x01,0x23,0x01,
-    0x8d,0x8d,0x86,0x86,0x97,0x97,0x8f,0x8f,0x9b,0x9b,
-    0x92,0x92,0x96,0x96,0x8c,0x8c,0x01 };
   GxFields fields;
   guint8 request[10] = {0x45,0x03};
   if (gx_fields (self->otp,64,&fields) != GX_OK)
@@ -215,21 +262,36 @@ contact_run (FpiSsm *ssm, FpDevice *device)
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case CONTACT_DOWN0:
-    case CONTACT_DOWN1:
-      self->down[26] = fpi_ssm_get_cur_state (ssm) == CONTACT_DOWN1;
-      goodix_send_mcu_switch_to_fdt_down (device,self->down,sizeof self->down,
-         self->down[26],NULL,contact_command,ssm);
+    case CONTACT_DOWN1: {
+      guint phase=fpi_ssm_get_cur_state(ssm)==CONTACT_DOWN1;
+      guint8 payload[40];
+      if(!self->context_valid || gx_down_request(self->otp,self->down_seed,16,phase,payload)!=GX_OK) {
+        fpi_ssm_mark_failed(ssm,fpi_device_error_new_msg(FP_DEVICE_ERROR_PROTO,"Detector context is not ready"));return;
+      }
+      if(!phase) {
+        guint64 generation=self->generation;
+        goodix_wait_fdt_down(device,30000,contact_down,up_owner_new(self),up_owner_free);
+        if(!self->ssm || self->generation!=generation || !acquisition_continue(self,ssm)) return;
+      }
+      goodix_send_protocol(device,0x32,payload,40,NULL,TRUE,GOODIX_TIMEOUT,FALSE,contact_down_ack,up_owner_new(self));
       break;
-    case CONTACT_MODE:
-      goodix_send_mcu_switch_to_fdt_mode (device,(guint8 *)mode,sizeof mode,FALSE,NULL,contact_command,ssm);
+    }
+    case CONTACT_MANUAL0:
+    case CONTACT_MANUAL1: {
+      guint phase=fpi_ssm_get_cur_state(ssm)==CONTACT_MANUAL1;
+      guint8 payload[27];
+      if(gx_contact_manual_request(self->otp,self->reference_seed,16,phase,payload)!=GX_OK) {
+        fpi_ssm_mark_failed(ssm,fpi_device_error_new(FP_DEVICE_ERROR_PROTO));return;
+      }
+      goodix_send_protocol(device,0x36,payload,27,NULL,TRUE,GOODIX_TIMEOUT,phase,contact_manual,ssm);
       break;
+    }
     case CONTACT_REGISTER:
       goodix_send_write_sensor_register (device,0x022c,(self->otp[23]&0x80)?0x0305:0x030a,contact_register,ssm);
       break;
     case CONTACT_RESTORE:
-      /* The GF5298 Windows image-success wrapper restores this register before
-       * returning to FDT arming (RVA 5a2bc/5a2f7). Preserve the established burst,
-       * then require this volatile write's ACK before either UP phase. */
+      /* Every successful Windows image wrapper restores before its caller
+       * proceeds (RVA5a2bc/5a2f7), including between burst images. */
       goodix_send_write_sensor_register(device,0x022c,0x020a,contact_register,ssm);
       break;
     case CONTACT_UP0:
@@ -263,19 +325,9 @@ contact_run (FpiSsm *ssm, FpDevice *device)
 GoodixAcquisition *
 goodix_acquisition_new (FpDevice *device, const guint8 factory[64])
 {
-  static const guint8 down[39] = {
-    0x9c,0x01,0x27,0x01,0x21,0x01,0x21,0x01,0x23,0x01,
-    0x8d,0x8d,0x86,0x86,0x97,0x97,0x8f,0x8f,0x9b,0x9b,
-    0x92,0x92,0x96,0x96,0x8c,0x8c,0x00,0x00,0x05,0x03,
-    0xa7,0x00,0xa1,0x00,0xa7,0x00,0xa3,0x00,0x00 };
   GoodixAcquisition *self = g_new0 (GoodixAcquisition,1);
   self->device=device;self->refs=1;
   memcpy (self->otp,factory,64);
-  memcpy (self->down,down,sizeof down);
-  self->down[2]=factory[33]; self->down[4]=factory[41];
-  self->down[6]=factory[42]; self->down[8]=factory[43];
-  self->down[32]=factory[26]; self->down[36]=factory[45];
-  self->down[30]=factory[26]+6; self->down[34]=factory[45]+6;
   return self;
 }
 
@@ -302,14 +354,15 @@ void
 goodix_acquisition_start (GoodixAcquisition *self, gboolean reference, GoodixAcquired callback, gpointer user_data)
 {
   g_return_if_fail (self && !self->ssm && callback);
-  self->reference=reference; self->frames=0;self->generation++;self->cancelled=FALSE;
+  self->reference=reference; self->frames=0;self->generation++;self->cancelled=FALSE;self->refresh_required=FALSE;
   gx_timing_begin (&self->timing, self->timing.action_id, g_get_monotonic_time ());
   self->timing_phase = reference ? "reference-acquire" : "contact-down";
   self->timing_active = TRUE;
   memset(self->last_down,0,sizeof self->last_down);
   self->callback=callback; self->user_data=user_data;
   self->paired_retry_count=0;self->paired_f1_valid=FALSE;
-  memset (self->paired_seed,0,sizeof self->paired_seed);
+  if(reference && self->reference_seed_valid) memcpy(self->paired_seed,self->reference_seed,16);
+  else memset(self->paired_seed,0,16);
   memset (self->paired_fdt,0,sizeof self->paired_fdt);
   memset (self->paired_images,0,sizeof self->paired_images);
   self->ssm=fpi_ssm_new (self->device,reference?paired_reference_run:contact_run,
@@ -321,5 +374,25 @@ goodix_acquisition_start (GoodixAcquisition *self, gboolean reference, GoodixAcq
 void
 goodix_acquisition_cancel (GoodixAcquisition *self)
 {
-  if (self) self->cancelled=TRUE;
+  if (self) {self->cancelled=TRUE;goodix_acquisition_invalidate_context(self);}
+}
+
+void
+goodix_acquisition_invalidate_context (GoodixAcquisition *self)
+{
+  if (!self) return;
+  self->context_valid=FALSE;self->reference_seed_valid=FALSE;self->reference_pending=FALSE;
+  memset(self->pending_reference_seed,0,16);
+  memset(self->reference_seed,0,16);memset(self->down_seed,0,16);
+}
+
+gboolean
+goodix_acquisition_commit_reference (GoodixAcquisition *self)
+{
+  if (!self || self->ssm || !self->reference_pending || acquisition_cancelled(self)) return FALSE;
+  memcpy(self->reference_seed,self->pending_reference_seed,16);
+  memcpy(self->down_seed,self->pending_reference_seed,16);
+  memset(self->pending_reference_seed,0,16);
+  self->reference_pending=FALSE;self->reference_seed_valid=TRUE;self->context_valid=TRUE;
+  return TRUE;
 }

@@ -361,3 +361,60 @@ gx_up_request (const guint8 factory[64], const guint8 *down,
   }
   return GX_OK;
 }
+
+GxResult
+gx_fdt_seed (const guint8 *raw, gsize length, guint8 seed[16])
+{
+  if (!seed) return GX_PROFILE;
+  memset(seed,0,16);
+  if (!raw || length!=16) return GX_LENGTH;
+  for (guint i=0;i<8;i++) put16(seed+2*i,(guint16)((le16(raw+2*i)>>1)*257u));
+  return GX_OK;
+}
+
+GxResult
+gx_down_request (const guint8 factory[64], const guint8 *seed,
+                 gsize length, guint phase, guint8 request[40])
+{
+  GxFields fields;
+  if (!request) return GX_PROFILE;
+  memset(request,0,40);
+  if (!seed || length!=16) return GX_LENGTH;
+  if (!factory || phase>1 || gx_fields(factory,64,&fields)!=GX_OK) return GX_PROFILE;
+  request[0]=0x9c;request[1]=1;request[26]=phase;
+  memcpy(request+10,seed,16);
+  request[28]=fields.capture_mode?5:10;request[29]=3;request[38]=3;
+  for(guint i=0;i<4;i++) {
+    put16(request+2+2*i,fields.fdt[i]);put16(request+30+2*i,fields.image[i]);
+  }
+  return GX_OK;
+}
+
+GxResult
+gx_contact_manual_request (const guint8 factory[64], const guint8 *seed,
+                           gsize length, guint phase, guint8 request[27])
+{
+  GxFields fields;
+  if (!request) return GX_PROFILE;
+  memset(request,0,27);
+  if (!seed || length!=16) return GX_LENGTH;
+  if (!factory || phase>1 || gx_fields(factory,64,&fields)!=GX_OK) return GX_PROFILE;
+  request[0]=0x0d;request[1]=1;request[26]=phase;
+  memcpy(request+10,seed,16);
+  for(guint i=0;i<4;i++) put16(request+2+2*i,fields.fdt[i]);
+  return GX_OK;
+}
+
+GxResult
+gx_preburst_fdt_equal (const guint8 down[16], const guint8 manual[16],
+                       guint16 threshold, gboolean *equal)
+{
+  if (!equal) return GX_PROFILE;
+  *equal=FALSE;
+  if (!down || !manual || threshold>10) return GX_PROFILE;
+  for(guint i=0;i<8;i++)
+    if(ABS((gint)(le16(down+2*i)>>1)-(gint)(le16(manual+2*i)>>1))>threshold)
+      return GX_OK;
+  *equal=TRUE;
+  return GX_OK;
+}

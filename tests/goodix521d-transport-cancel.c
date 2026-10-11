@@ -19,6 +19,9 @@ typedef struct {
  GCancellable *transfer_cancel_tkn;
  guint8 cmd,*data;guint32 length;GSource *timeout;
  GoodixCmdCallback callback;gpointer user_data;
+ gint64 fdt_event_deadline;
+ guint8 fdt_event_opcode;
+ gboolean terminal_error;
 } FpiDeviceGoodixTlsPrivate;
 static FpiDeviceGoodixTlsPrivate state;
 static guint cancel_log_count;
@@ -26,7 +29,7 @@ static gchar *cancel_log;
 static void capture_cancel_log(const gchar *domain,GLogLevelFlags level,const gchar *message,gpointer data)
 {
  (void)domain;(void)level;(void)data;
- if(!g_str_has_prefix(message,"goodix-up-cancel "))return;
+ if(!g_str_has_prefix(message,"goodix-up-cancel ") && !g_str_has_prefix(message,"goodix-down-cancel "))return;
  cancel_log_count++;g_free(cancel_log);cancel_log=g_strdup(message);
 }
 
@@ -100,6 +103,16 @@ int main(void){
  g_assert_cmpstr(cancel_log,==,"goodix-up-cancel phases-sent=1 ack-mask=0x1 event-seen=1 owner-current-before-cancel=0");
  g_assert_cmpuint(event_calls,==,1);
  puts("PASS: cancellation snapshot distinguishes stale ownership and buffered event without publishing it");
+
+ reset(dev);cancel_log_count=0;
+ goodix_wait_fdt_down(dev,5000,event_done,g_object_ref(dev),event_destroy);
+ state.fdt_up_started=TRUE;state.fdt_up_phases_sent=1;state.fdt_up_acks=1;
+ state.fdt_up_received=TRUE;state.operation_generation=state.fdt_up_operation+1;
+ goodix_cancel(dev);
+ g_assert_cmpuint(event_calls,==,1);g_assert_cmpuint(event_destroys,==,1);
+ g_assert_cmpstr(cancel_log,==,"goodix-down-cancel phases-sent=1 ack-mask=0x1 event-seen=1 owner-current-before-cancel=1");
+ goodix_cancel(dev);g_assert_cmpuint(event_calls,==,1);g_assert_cmpuint(cancel_log_count,==,1);
+ puts("PASS: DOWN cancellation retains direction-specific precancel counters and dispatches exactly once");
 
  reset(dev);g_clear_object(&state.transfer_cancel_tkn);g_object_unref(dev);
  g_log_remove_handler(NULL,log_handler);g_clear_pointer(&cancel_log,g_free);return 0;}

@@ -163,7 +163,8 @@ void goodix_send_mcu_switch_to_fdt_up(FpDevice *dev, guint8 *mode,
  * waiter, and only after both ordered phase ACKs succeed. timeout_ms is 1..30000.
  * callback owns error and borrows data. destroy(user_data) follows dispatch or
  * cancellation, including rejected registration. No wire transaction ID exists:
- * the caller must serialize arm phases and drain/reset between contacts. */
+ * the caller must serialize arm phases. Generations establish host ownership,
+ * but cannot distinguish identical stale same-opcode events on the wire. */
 void goodix_wait_fdt_up(FpDevice *dev, guint timeout_ms, GoodixDefaultCallback callback,
                        gpointer user_data, GDestroyNotify destroy);
 
@@ -270,3 +271,21 @@ void goodix_tls_read_image(FpDevice* dev, guint8* payload, guint16 length, Goodi
                            gpointer user_data);
 
 // ---- TLS SECTION END ----
+
+/* DOWN counterpart of goodix_wait_fdt_up: register before ACK-only phase0,
+ * then phase1 after its ACK. Exact20-byte opcode32, IRQ LE16 0002 and both
+ * ordered ACKs are required. UP and DOWN waiters are mutually exclusive.
+ * Same callback lifetime and 1..30000ms deadline rules as UP. */
+void goodix_wait_fdt_down(FpDevice *dev, guint timeout_ms, GoodixDefaultCallback callback,
+                         gpointer user_data, GDestroyNotify destroy);
+
+/* Main-thread-only, read-only readiness snapshot. Zeroes snapshot on failure.
+ * Equality is required across reuse; never treat a stopped/restarted transport
+ * as the same reference context. This does not perform I/O or authenticate. */
+typedef struct {
+    guint64 read_loop;
+    guint64 tls;
+    guint64 configuration;
+} GoodixTransportHealth;
+gboolean goodix_transport_health(FpDevice *dev, GoodixTransportHealth *snapshot,
+                                  GError **error);

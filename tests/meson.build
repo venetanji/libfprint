@@ -477,7 +477,7 @@ endif
 if 'goodix521d' in drivers
     goodix521d_inc = include_directories('../libfprint/drivers/goodix521d',
                                          '../libfprint/drivers/goodix521d/chicago')
-    foreach test_name : ['timing', 'input', 'up-request', 'paired-reference', 'session', 'print-envelope', 'registration', 'driver-lifecycle']
+    foreach test_name : ['timing', 'input', 'contact-profile', 'up-request', 'paired-reference', 'session', 'print-envelope', 'registration', 'driver-lifecycle']
         test_link_args = []
         gx_test = executable('goodix521d-' + test_name,
             'goodix521d-' + test_name + '.c',
